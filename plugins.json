@@ -9,7 +9,7 @@
             "sagemoon1996"
         ],
         "description": "FiveTV Arabic streaming provider",
-        "fileSize": 14670,
+        "fileSize": 14766,
         "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
         "language": "ar",
         "tvTypes": [
@@ -18,6 +18,6 @@
         ],
         "iconUrl": "https://new61.5tv.lol/wp-content/uploads/2026/09/yjPlfO23INYLyMWr1yr7rhwJhKO.jpg",
         "apiVersion": 1,
-        "fileHash": "sha256-a29fc57dc04a5e04b429575a10e89b87a5581384a01999865b82f1cef9e0a226"
+        "fileHash": "sha256-e5a070d304fbbbfe2033510c62850a9ec267d31f9bfa7d957272a10f9d9cf458"
     }
 ]
