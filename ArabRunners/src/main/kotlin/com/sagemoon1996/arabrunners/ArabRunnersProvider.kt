@@ -1,19 +1,9 @@
 package com.sagemoon1996.arabrunners
 
-import com.lagradost.cloudstream3.HomePageList
-import com.lagradost.cloudstream3.HomePageResponse
-import com.lagradost.cloudstream3.LoadResponse
-import com.lagradost.cloudstream3.MainAPI
-import com.lagradost.cloudstream3.SearchResponse
-import com.lagradost.cloudstream3.TvSeriesLoadResponse
-import com.lagradost.cloudstream3.TvType
-import com.lagradost.cloudstream3.newHomePageResponse
-import com.lagradost.cloudstream3.newMovieSearchResponse
-import com.lagradost.cloudstream3.newTvSeriesSearchResponse
-import com.lagradost.cloudstream3.newTvSeriesLoadResponse
-import com.lagradost.cloudstream3.newEpisode
-import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
+import java.net.URLEncoder
 
 class ArabRunnersProvider : MainAPI() {
 
@@ -30,221 +20,267 @@ class ArabRunnersProvider : MainAPI() {
         TvType.Movie
     )
 
-    private val runningManUrl =
-        "$mainUrl/category/%d8%a7%d9%84%d9%83%d9%84/%d8%a7%d9%84%d8%b1%d8%ac%d9%84-%d8%a7%d9%84%d8%ac%d8%a7%d8%b1%d9%8a/"
+    override val mainPage = mainPageOf(
+        "$mainUrl/" to "آخر الحلقات المضافة",
+        "$mainUrl/category/%d8%a7%d9%84%d9%83%d9%84/%d8%a7%d9%84%d8%b1%d8%ac%d9%84-%d8%a7%d9%84%d8%ac%d8%a7%d8%b1%d9%8a/" to "الرجل الجاري"
+    )
 
-    private fun Element.toSearchResponse(): SearchResponse? {
-        val link = selectFirst("a[href]")?.attr("href") ?: return null
+    private fun getTitle(element: Element): String? {
+        return element.selectFirst(
+            "img[alt], h1, h2, h3, h4, .title, .entry-title"
+        )?.let {
+            if (it.tagName() == "img") {
+                it.attr("alt")
+            } else {
+                it.text()
+            }
+        }?.trim()?.takeIf {
+            it.isNotBlank()
+        } ?: element.text()
+            .trim()
+            .replace(Regex("\\s+"), " ")
+            .takeIf {
+                it.isNotBlank()
+            }
+    }
 
-        if (!link.contains(mainUrl)) return null
-
-        val title = selectFirst("h2, h3, .title, .entry-title")?.text()
-            ?.trim()
-            ?.takeIf { it.isNotBlank() }
-            ?: text()
-                .trim()
-                .takeIf { it.isNotBlank() }
-                ?: return null
-
-        val poster = selectFirst("img")?.let {
-            it.attr("data-src")
-                .ifBlank { it.attr("src") }
-                .ifBlank { it.attr("data-lazy-src") }
-                .takeIf { url -> url.isNotBlank() }
-        }
-
-        return if (
-            title.contains("الحلقة") ||
-            title.contains("الموسم") ||
-            title.contains("الرجل الجاري")
-        ) {
-            newTvSeriesSearchResponse(
-                name = title,
-                url = link,
-                type = TvType.TvSeries,
-                posterUrl = poster
-            )
-        } else {
-            newMovieSearchResponse(
-                name = title,
-                url = link,
-                type = TvType.Movie,
-                posterUrl = poster
-            )
+    private fun getPoster(element: Element): String? {
+        return element.selectFirst(
+            "img[src], img[data-src], img[data-lazy-src]"
+        )?.let { image ->
+            image.attr("src")
+                .ifBlank {
+                    image.attr("data-src")
+                }
+                .ifBlank {
+                    image.attr("data-lazy-src")
+                }
+                .takeIf {
+                    it.startsWith("http")
+                }
         }
     }
 
-    private fun extractPosts(document: org.jsoup.nodes.Document): List<SearchResponse> {
-        val selectors = listOf(
-            "article",
-            ".post",
-            ".item",
-            ".post-item",
-            ".film-poster-ahref"
-        )
+    private fun makeSearchResponses(
+        document: org.jsoup.nodes.Document
+    ): List<SearchResponse> {
 
-        for (selector in selectors) {
-            val elements = document.select(selector)
-            if (elements.isNotEmpty()) {
-                val results = elements.mapNotNull { it.toSearchResponse() }
-                if (results.isNotEmpty()) return results
-            }
-        }
+        return document
+            .select("article, .post, .item, .post-item")
+            .mapNotNull { element ->
 
-        return document.select("a[href]").mapNotNull { element ->
-            val href = element.attr("href")
-            val title = element.text().trim()
+                val link = element
+                    .selectFirst("a[href]")
+                    ?.attr("href")
+                    ?.trim()
+                    ?: return@mapNotNull null
 
-            if (
-                href.startsWith(mainUrl) &&
-                title.isNotBlank() &&
-                (
-                    title.contains("الحلقة") ||
-                    title.contains("الرجل الجاري") ||
-                    title.contains("كوريا") ||
-                    title.contains("ذا زون")
-                )
-            ) {
-                val poster = element.selectFirst("img")?.let {
-                    it.attr("data-src")
-                        .ifBlank { it.attr("src") }
-                        .ifBlank { it.attr("data-lazy-src") }
+                if (!link.startsWith(mainUrl)) {
+                    return@mapNotNull null
                 }
 
+                val title = getTitle(element)
+                    ?: return@mapNotNull null
+
+                val poster = getPoster(element)
+
                 newTvSeriesSearchResponse(
-                    name = title,
-                    url = href,
-                    type = TvType.TvSeries,
+                    title,
+                    link,
+                    TvType.TvSeries
+                ) {
                     posterUrl = poster
-                )
-            } else {
-                null
+                }
             }
-        }
+            .distinctBy {
+                it.url
+            }
     }
 
     override suspend fun getMainPage(
         page: Int,
-        request: String
+        request: MainPageRequest
     ): HomePageResponse {
-        val document = app.get(request).document
 
-        val posts = extractPosts(document)
+        val url = if (page == 1) {
+            request.data
+        } else {
+            "${request.data.trimEnd('/')}/page/$page/"
+        }
+
+        val document = app.get(url).document
 
         return newHomePageResponse(
-            HomePageList(
-                name = if (request == mainUrl) {
-                    "آخر الحلقات المضافة"
-                } else {
-                    "الرجل الجاري"
-                },
-                list = posts
-            ),
-            hasNext = posts.isNotEmpty()
+            request.name,
+            makeSearchResponses(document),
+            hasNext = makeSearchResponses(document).isNotEmpty()
         )
     }
 
-    override suspend fun search(query: String): List<SearchResponse> {
-        val url = "$mainUrl/?s=${java.net.URLEncoder.encode(query, "UTF-8")}"
-        val document = app.get(url).document
+    override suspend fun search(
+        query: String
+    ): List<SearchResponse> {
 
-        return extractPosts(document)
+        val encodedQuery = URLEncoder.encode(
+            query,
+            "UTF-8"
+        )
+
+        val url = "$mainUrl/?s=$encodedQuery"
+
+        return makeSearchResponses(
+            app.get(url).document
+        )
     }
 
-    override suspend fun load(url: String): LoadResponse {
+    override suspend fun load(
+        url: String
+    ): LoadResponse? {
+
         val document = app.get(url).document
 
-        val title = document.selectFirst(
-            "h1.entry-title, h1.post-title, h1"
-        )?.text()
-            ?.trim()
-            ?: document.title().substringBefore(" - ").trim()
-
-        val poster = document.selectFirst("meta[property=og:image]")
-            ?.attr("content")
-            ?.takeIf { it.isNotBlank() }
-            ?: document.selectFirst("img")?.let {
-                it.attr("data-src")
-                    .ifBlank { it.attr("src") }
-                    .ifBlank { it.attr("data-lazy-src") }
-            }
-
-        val plot = document.selectFirst(
-            "meta[property=og:description]"
-        )?.attr("content")
-
-        val iframe = document.selectFirst(
-            "iframe[src], iframe[data-src]"
-        )?.let {
-            it.attr("data-src").ifBlank { it.attr("src") }
-        }
-
-        val playerLink = iframe?.let {
-            when {
-                it.startsWith("//") -> "https:$it"
-                it.startsWith("/") -> "$mainUrl$it"
-                else -> it
-            }
-        }
-
-        val seasonNumber = Regex(
-            "(?:الموسم|season)[^0-9]*(\\d+)",
-            RegexOption.IGNORE_CASE
-        ).find(title)?.groupValues?.get(1)?.toIntOrNull() ?: 1
-
-        val episodeNumber = Regex(
-            "(?:الحلقة|episode)[^0-9]*(\\d+)",
-            RegexOption.IGNORE_CASE
-        ).find(title)?.groupValues?.get(1)?.toIntOrNull()
-
-        if (episodeNumber != null) {
-            val episodeUrl = playerLink ?: url
-
-            return newTvSeriesLoadResponse(
-                name = title,
-                url = url,
-                type = TvType.TvSeries,
-                episodes = listOf(
-                    newEpisode(episodeUrl) {
-                        this.name = title
-                        this.season = seasonNumber
-                        this.episode = episodeNumber
-                    }
-                ) {
-                    this.name = title
-                },
-                posterUrl = poster,
-                plot = plot
+        val title = document
+            .selectFirst(
+                "h1.entry-title, h1.post-title, h1"
             )
-        }
+            ?.text()
+            ?.trim()
+            ?.takeIf {
+                it.isNotBlank()
+            }
+            ?: document
+                .selectFirst("meta[property='og:title']")
+                ?.attr("content")
+                ?.trim()
+            ?: return null
 
-        return com.lagradost.cloudstream3.newMovieLoadResponse(
-            name = title,
-            url = url,
-            type = TvType.Movie,
-            dataUrl = playerLink ?: url,
-            posterUrl = poster,
-            plot = plot
-        )
+        val poster = document
+            .selectFirst(
+                "meta[property='og:image']"
+            )
+            ?.attr("content")
+            ?.takeIf {
+                it.isNotBlank()
+            }
+            ?: document
+                .selectFirst(
+                    "img[src], img[data-src], img[data-lazy-src]"
+                )
+                ?.let {
+                    it.attr("src")
+                        .ifBlank {
+                            it.attr("data-src")
+                        }
+                        .ifBlank {
+                            it.attr("data-lazy-src")
+                        }
+                }
+
+        val plot = document
+            .selectFirst(
+                "meta[name='description'], meta[property='og:description']"
+            )
+            ?.attr("content")
+            ?.trim()
+
+        val episodeLinks = document
+            .select("a[href]")
+            .mapNotNull { link ->
+
+                val episodeUrl = link
+                    .attr("href")
+                    .trim()
+
+                val episodeText = link
+                    .text()
+                    .trim()
+
+                if (
+                    episodeUrl.isBlank() ||
+                    !episodeUrl.startsWith(mainUrl)
+                ) {
+                    return@mapNotNull null
+                }
+
+                val episodeNumber =
+                    Regex(
+                        """(?:الحلقة|episode)[^\d]*(\d+)""",
+                        RegexOption.IGNORE_CASE
+                    )
+                        .find(episodeText)
+                        ?.groupValues
+                        ?.getOrNull(1)
+                        ?.toIntOrNull()
+                        ?: Regex(
+                            """-(\d+)/?$"""
+                        )
+                            .find(episodeUrl)
+                            ?.groupValues
+                            ?.getOrNull(1)
+                            ?.toIntOrNull()
+                        ?: return@mapNotNull null
+
+                val season =
+                    Regex(
+                        """(?:الموسم|season)[^\d]*(\d+)""",
+                        RegexOption.IGNORE_CASE
+                    )
+                        .find(episodeText)
+                        ?.groupValues
+                        ?.getOrNull(1)
+                        ?.toIntOrNull()
+                        ?: 1
+
+                newEpisode(episodeUrl) {
+                    name = episodeText.ifBlank {
+                        "Episode $episodeNumber"
+                    }
+                    this.season = season
+                    this.episode = episodeNumber
+                }
+            }
+            .distinctBy {
+                it.data
+            }
+            .sortedWith(
+                compareBy<Episode> {
+                    it.season ?: 1
+                }.thenBy {
+                    it.episode ?: 0
+                }
+            )
+
+        return newTvSeriesLoadResponse(
+            title,
+            url,
+            TvType.TvSeries,
+            episodeLinks
+        ) {
+            posterUrl = poster
+            this.plot = plot
+        }
     }
 
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
-        subtitleCallback: (com.lagradost.cloudstream3.SubtitleFile) -> Unit,
-        callback: (com.lagradost.cloudstream3.LoadedFile) -> Unit
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
     ): Boolean {
+
         if (
-            data.startsWith("http://") ||
-            data.startsWith("https://")
+            !data.startsWith("http://") &&
+            !data.startsWith("https://")
         ) {
-            loadExtractor(
-                data,
-                mainUrl,
-                subtitleCallback,
-                callback
-            )
+            return false
         }
+
+        loadExtractor(
+            data,
+            mainUrl,
+            subtitleCallback,
+            callback
+        )
 
         return true
     }
