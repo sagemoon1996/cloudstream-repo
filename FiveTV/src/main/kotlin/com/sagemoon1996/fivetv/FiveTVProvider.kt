@@ -346,28 +346,81 @@ class FiveTVProvider : MainAPI() {
 
         val document = app.get(data).document
 
+        var loaded = false
+
+        /*
+         * 1. البحث عن M3U8 مباشر داخل صفحة الحلقة
+         */
+        val pageHtml = document
+            .html()
+            .replace("\\/", "/")
+
+        val directM3u8 = Regex(
+            """https?://[^"'\\\s]+\.m3u8(?:\?[^"'\\\s]*)?"""
+        )
+            .find(pageHtml)
+            ?.value
+
+        if (directM3u8 != null) {
+
+            callback(
+                newExtractorLink(
+                    source = "FiveTV",
+                    name = "FiveTV",
+                    url = directM3u8,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    referer = data
+                    quality = Qualities.Unknown.value
+                }
+            )
+
+            loaded = true
+        }
+
+        /*
+         * 2. استخراج iframe و data-src
+         */
         val iframeLinks = document
             .select(
                 "iframe[src], iframe[data-src]"
             )
-            .mapNotNull { iframe: Element ->
+            .mapNotNull { iframe ->
 
-                iframe
+                val src = iframe
                     .attr("src")
                     .ifBlank {
                         iframe.attr("data-src")
                     }
-                    .takeIf {
-                        it.startsWith("http")
+                    .trim()
+
+                when {
+                    src.startsWith("http") -> src
+
+                    src.startsWith("//") -> {
+                        "https:$src"
                     }
+
+                    src.startsWith("/") -> {
+                        "$mainUrl$src"
+                    }
+
+                    else -> null
+                }
             }
             .distinct()
 
-        var loaded = false
-
+        /*
+         * 3. معالجة الـ iframe
+         */
         for (link in iframeLinks) {
 
-            if (link.contains("71stream.one")) {
+            if (
+                link.contains(
+                    "71stream.one",
+                    ignoreCase = true
+                )
+            ) {
 
                 val streamDocument = app
                     .get(link)
@@ -376,31 +429,35 @@ class FiveTVProvider : MainAPI() {
                 val appData = streamDocument
                     .selectFirst("#app")
                     ?.attr("data-page")
-                    ?: continue
 
-                val normalizedData = appData
-                    .replace("\\/", "/")
+                if (appData != null) {
 
-                val m3u8 = Regex(
-                    """https://cdnvid\.dramalvr\.com/hls/[^"]+/playlist\.m3u8"""
-                )
-                    .find(normalizedData)
-                    ?.value
-                    ?: continue
+                    val normalizedData = appData
+                        .replace("\\/", "/")
 
-                callback(
-                    newExtractorLink(
-                        source = "71Stream",
-                        name = "71Stream",
-                        url = m3u8,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        referer = link
-                        quality = Qualities.Unknown.value
+                    val m3u8 = Regex(
+                        """https://cdnvid\.dramalvr\.com/hls/[^"]+/playlist(?:_[^"]+)?\.m3u8"""
+                    )
+                        .find(normalizedData)
+                        ?.value
+
+                    if (m3u8 != null) {
+
+                        callback(
+                            newExtractorLink(
+                                source = "71Stream",
+                                name = "71Stream",
+                                url = m3u8,
+                                type = ExtractorLinkType.M3U8
+                            ) {
+                                referer = link
+                                quality = Qualities.Unknown.value
+                            }
+                        )
+
+                        loaded = true
                     }
-                )
-
-                loaded = true
+                }
 
             } else {
 
@@ -409,6 +466,115 @@ class FiveTVProvider : MainAPI() {
                     data,
                     subtitleCallback,
                     callback
+                )
+
+                loaded = true
+            }
+        }
+
+        /*
+         * 4. البحث عن روابط 71Stream مخفية داخل HTML
+         */
+        val hidden71StreamLinks = Regex(
+            """https?://71stream\.one/embed/[A-Za-z0-9_-]+"""
+        )
+            .findAll(pageHtml)
+            .map {
+                it.value
+            }
+            .distinct()
+            .toList()
+
+        for (link in hidden71StreamLinks) {
+
+            if (iframeLinks.contains(link)) {
+                continue
+            }
+
+            val streamDocument = app
+                .get(link)
+                .document
+
+            val appData = streamDocument
+                .selectFirst("#app")
+                ?.attr("data-page")
+                ?: continue
+
+            val normalizedData = appData
+                .replace("\\/", "/")
+
+            val m3u8 = Regex(
+                """https://cdnvid\.dramalvr\.com/hls/[^"]+/playlist(?:_[^"]+)?\.m3u8"""
+            )
+                .find(normalizedData)
+                ?.value
+                ?: continue
+
+            callback(
+                newExtractorLink(
+                    source = "71Stream",
+                    name = "71Stream",
+                    url = m3u8,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    referer = link
+                    quality = Qualities.Unknown.value
+                }
+            )
+
+            loaded = true
+        }
+
+        /*
+         * 5. البحث عن video/source داخل الصفحة
+         */
+        val videoSources = document
+            .select(
+                "video[src], video source[src], source[src]"
+            )
+            .mapNotNull { element ->
+
+                element
+                    .attr("src")
+                    .trim()
+                    .takeIf {
+                        it.startsWith("http")
+                    }
+            }
+            .distinct()
+
+        for (source in videoSources) {
+
+            if (
+                source.contains(".m3u8", ignoreCase = true)
+            ) {
+
+                callback(
+                    newExtractorLink(
+                        source = "FiveTV",
+                        name = "FiveTV",
+                        url = source,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        referer = data
+                        quality = Qualities.Unknown.value
+                    }
+                )
+
+                loaded = true
+
+            } else {
+
+                callback(
+                    newExtractorLink(
+                        source = "FiveTV",
+                        name = "FiveTV",
+                        url = source,
+                        type = ExtractorLinkType.VIDEO
+                    ) {
+                        referer = data
+                        quality = Qualities.Unknown.value
+                    }
                 )
 
                 loaded = true
