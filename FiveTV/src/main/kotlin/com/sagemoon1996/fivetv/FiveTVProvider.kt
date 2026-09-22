@@ -20,10 +20,14 @@ class FiveTVProvider : MainAPI() {
     override val mainPage = mainPageOf(
         "$mainUrl/" to "الرئيسية",
         "$mainUrl/latest-episodes/" to "آخر الحلقات",
-        "$mainUrl/new-rows/" to "آخر الإضافات"
+        "$mainUrl/new-rows/" to "آخر الإضافات",
+        "$mainUrl/schedule/" to "الجدول الأسبوعي"
     )
 
-    private fun getTitle(link: org.jsoup.nodes.Element): String? {
+    private fun getTitle(
+        link: org.jsoup.nodes.Element
+    ): String? {
+
         val title = link.selectFirst(
             "img[alt], h1, h2, h3, h4, .title, .entry-title"
         )
@@ -35,21 +39,27 @@ class FiveTVProvider : MainAPI() {
                 }
             }
             ?.trim()
-            ?.takeIf { it.isNotBlank() }
+            ?.takeIf {
+                it.isNotBlank()
+            }
 
         return title
             ?: link.text()
                 .trim()
                 .replace(Regex("\\s+"), " ")
-                .takeIf { it.isNotBlank() }
+                .takeIf {
+                    it.isNotBlank()
+                }
     }
 
     private fun getPoster(
         link: org.jsoup.nodes.Element
     ): String? {
+
         return link.selectFirst(
             "img[src], img[data-src], img[data-lazy-src]"
         )?.let { image ->
+
             image.attr("src")
                 .ifBlank {
                     image.attr("data-src")
@@ -88,7 +98,9 @@ class FiveTVProvider : MainAPI() {
                 val poster = getPoster(link)
 
                 when {
+
                     href.contains("/movie/") -> {
+
                         newMovieSearchResponse(
                             title,
                             href,
@@ -99,6 +111,7 @@ class FiveTVProvider : MainAPI() {
                     }
 
                     href.contains("/series/") -> {
+
                         newTvSeriesSearchResponse(
                             title,
                             href,
@@ -147,6 +160,7 @@ class FiveTVProvider : MainAPI() {
         )
 
         val urls = listOf(
+            "$mainUrl/search/?q=$encodedQuery",
             "$mainUrl/search/?s=$encodedQuery",
             "$mainUrl/?s=$encodedQuery"
         )
@@ -292,6 +306,7 @@ class FiveTVProvider : MainAPI() {
                         ?: return@mapNotNull null
 
                 newEpisode(episodeUrl) {
+
                     name = episodeText.ifBlank {
                         "Episode $episode"
                     }
