@@ -8,7 +8,9 @@ import java.net.URLEncoder
 class FiveTVProvider : MainAPI() {
 
     override var mainUrl = "https://new61.5tv.lol"
+
     override var name = "FiveTV"
+
     override var lang = "ar"
 
     override val hasMainPage = true
@@ -29,14 +31,21 @@ class FiveTVProvider : MainAPI() {
         val title = link.selectFirst(
             "img[alt], h1, h2, h3, h4, .title, .entry-title"
         )?.let {
-            if (it.tagName() == "img") it.attr("alt")
-            else it.text()
-        }?.trim()?.takeIf { it.isNotBlank() }
+            if (it.tagName() == "img") {
+                it.attr("alt")
+            } else {
+                it.text()
+            }
+        }?.trim()?.takeIf {
+            it.isNotBlank()
+        }
 
         return title ?: link.text()
             .trim()
             .replace(Regex("\\s+"), " ")
-            .takeIf { it.isNotBlank() }
+            .takeIf {
+                it.isNotBlank()
+            }
     }
 
     private fun getPoster(link: Element): String? {
@@ -44,9 +53,15 @@ class FiveTVProvider : MainAPI() {
             "img[src], img[data-src], img[data-lazy-src]"
         )?.let { image ->
             image.attr("src")
-                .ifBlank { image.attr("data-src") }
-                .ifBlank { image.attr("data-lazy-src") }
-                .takeIf { it.startsWith("http") }
+                .ifBlank {
+                    image.attr("data-src")
+                }
+                .ifBlank {
+                    image.attr("data-lazy-src")
+                }
+                .takeIf {
+                    it.startsWith("http")
+                }
         }
     }
 
@@ -55,10 +70,14 @@ class FiveTVProvider : MainAPI() {
     ): List<SearchResponse> {
 
         return document
-            .select("a[href*='/series/'], a[href*='/movie/']")
+            .select(
+                "a[href*='/series/'], a[href*='/movie/']"
+            )
             .mapNotNull { link ->
 
-                val href = link.attr("href").trim()
+                val href = link
+                    .attr("href")
+                    .trim()
 
                 if (href.isBlank()) {
                     return@mapNotNull null
@@ -93,7 +112,9 @@ class FiveTVProvider : MainAPI() {
                     else -> null
                 }
             }
-            .distinctBy { it.url }
+            .distinctBy {
+                it.url
+            }
     }
 
     override suspend fun getMainPage(
@@ -119,7 +140,10 @@ class FiveTVProvider : MainAPI() {
         query: String
     ): List<SearchResponse> {
 
-        val encodedQuery = URLEncoder.encode(query, "UTF-8")
+        val encodedQuery = URLEncoder.encode(
+            query,
+            "UTF-8"
+        )
 
         val urls = listOf(
             "$mainUrl/search/?q=$encodedQuery",
@@ -128,9 +152,10 @@ class FiveTVProvider : MainAPI() {
         )
 
         for (url in urls) {
-            val results = makeSearchResponses(
-                app.get(url).document
-            )
+
+            val document = app.get(url).document
+
+            val results = makeSearchResponses(document)
 
             if (results.isNotEmpty()) {
                 return results
@@ -150,7 +175,9 @@ class FiveTVProvider : MainAPI() {
             .selectFirst("h1, h2.entry-title")
             ?.text()
             ?.trim()
-            ?.takeIf { it.isNotBlank() }
+            ?.takeIf {
+                it.isNotBlank()
+            }
             ?: document
                 .selectFirst("meta[property='og:title']")
                 ?.attr("content")
@@ -160,12 +187,16 @@ class FiveTVProvider : MainAPI() {
         val poster = document
             .selectFirst("meta[property='og:image']")
             ?.attr("content")
-            ?.takeIf { it.isNotBlank() }
+            ?.takeIf {
+                it.isNotBlank()
+            }
             ?: document
                 .selectFirst("img[src], img[data-src]")
                 ?.let {
                     it.attr("src")
-                        .ifBlank { it.attr("data-src") }
+                        .ifBlank {
+                            it.attr("data-src")
+                        }
                 }
 
         val plot = document
@@ -183,6 +214,7 @@ class FiveTVProvider : MainAPI() {
             ?.toIntOrNull()
 
         if (url.contains("/movie/")) {
+
             return newMovieLoadResponse(
                 title,
                 url,
@@ -199,13 +231,17 @@ class FiveTVProvider : MainAPI() {
             .select("a[href*='/episode/']")
             .mapNotNull { link ->
 
-                val episodeUrl = link.attr("href").trim()
+                val episodeUrl = link
+                    .attr("href")
+                    .trim()
 
                 if (episodeUrl.isBlank()) {
                     return@mapNotNull null
                 }
 
-                val episodeText = link.text().trim()
+                val episodeText = link
+                    .text()
+                    .trim()
 
                 val season =
                     Regex(
@@ -245,6 +281,7 @@ class FiveTVProvider : MainAPI() {
                         ?: return@mapNotNull null
 
                 newEpisode(episodeUrl) {
+
                     name = episodeText.ifBlank {
                         "Episode $episode"
                     }
@@ -253,7 +290,9 @@ class FiveTVProvider : MainAPI() {
                     this.episode = episode
                 }
             }
-            .distinctBy { it.data }
+            .distinctBy {
+                it.data
+            }
             .sortedWith(
                 compareBy<Episode> {
                     it.season ?: 1
@@ -282,95 +321,326 @@ class FiveTVProvider : MainAPI() {
     ): Boolean {
 
         val document = app.get(data).document
-        val html = document.html().replace("\\/", "/")
 
-        val links = Regex(
-            """https?://[^"'\\\s<>]+"""
-        )
-            .findAll(html)
-            .map { it.value }
-            .filter {
-                it.contains("71stream", true) ||
-                it.contains("embed", true) ||
-                it.contains("m3u8", true) ||
-                it.contains("mp4", true) ||
-                it.contains("stream", true)
+        var loaded = false
+
+        val directSources = document
+            .select(
+                "video[src], video source[src], source[src]"
+            )
+            .mapNotNull { element ->
+
+                element.attr("src")
+                    .trim()
+                    .takeIf {
+                        it.startsWith("http")
+                    }
             }
             .distinct()
-            .toList()
 
-        println("FIVETV LINKS FOUND: ${links.size}")
+        for (source in directSources) {
 
-        links.forEach {
-            println("FIVETV LINK: $it")
+            val type =
+                if (source.contains(".m3u8", true)) {
+                    ExtractorLinkType.M3U8
+                } else {
+                    ExtractorLinkType.VIDEO
+                }
+
+            callback(
+                newExtractorLink(
+                    source = "FiveTV",
+                    name = "FiveTV",
+                    url = source,
+                    type = type
+                ) {
+                    referer = data
+                    quality = Qualities.Unknown.value
+                }
+            )
+
+            loaded = true
         }
 
-        for (link in links) {
+        val iframeLinks = document
+            .select(
+                "iframe[src], iframe[data-src]"
+            )
+            .mapNotNull { iframe ->
 
-            if (
-                link.contains(".m3u8", true)
-            ) {
-                callback(
-                    newExtractorLink(
-                        source = "FiveTV",
-                        name = "FiveTV",
-                        url = link,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        referer = data
-                        quality = Qualities.Unknown.value
+                val src = iframe
+                    .attr("src")
+                    .ifBlank {
+                        iframe.attr("data-src")
                     }
-                )
-            }
+                    .trim()
 
-            else if (
-                link.contains("71stream.one/embed/", true)
-            ) {
-                val streamDocument = app
-                    .get(link)
-                    .document
-
-                val appData = streamDocument
-                    .selectFirst("#app")
-                    ?.attr("data-page")
-                    ?.replace("\\/", "/")
-
-                if (appData != null) {
-
-                    val m3u8 = Regex(
-                        """https://cdnvid\.dramalvr\.com/hls/[^"]+\.m3u8"""
-                    )
-                        .find(appData)
-                        ?.value
-
-                    if (m3u8 != null) {
-                        callback(
-                            newExtractorLink(
-                                source = "71Stream",
-                                name = "71Stream",
-                                url = m3u8,
-                                type = ExtractorLinkType.M3U8
-                            ) {
-                                referer = link
-                                quality = Qualities.Unknown.value
-                            }
-                        )
-                    }
+                when {
+                    src.startsWith("http") -> src
+                    src.startsWith("//") -> "https:$src"
+                    src.startsWith("/") -> "$mainUrl$src"
+                    else -> null
                 }
             }
+            .distinct()
 
-            else if (
-                link.contains("http", true)
+        for (link in iframeLinks) {
+
+            if (
+                !link.contains(
+                    "71stream.one",
+                    ignoreCase = true
+                )
             ) {
+
                 loadExtractor(
                     link,
                     data,
                     subtitleCallback,
                     callback
                 )
+
+                loaded = true
+                continue
+            }
+
+            val streamDocument = app
+                .get(link)
+                .document
+
+            val appElement = streamDocument
+                .selectFirst("#app")
+
+            val appData = appElement
+                ?.attr("data-page")
+                ?.replace("\\/", "/")
+
+            if (appData != null) {
+
+                val m3u8 = Regex(
+                    """https://cdnvid\.dramalvr\.com/hls/[^"]+\.m3u8"""
+                )
+                    .find(appData)
+                    ?.value
+
+                if (m3u8 != null) {
+
+                    callback(
+                        newExtractorLink(
+                            source = "71Stream",
+                            name = "71Stream HLS",
+                            url = m3u8,
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            referer = link
+                            quality = Qualities.Unknown.value
+                        }
+                    )
+
+                    loaded = true
+                }
+
+                val mp4 = Regex(
+                    """https://[^"'\\\s<>]+\.mp4(?:\?[^"'\\\s<>]*)?"""
+                )
+                    .find(appData)
+                    ?.value
+
+                if (mp4 != null) {
+
+                    callback(
+                        newExtractorLink(
+                            source = "71Stream",
+                            name = "71Stream MP4",
+                            url = mp4,
+                            type = ExtractorLinkType.VIDEO
+                        ) {
+                            referer = link
+                            quality = Qualities.Unknown.value
+                        }
+                    )
+
+                    loaded = true
+                }
+            }
+
+            val hashId = Regex(
+                """71stream\.one/embed/([A-Za-z0-9_-]+)"""
+            )
+                .find(link)
+                ?.groupValues
+                ?.getOrNull(1)
+
+            if (hashId != null) {
+
+                val downloadUrl =
+                    "https://71stream.one/download/$hashId?quality=Original"
+
+                try {
+
+                    val response = app.get(
+                        downloadUrl,
+                        allowRedirects = true
+                    )
+
+                    val finalUrl = response.url
+
+                    if (
+                        finalUrl.startsWith("http") &&
+                        finalUrl != downloadUrl &&
+                        (
+                            finalUrl.contains(".mp4", true) ||
+                            finalUrl.contains("cloudflarestorage.com", true) ||
+                            finalUrl.contains("r2.cloudflarestorage.com", true)
+                        )
+                    ) {
+
+                        callback(
+                            newExtractorLink(
+                                source = "71Stream",
+                                name = "71Stream MP4",
+                                url = finalUrl,
+                                type = ExtractorLinkType.VIDEO
+                            ) {
+                                referer = link
+                                quality = Qualities.Unknown.value
+                            }
+                        )
+
+                        loaded = true
+                    }
+
+                } catch (_: Exception) {
+                }
             }
         }
 
-        return links.isNotEmpty()
+        val pageHtml = document
+            .html()
+            .replace("\\/", "/")
+
+        val hidden71StreamLinks = Regex(
+            """https?://71stream\.one/embed/[A-Za-z0-9_-]+"""
+        )
+            .findAll(pageHtml)
+            .map {
+                it.value
+            }
+            .distinct()
+            .toList()
+
+        for (link in hidden71StreamLinks) {
+
+            if (iframeLinks.contains(link)) {
+                continue
+            }
+
+            val streamDocument = app
+                .get(link)
+                .document
+
+            val appData = streamDocument
+                .selectFirst("#app")
+                ?.attr("data-page")
+                ?.replace("\\/", "/")
+
+            if (appData != null) {
+
+                val m3u8 = Regex(
+                    """https://cdnvid\.dramalvr\.com/hls/[^"]+\.m3u8"""
+                )
+                    .find(appData)
+                    ?.value
+
+                if (m3u8 != null) {
+
+                    callback(
+                        newExtractorLink(
+                            source = "71Stream",
+                            name = "71Stream HLS",
+                            url = m3u8,
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            referer = link
+                            quality = Qualities.Unknown.value
+                        }
+                    )
+
+                    loaded = true
+                }
+
+                val mp4 = Regex(
+                    """https://[^"'\\\s<>]+\.mp4(?:\?[^"'\\\s<>]*)?"""
+                )
+                    .find(appData)
+                    ?.value
+
+                if (mp4 != null) {
+
+                    callback(
+                        newExtractorLink(
+                            source = "71Stream",
+                            name = "71Stream MP4",
+                            url = mp4,
+                            type = ExtractorLinkType.VIDEO
+                        ) {
+                            referer = link
+                            quality = Qualities.Unknown.value
+                        }
+                    )
+
+                    loaded = true
+                }
+            }
+
+            val hashId = Regex(
+                """71stream\.one/embed/([A-Za-z0-9_-]+)"""
+            )
+                .find(link)
+                ?.groupValues
+                ?.getOrNull(1)
+
+            if (hashId != null) {
+
+                try {
+
+                    val response = app.get(
+                        "https://71stream.one/download/$hashId?quality=Original",
+                        allowRedirects = true
+                    )
+
+                    val finalUrl = response.url
+
+                    if (
+                        finalUrl.startsWith("http") &&
+                        finalUrl != link &&
+                        (
+                            finalUrl.contains(".mp4", true) ||
+                            finalUrl.contains("cloudflarestorage.com", true) ||
+                            finalUrl.contains("r2.cloudflarestorage.com", true)
+                        )
+                    ) {
+
+                        callback(
+                            newExtractorLink(
+                                source = "71Stream",
+                                name = "71Stream MP4",
+                                url = finalUrl,
+                                type = ExtractorLinkType.VIDEO
+                            ) {
+                                referer = link
+                                quality = Qualities.Unknown.value
+                            }
+                        )
+
+                        loaded = true
+                    }
+
+                } catch (_: Exception) {
+                }
+            }
+        }
+
+        return loaded
     }
 }
