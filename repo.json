@@ -1,0 +1,8 @@
+{
+  "name": "sagemoon1996 CloudStream Repository",
+  "description": "CloudStream plugins by sagemoon1996",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/sagemoon1996/cloudstream-repo/builds/plugins.json"
+  ]
+}
