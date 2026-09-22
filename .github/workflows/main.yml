@@ -14,10 +14,50 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
+      - name: Checkout Source
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Checkout or Create Builds Branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+
+          BUILDS_URL="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+
+          if git ls-remote --exit-code --heads "$BUILDS_URL" builds >/dev/null 2>&1; then
+            echo "builds branch exists."
+
+            git clone \
+              --branch builds \
+              --single-branch \
+              "$BUILDS_URL" \
+              builds
+          else
+            echo "builds branch does not exist."
+            echo "Creating builds branch..."
+
+            mkdir -p builds
+            cd builds
+
+            git init
+            git config user.email "actions@github.com"
+            git config user.name "GitHub Actions"
+            git remote add origin "$BUILDS_URL"
+
+            git checkout --orphan builds
+
+            touch .gitkeep
+            git add .gitkeep
+            git commit -m "Initialize builds branch"
+            git push origin builds
+
+            cd ..
+
+            echo "builds branch created successfully."
+          fi
 
       - name: Setup JDK 17
         uses: actions/setup-java@v5
@@ -39,43 +79,20 @@ jobs:
           chmod +x gradlew
           ./gradlew make makePluginsJson --stacktrace
 
-      - name: Checkout or Create Builds Branch
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Copy Build Files
         run: |
           set -e
 
-          BUILDS_URL="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
-
-          if git ls-remote --exit-code --heads "$BUILDS_URL" builds >/dev/null 2>&1; then
-            echo "builds branch exists."
-            git clone --branch builds --single-branch "$BUILDS_URL" builds
-          else
-            echo "builds branch does not exist."
-            mkdir -p builds
-            cd builds
-
-            git init
-            git config user.email "actions@github.com"
-            git config user.name "GitHub Actions"
-            git remote add origin "$BUILDS_URL"
-
-            git checkout --orphan builds
-
-            touch .gitkeep
-            git add .gitkeep
-            git commit -m "Initialize builds branch"
-            git push origin builds
-
-            cd ..
-          fi
-
-      - name: Prepare Repository Files
-        run: |
-          set -e
+          test -f build/plugins.json
 
           cp build/plugins.json builds/plugins.json
 
+          find . -type f -name "*.cs3" \
+            -not -path "./builds/*" \
+            -exec cp {} builds/ \;
+
+      - name: Update Repository Manifest
+        run: |
           cat > builds/repo.json <<'EOF'
           {
             "name": "sagemoon1996 CloudStream Repository",
@@ -87,21 +104,17 @@ jobs:
           }
           EOF
 
-          find . -type f -name "*.cs3" \
-            -not -path "./builds/*" \
-            -exec cp {} builds/ \;
-
       - name: Push Builds
         working-directory: builds
         run: |
           git config user.email "actions@github.com"
           git config user.name "GitHub Actions"
 
-          git add .
+          git add -A
 
-          if ! git diff --cached --quiet; then
-            git commit -m "Build $GITHUB_SHA"
-            git push origin HEAD:builds
+          if git diff --cached --quiet; then
+            echo "No changes to push."
           else
-            echo "No changes to push"
+            git commit -m "Build plugins"
+            git push origin HEAD:builds
           fi
