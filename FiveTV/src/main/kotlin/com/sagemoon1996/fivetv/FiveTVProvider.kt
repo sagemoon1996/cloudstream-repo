@@ -125,12 +125,11 @@ class FiveTVProvider : MainAPI() {
                         ?.toIntOrNull()
                     ?: return@mapNotNull null
 
-                Episode(
-                    episodeUrl,
-                    episodeText.ifBlank { "Episode $episode" },
-                    season,
-                    episode
-                )
+                newEpisode(episodeUrl) {
+                    name = episodeText.ifBlank { "Episode $episode" }
+                    this.season = season
+                    this.episode = episode
+                }
             }
             .distinctBy { it.data }
             .sortedWith(
