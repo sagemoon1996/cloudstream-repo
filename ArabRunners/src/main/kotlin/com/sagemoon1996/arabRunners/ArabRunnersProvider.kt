@@ -1,9 +1,17 @@
 package com.sagemoon1996.arabRunners
 
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
+
+@CloudstreamPlugin
+class ArabRunnersPlugin : Plugin() {
+    override fun load(context: Context) {
+        registerMainAPI(ArabRunnersProvider())
+    }
+}
 
 class ArabRunnersProvider : MainAPI() {
 
@@ -65,9 +73,7 @@ class ArabRunnersProvider : MainAPI() {
     ): List<SearchResponse> {
 
         return document
-            .select(
-                "a[href]"
-            )
+            .select("a[href]")
             .mapNotNull { link ->
 
                 val href = link
@@ -83,8 +89,8 @@ class ArabRunnersProvider : MainAPI() {
 
                 if (
                     href.contains("/category/") ||
-                    href.endsWith("/") &&
                     (
+                        href.endsWith("/") &&
                         link.selectFirst("img") == null &&
                         link.text().trim().length < 3
                     )
@@ -195,9 +201,7 @@ class ArabRunnersProvider : MainAPI() {
             ?.trim()
 
         val episodes = document
-            .select(
-                "a[href]"
-            )
+            .select("a[href]")
             .mapNotNull { link ->
 
                 val episodeUrl = link
@@ -211,8 +215,7 @@ class ArabRunnersProvider : MainAPI() {
                     return@mapNotNull null
                 }
 
-                val text = link.text()
-                    .trim()
+                val text = link.text().trim()
 
                 val episode =
                     Regex(
@@ -234,7 +237,6 @@ class ArabRunnersProvider : MainAPI() {
                         ?: return@mapNotNull null
 
                 newEpisode(episodeUrl) {
-
                     name = text.ifBlank {
                         "Episode $episode"
                     }
@@ -332,9 +334,7 @@ class ArabRunnersProvider : MainAPI() {
             .distinct()
 
         for (link in iframeLinks) {
-
             try {
-
                 loadExtractor(
                     link,
                     data,
@@ -343,7 +343,6 @@ class ArabRunnersProvider : MainAPI() {
                 )
 
                 loaded = true
-
             } catch (_: Exception) {
             }
         }
