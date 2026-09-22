@@ -1,5 +1,24 @@
 [
     {
+        "fileHash": "sha256-56770942e0e017083b5fea70d05cc1e5e1350920df93275ff708a18ebef1511e",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
+        "fileSize": 12593,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "sagemoon1996"
+        ],
+        "tvTypes": [
+            "TvSeries"
+        ],
+        "version": 1,
+        "internalName": "ArabRunners",
+        "description": "Arab Runners Team provider",
+        "url": "https://raw.githubusercontent.com/sagemoon1996/cloudstream-repo/builds/ArabRunners.cs3",
+        "name": "ArabRunners"
+    },
+    {
         "iconUrl": "https://new61.5tv.lol/wp-content/uploads/2026/09/yjPlfO23INYLyMWr1yr7rhwJhKO.jpg",
         "fileHash": "sha256-188681104f094e073a62f6e9d903b3c29a619d1e061fd0cf5a4d04a24ab2b9bb",
         "apiVersion": 1,
