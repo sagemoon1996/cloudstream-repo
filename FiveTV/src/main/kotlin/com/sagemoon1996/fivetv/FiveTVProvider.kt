@@ -18,9 +18,103 @@ class FiveTVProvider : MainAPI() {
     )
 
     override val mainPage = mainPageOf(
+        "$mainUrl/" to "الرئيسية",
         "$mainUrl/latest-episodes/" to "آخر الحلقات",
-        "$mainUrl/latest-additions/" to "آخر الإضافات"
+        "$mainUrl/new-rows/" to "آخر الإضافات"
     )
+
+    private fun getTitle(link: org.jsoup.nodes.Element): String? {
+        val title = link.selectFirst(
+            "img[alt], h1, h2, h3, h4, .title, .entry-title"
+        )
+            ?.let {
+                if (it.tagName() == "img") {
+                    it.attr("alt")
+                } else {
+                    it.text()
+                }
+            }
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+
+        return title
+            ?: link.text()
+                .trim()
+                .replace(Regex("\\s+"), " ")
+                .takeIf { it.isNotBlank() }
+    }
+
+    private fun getPoster(
+        link: org.jsoup.nodes.Element
+    ): String? {
+        return link.selectFirst(
+            "img[src], img[data-src], img[data-lazy-src]"
+        )?.let { image ->
+            image.attr("src")
+                .ifBlank {
+                    image.attr("data-src")
+                }
+                .ifBlank {
+                    image.attr("data-lazy-src")
+                }
+                .takeIf {
+                    it.startsWith("http")
+                }
+        }
+    }
+
+    private fun makeSearchResponses(
+        document: org.jsoup.nodes.Document
+    ): List<SearchResponse> {
+
+        return document
+            .select(
+                "a[href*='/series/'], " +
+                "a[href*='/movie/']"
+            )
+            .mapNotNull { link ->
+
+                val href = link
+                    .attr("href")
+                    .trim()
+
+                if (href.isBlank()) {
+                    return@mapNotNull null
+                }
+
+                val title = getTitle(link)
+                    ?: return@mapNotNull null
+
+                val poster = getPoster(link)
+
+                when {
+                    href.contains("/movie/") -> {
+                        newMovieSearchResponse(
+                            title,
+                            href,
+                            TvType.Movie
+                        ) {
+                            posterUrl = poster
+                        }
+                    }
+
+                    href.contains("/series/") -> {
+                        newTvSeriesSearchResponse(
+                            title,
+                            href,
+                            TvType.TvSeries
+                        ) {
+                            posterUrl = poster
+                        }
+                    }
+
+                    else -> null
+                }
+            }
+            .distinctBy {
+                it.url
+            }
+    }
 
     override suspend fun getMainPage(
         page: Int,
@@ -30,50 +124,12 @@ class FiveTVProvider : MainAPI() {
         val url = if (page == 1) {
             request.data
         } else {
-            "${request.data}page/$page/"
+            "${request.data.trimEnd('/')}/page/$page/"
         }
 
         val document = app.get(url).document
 
-        val results = document
-            .select("a[href*='/series/'], a[href*='/movie/']")
-            .mapNotNull { link ->
-                val href = link.attr("href").trim()
-
-                if (href.isBlank()) return@mapNotNull null
-
-                val title = link.selectFirst("img")
-                    ?.attr("alt")
-                    ?.trim()
-                    ?.takeIf { it.isNotBlank() }
-                    ?: link.text()
-                        .trim()
-                        .takeIf { it.isNotBlank() }
-                    ?: return@mapNotNull null
-
-                val poster = link.selectFirst("img")
-                    ?.attr("src")
-                    ?.takeIf { it.isNotBlank() }
-
-                if (href.contains("/movie/")) {
-                    newMovieSearchResponse(
-                        title,
-                        href,
-                        TvType.Movie
-                    ) {
-                        posterUrl = poster
-                    }
-                } else {
-                    newTvSeriesSearchResponse(
-                        title,
-                        href,
-                        TvType.TvSeries
-                    ) {
-                        posterUrl = poster
-                    }
-                }
-            }
-            .distinctBy { it.url }
+        val results = makeSearchResponses(document)
 
         return newHomePageResponse(
             request.name,
@@ -90,55 +146,23 @@ class FiveTVProvider : MainAPI() {
             "UTF-8"
         )
 
-        val document = app.get(
+        val urls = listOf(
+            "$mainUrl/search/?s=$encodedQuery",
             "$mainUrl/?s=$encodedQuery"
-        ).document
+        )
 
-        return document
-            .select("a[href*='/series/'], a[href*='/movie/']")
-            .mapNotNull { link ->
+        for (url in urls) {
 
-                val href = link.attr("href").trim()
+            val document = app.get(url).document
 
-                if (href.isBlank()) {
-                    return@mapNotNull null
-                }
+            val results = makeSearchResponses(document)
 
-                val title = link.selectFirst("img")
-                    ?.attr("alt")
-                    ?.trim()
-                    ?.takeIf { it.isNotBlank() }
-                    ?: link.text()
-                        .trim()
-                        .takeIf { it.isNotBlank() }
-                    ?: return@mapNotNull null
-
-                val poster = link.selectFirst("img")
-                    ?.attr("src")
-                    ?.takeIf { it.isNotBlank() }
-
-                if (href.contains("/movie/")) {
-
-                    newMovieSearchResponse(
-                        title,
-                        href,
-                        TvType.Movie
-                    ) {
-                        posterUrl = poster
-                    }
-
-                } else {
-
-                    newTvSeriesSearchResponse(
-                        title,
-                        href,
-                        TvType.TvSeries
-                    ) {
-                        posterUrl = poster
-                    }
-                }
+            if (results.isNotEmpty()) {
+                return results
             }
-            .distinctBy { it.url }
+        }
+
+        return emptyList()
     }
 
     override suspend fun load(
@@ -148,30 +172,52 @@ class FiveTVProvider : MainAPI() {
         val document = app.get(url).document
 
         val title = document
-            .selectFirst("h1")
+            .selectFirst(
+                "h1, h2.entry-title"
+            )
             ?.text()
             ?.trim()
-            ?: return null
+            ?.takeIf {
+                it.isNotBlank()
+            }
+            ?: document
+                .selectFirst(
+                    "meta[property='og:title']"
+                )
+                ?.attr("content")
+                ?.trim()
+                ?: return null
 
         val poster = document
             .selectFirst(
                 "meta[property='og:image']"
             )
             ?.attr("content")
-            ?.takeIf { it.isNotBlank() }
+            ?.takeIf {
+                it.isNotBlank()
+            }
             ?: document
-                .selectFirst("img")
-                ?.attr("src")
+                .selectFirst(
+                    "img[src], img[data-src]"
+                )
+                ?.let {
+                    it.attr("src")
+                        .ifBlank {
+                            it.attr("data-src")
+                        }
+                }
 
         val plot = document
             .selectFirst(
-                "meta[name='description']"
+                "meta[name='description'], " +
+                "meta[property='og:description']"
             )
             ?.attr("content")
             ?.trim()
 
         val year = document
-            .selectFirst("a[href*='/year/']")
+            .select("a[href*='/year/']")
+            .firstOrNull()
             ?.text()
             ?.trim()
             ?.toIntOrNull()
@@ -191,7 +237,9 @@ class FiveTVProvider : MainAPI() {
         }
 
         val episodes = document
-            .select("a[href*='/episode/']")
+            .select(
+                "a[href*='/episode/']"
+            )
             .mapNotNull { link ->
 
                 val episodeUrl = link
@@ -252,7 +300,9 @@ class FiveTVProvider : MainAPI() {
                     this.episode = episode
                 }
             }
-            .distinctBy { it.data }
+            .distinctBy {
+                it.data
+            }
             .sortedWith(
                 compareBy<Episode> {
                     it.season ?: 1
@@ -286,13 +336,15 @@ class FiveTVProvider : MainAPI() {
             .select(
                 "iframe[src], iframe[data-src]"
             )
-            .mapNotNull {
-                it.attr("src")
+            .mapNotNull { iframe ->
+
+                iframe
+                    .attr("src")
                     .ifBlank {
-                        it.attr("data-src")
+                        iframe.attr("data-src")
                     }
-                    .takeIf { url ->
-                        url.startsWith("http")
+                    .takeIf {
+                        it.startsWith("http")
                     }
             }
             .distinct()
