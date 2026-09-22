@@ -1,23 +1,23 @@
 [
     {
-        "url": "https://raw.githubusercontent.com/sagemoon1996/cloudstream-repo/builds/FiveTV.cs3",
+        "iconUrl": "https://new61.5tv.lol/wp-content/uploads/2026/09/yjPlfO23INYLyMWr1yr7rhwJhKO.jpg",
+        "fileHash": "sha256-188681104f094e073a62f6e9d903b3c29a619d1e061fd0cf5a4d04a24ab2b9bb",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
+        "fileSize": 24309,
         "status": 1,
-        "version": 1,
-        "name": "FiveTV",
-        "internalName": "FiveTV",
+        "language": "ar",
         "authors": [
             "sagemoon1996"
         ],
-        "description": "FiveTV Arabic streaming provider",
-        "fileSize": 24306,
-        "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
-        "language": "ar",
         "tvTypes": [
             "TvSeries",
             "Movie"
         ],
-        "iconUrl": "https://new61.5tv.lol/wp-content/uploads/2026/09/yjPlfO23INYLyMWr1yr7rhwJhKO.jpg",
-        "apiVersion": 1,
-        "fileHash": "sha256-0f56cbf60332c4359c0e101507ca1f73169ca1d320081fdb3195701c8c5afc07"
+        "version": 1,
+        "internalName": "FiveTV",
+        "description": "FiveTV Arabic streaming provider",
+        "url": "https://raw.githubusercontent.com/sagemoon1996/cloudstream-repo/builds/FiveTV.cs3",
+        "name": "FiveTV"
     }
 ]
