@@ -189,23 +189,22 @@ class ArabRunnersProvider : MainAPI() {
             return false
         }
 
-        if (
-            info.type?.lowercase() != "hls"
-        ) {
+        if (info.type?.lowercase() != "hls") {
             return false
         }
 
-        if (info.qualities.isEmpty()) {
+        val qualities =
+            info.qualities.filter {
+                it.src.isNotBlank()
+            }
+
+        if (qualities.isEmpty()) {
             return false
         }
 
         var foundLink = false
 
-        info.qualities.forEach { qualityInfo ->
-
-            if (qualityInfo.src.isBlank()) {
-                return@forEach
-            }
+        qualities.forEach { qualityInfo ->
 
             val streamUrl =
                 if (
