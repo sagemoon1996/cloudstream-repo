@@ -55,18 +55,23 @@ class ArabRunnersProvider : MainAPI() {
             ?.toIntOrNull()
     }
 
-    private fun extractEpisodeLinks(document: Document): List<Pair<Int, String>> {
+    private fun extractEpisodeLinks(
+        document: Document
+    ): List<Pair<Int, String>> {
+
         return document
             .select("a[href*='/movies/']")
             .mapNotNull { link ->
+
                 val href = link.attr("abs:href").trim()
 
                 if (href.isBlank()) {
                     return@mapNotNull null
                 }
 
-                val episodeNumber = extractEpisodeNumber(href)
-                    ?: return@mapNotNull null
+                val episodeNumber =
+                    extractEpisodeNumber(href)
+                        ?: return@mapNotNull null
 
                 episodeNumber to href
             }
@@ -74,11 +79,13 @@ class ArabRunnersProvider : MainAPI() {
     }
 
     private suspend fun getAllEpisodes(): List<Pair<Int, String>> {
+
         val episodes = mutableListOf<Pair<Int, String>>()
 
         var page = 1
 
         while (true) {
+
             val pageUrl =
                 if (page == 1) {
                     runningManCategory
@@ -88,19 +95,19 @@ class ArabRunnersProvider : MainAPI() {
 
             val document = app.get(pageUrl).document
 
-            val pageEpisodes = extractEpisodeLinks(document)
+            val pageEpisodes =
+                extractEpisodeLinks(document)
 
-            if (pageEpisodes.isNotEmpty()) {
-                episodes.addAll(pageEpisodes)
-            }
+            episodes.addAll(pageEpisodes)
 
-            val hasNext = document
-                .select("a[href]")
-                .any { link ->
-                    link.text()
-                        .trim()
-                        .replace(Regex("\\s+"), " ") == "التالي"
-                }
+            val hasNext =
+                document
+                    .select("a[href]")
+                    .any { link ->
+                        link.text()
+                            .trim()
+                            .replace(Regex("\\s+"), " ") == "التالي"
+                    }
 
             if (!hasNext) {
                 break
@@ -118,6 +125,7 @@ class ArabRunnersProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
+
         if (page != 1) {
             return newHomePageResponse(
                 request.name,
@@ -143,9 +151,8 @@ class ArabRunnersProvider : MainAPI() {
         query: String
     ): List<SearchResponse> {
 
-        val normalizedQuery = query
-            .trim()
-            .lowercase()
+        val normalizedQuery =
+            query.trim().lowercase()
 
         if (
             !normalizedQuery.contains("الرجل الجاري") &&
@@ -177,13 +184,18 @@ class ArabRunnersProvider : MainAPI() {
 
         val episodes = getAllEpisodes()
 
-        val episodeList = episodes.map { (episodeNumber, _) ->
+        val episodeList =
+            episodes.map { (episodeNumber, _) ->
 
-            newEpisode("RunningMan$episodeNumber") {
-                name = "الرجل الجاري الحلقة $episodeNumber"
-                episode = episodeNumber
+                newEpisode(
+                    "RunningMan$episodeNumber"
+                ) {
+                    name =
+                        "الرجل الجاري الحلقة $episodeNumber"
+
+                    episode = episodeNumber
+                }
             }
-        }
 
         return newTvSeriesLoadResponse(
             "الرجل الجاري",
@@ -209,18 +221,21 @@ class ArabRunnersProvider : MainAPI() {
                 URLEncoder.encode(data, "UTF-8")
             }"
 
-        val response = app.get(
-            infoUrl,
-            referer = "$mainUrl/ArabPlayer/embed.php?v=$data"
-        )
-
-        val info = try {
-            json.decodeFromString<ArabPlayerInfo>(
-                response.text
+        val response =
+            app.get(
+                infoUrl,
+                referer =
+                    "$mainUrl/ArabPlayer/embed.php?v=$data"
             )
-        } catch (_: Exception) {
-            return false
-        }
+
+        val info =
+            try {
+                json.decodeFromString<ArabPlayerInfo>(
+                    response.text
+                )
+            } catch (_: Exception) {
+                return false
+            }
 
         if (!info.ok) {
             return false
@@ -253,7 +268,8 @@ class ArabRunnersProvider : MainAPI() {
                 referer =
                     "$mainUrl/ArabPlayer/embed.php?v=$data"
 
-                quality = Qualities.Unknown.value
+                quality =
+                    Qualities.Unknown.value
             }
         )
 
