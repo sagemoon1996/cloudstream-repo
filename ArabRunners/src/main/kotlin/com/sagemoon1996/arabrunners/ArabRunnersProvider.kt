@@ -19,7 +19,7 @@ class ArabRunnersProvider : MainAPI() {
         "$mainUrl/category/%d8%a7%d9%84%d9%83%d9%84/%d8%a7%d9%84%d8%b1%d8%ac%d9%84-%d8%a7%d9%84%d8%ac%d8%a7%d8%b1%d9%8a/"
 
     private val runningManPoster =
-        "https://arabrunnersteam.org/wp-content/uploads/2025/09/kGhSem2uEuOiPP9hfc02OMcJZOJ.webp"
+        "$mainUrl/wp-content/uploads/2025/09/kGhSem2uEuOiPP9hfc02OMcJZOJ.webp"
 
     override val mainPage = mainPageOf(
         runningManCategory to "الرجل الجاري"
@@ -55,7 +55,6 @@ class ArabRunnersProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-
         if (page != 1) {
             return newHomePageResponse(
                 request.name,
@@ -115,7 +114,7 @@ class ArabRunnersProvider : MainAPI() {
             return null
         }
 
-        val episodeList = getKnownEpisodes().map { episodeNumber ->
+        val episodes = getKnownEpisodes().map { episodeNumber ->
             newEpisode("RunningMan$episodeNumber") {
                 name = "الرجل الجاري الحلقة $episodeNumber"
                 episode = episodeNumber
@@ -127,7 +126,7 @@ class ArabRunnersProvider : MainAPI() {
             "الرجل الجاري",
             runningManCategory,
             TvType.TvSeries,
-            episodeList
+            episodes
         ) {
             posterUrl = runningManPoster
         }
@@ -156,8 +155,7 @@ class ArabRunnersProvider : MainAPI() {
             "User-Agent" to
                 "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-            "Accept" to "application/json, text/plain, */*",
-            "X-Requested-With" to "XMLHttpRequest",
+            "Accept" to "*/*",
             "Origin" to mainUrl
         )
 
@@ -177,11 +175,7 @@ class ArabRunnersProvider : MainAPI() {
             return false
         }
 
-        if (!info.ok) {
-            return false
-        }
-
-        if (info.type?.lowercase() != "hls") {
+        if (!info.ok || info.type?.lowercase() != "hls") {
             return false
         }
 
@@ -189,11 +183,7 @@ class ArabRunnersProvider : MainAPI() {
             !it.src.isNullOrBlank()
         }
 
-        if (qualities.isEmpty()) {
-            return false
-        }
-
-        var linksFound = false
+        var found = false
 
         qualities.forEach { quality ->
 
@@ -209,33 +199,29 @@ class ArabRunnersProvider : MainAPI() {
                     "$mainUrl/ArabPlayer/${src.trimStart('/')}"
                 }
 
-            try {
-                M3u8Helper.generateM3u8(
+            val qualityValue =
+                quality.height
+                    ?: quality.label
+                        ?.removeSuffix("p")
+                        ?.toIntOrNull()
+                    ?: Qualities.Unknown.value
+
+            callback(
+                newExtractorLink(
                     source = name,
-                    name = name,
-                    streamUrl = streamUrl,
-                    referer = referer,
-                    headers = headers
-                ).forEach { link ->
-
-                    val qualityValue =
-                        quality.height
-                            ?: quality.label
-                                ?.removeSuffix("p")
-                                ?.toIntOrNull()
-                            ?: Qualities.Unknown.value
-
-                    link.quality = qualityValue
-
-                    callback(link)
-
-                    linksFound = true
+                    name = "ArabPlayer ${quality.label ?: ""}".trim(),
+                    url = streamUrl,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = referer
+                    this.headers = headers
+                    this.quality = qualityValue
                 }
-            } catch (_: Exception) {
-                // نواصل مع بقية الجودات إذا جودة واحدة فشلت
-            }
+            )
+
+            found = true
         }
 
-        return linksFound
+        return found
     }
 }
