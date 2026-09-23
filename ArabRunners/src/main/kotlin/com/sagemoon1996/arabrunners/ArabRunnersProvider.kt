@@ -139,34 +139,92 @@ class ArabRunnersProvider : MainAPI() {
             return false
         }
 
-        val embedUrl =
-            "$mainUrl/ArabPlayer/embed.php?v=$videoId"
-
         val streamUrl =
             "$mainUrl/ArabPlayer/stream.php?v=$videoId"
+
+        val embedUrl =
+            "$mainUrl/ArabPlayer/embed.php?v=$videoId"
 
         val userAgent =
             "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
 
-        val link = newExtractorLink(
-            source = name,
-            name = "ArabPlayer HLS",
-            url = streamUrl,
-            type = ExtractorLinkType.M3U8
-        ) {
-            referer = embedUrl
-            quality = Qualities.Unknown.value
-
-            headers = mapOf(
-                "User-Agent" to userAgent,
-                "Referer" to embedUrl,
-                "Origin" to mainUrl
+        val response = try {
+            app.get(
+                streamUrl,
+                headers = mapOf(
+                    "User-Agent" to userAgent,
+                    "Referer" to embedUrl
+                )
             )
+        } catch (_: Exception) {
+            return false
         }
 
-        callback(link)
+        val playlist = response.text
 
-        return true
+        if (!playlist.trimStart().startsWith("#EXTM3U")) {
+            return false
+        }
+
+        val regex = Regex(
+            """#EXT-X-STREAM-INF:([^\r\n]+)\r?\n([^\r\n]+)"""
+        )
+
+        var foundLink = false
+
+        regex.findAll(playlist).forEach { match ->
+
+            val attributes = match.groupValues[1]
+            val rawUrl = match.groupValues[2].trim()
+
+            if (!rawUrl.contains("proxy.php?u=")) {
+                return@forEach
+            }
+
+            val height = Regex(
+                """RESOLUTION=\d+x(\d+)"""
+            ).find(attributes)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toIntOrNull()
+                ?: Qualities.Unknown.value
+
+            val quality = when (height) {
+                720 -> Qualities.P720.value
+                480 -> Qualities.P480.value
+                360 -> Qualities.P360.value
+                240 -> Qualities.P240.value
+                else -> height
+            }
+
+            val proxyUrl =
+                if (rawUrl.startsWith("http://") || rawUrl.startsWith("https://")) {
+                    rawUrl
+                } else {
+                    "$mainUrl/ArabPlayer/$rawUrl"
+                }
+
+            val link = newExtractorLink(
+                source = name,
+                name = "ArabPlayer ${height}p",
+                url = proxyUrl,
+                type = ExtractorLinkType.M3U8
+            ) {
+                referer = embedUrl
+                this.quality = quality
+
+                headers = mapOf(
+                    "User-Agent" to userAgent,
+                    "Referer" to embedUrl,
+                    "Origin" to mainUrl
+                )
+            }
+
+            callback(link)
+            foundLink = true
+        }
+
+        return foundLink
     }
 }
