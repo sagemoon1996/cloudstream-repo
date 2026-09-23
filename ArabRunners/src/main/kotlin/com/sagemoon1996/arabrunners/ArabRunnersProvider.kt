@@ -97,12 +97,12 @@ class ArabRunnersProvider : MainAPI() {
         )
     }
 
-    override suspend fun load(url: String): LoadResponse {
+    override suspend fun load(url: String): LoadResponse? {
         val episodeList = getKnownEpisodes().map { episodeNumber ->
             newEpisode("RunningMan$episodeNumber") {
-                name = "الرجل الجاري الحلقة $episodeNumber"
-                episode = episodeNumber
-                posterUrl = runningManPoster
+                this.name = "الرجل الجاري الحلقة $episodeNumber"
+                this.episode = episodeNumber
+                this.posterUrl = runningManPoster
             }
         }
 
@@ -112,29 +112,40 @@ class ArabRunnersProvider : MainAPI() {
             TvType.TvSeries,
             episodeList
         ) {
-            posterUrl = runningManPoster
+            this.posterUrl = runningManPoster
         }
     }
 
-    // دالة فك تشفير Base64 الاستخراجية الخاصة بالروابط المخبأة في proxy.php?u=
+    // دالة فك تشفير Base64 بلغة Kotlin نقية لتفادي أخطاء GitHub Actions
     private fun decodeBase64StreamUrl(rawUrl: String): String {
         if (!rawUrl.contains("u=")) return rawUrl
 
         val encodedPart = rawUrl.substringAfter("u=").substringBefore("&")
-        val cleanPart = try { URLDecoder.decode(encodedPart, "UTF-8").trim() } catch (_: Exception) { encodedPart.trim() }
+        val cleanPart = try {
+            URLDecoder.decode(encodedPart, "UTF-8").trim()
+        } catch (_: Exception) {
+            encodedPart.trim()
+        }
 
         return try {
-            val bytes = android.util.Base64.decode(cleanPart, android.util.Base64.DEFAULT)
-            val decoded = String(bytes, Charsets.UTF-8).trim()
+            val table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
+            val bytes = mutableListOf<Byte>()
+            var buffer = 0
+            var bits = 0
+            for (c in cleanPart) {
+                val valIndex = table.indexOf(c)
+                if (valIndex == -1 || c == '=') break
+                buffer = (buffer shl 6) or valIndex
+                bits += 6
+                if (bits >= 8) {
+                    bits -= 8
+                    bytes.add((buffer shr bits).toByte())
+                }
+            }
+            val decoded = String(bytes.toByteArray(), Charsets.UTF-8).trim()
             if (decoded.startsWith("http://") || decoded.startsWith("https://")) decoded else rawUrl
         } catch (_: Exception) {
-            try {
-                val bytes = java.util.Base64.getDecoder().decode(cleanPart)
-                val decoded = String(bytes, Charsets.UTF-8).trim()
-                if (decoded.startsWith("http://") || decoded.startsWith("https://")) decoded else rawUrl
-            } catch (_: Exception) {
-                rawUrl
-            }
+            rawUrl
         }
     }
 
@@ -157,7 +168,6 @@ class ArabRunnersProvider : MainAPI() {
         val infoUrl = "$mainUrl/ArabPlayer/info.php?v=$videoId"
         val userAgent = "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
 
-        // 1. طلب بيانات الحلقة من info.php عبر AJAX
         val response = try {
             app.get(
                 infoUrl,
@@ -185,14 +195,16 @@ class ArabRunnersProvider : MainAPI() {
         val sources = mutableListOf<Pair<String, String>>()
 
         info.qualities.forEach { qualityItem ->
-            if (!qualityItem.src.isNullOrBlank()) {
+            val src = qualityItem.src
+            if (!src.isNullOrBlank()) {
                 val label = qualityItem.label ?: if (qualityItem.height != null) "${qualityItem.height}p" else "Auto"
-                sources.add(Pair(label, qualityItem.src))
+                sources.add(Pair(label, src))
             }
         }
 
-        if (sources.isEmpty() && !info.src.isNullOrBlank()) {
-            sources.add(Pair("Auto", info.src))
+        val mainSrc = info.src
+        if (sources.isEmpty() && !mainSrc.isNullOrBlank()) {
+            sources.add(Pair("Auto", mainSrc))
         }
 
         if (sources.isEmpty()) return false
@@ -206,45 +218,26 @@ class ArabRunnersProvider : MainAPI() {
                 "$mainUrl/ArabPlayer/${rawSrc.trimStart('/')}"
             }
 
-            // فك تشفير رابط الـ CDN الأصلي المباشر من Base64
             val directStreamUrl = decodeBase64StreamUrl(fullRawUrl)
             val qualityHeight = label.replace("p", "").toIntOrNull() ?: Qualities.Unknown.value
 
-            // محاولة جلب جودات المانفيست إن وجدت
-            val m3u8Links = try {
-                M3u8Helper.generateSeek264Links(
+            callback(
+                newExtractorLink(
                     source = name,
-                    streamUrl = directStreamUrl,
-                    referer = embedUrl,
-                    quality = qualityHeight
-                )
-            } catch (_: Exception) {
-                emptyList()
-            }
-
-            if (m3u8Links.isNotEmpty()) {
-                m3u8Links.forEach { link ->
-                    callback(link)
-                    foundLink = true
-                }
-            } else {
-                callback(
-                    ExtractorLink(
-                        source = name,
-                        name = "ArabPlayer $label".trim(),
-                        url = directStreamUrl,
-                        referer = embedUrl,
-                        quality = qualityHeight,
-                        type = ExtractorLinkType.M3U8,
-                        headers = mapOf(
-                            "User-Agent" to userAgent,
-                            "Referer" to embedUrl,
-                            "Origin" to mainUrl
-                        )
+                    name = "ArabPlayer $label".trim(),
+                    url = directStreamUrl,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = embedUrl
+                    this.quality = qualityHeight
+                    this.headers = mapOf(
+                        "User-Agent" to userAgent,
+                        "Referer" to embedUrl,
+                        "Origin" to mainUrl
                     )
-                )
-                foundLink = true
-            }
+                }
+            )
+            foundLink = true
         }
 
         return foundLink
