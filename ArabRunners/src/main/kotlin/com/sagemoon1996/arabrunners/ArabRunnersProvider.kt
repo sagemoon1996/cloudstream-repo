@@ -28,11 +28,12 @@ class ArabRunnersProvider : MainAPI() {
 
     private val json = Json {
         ignoreUnknownKeys = true
+        coerceInputValues = true
     }
 
     @Serializable
     private data class ArabPlayerInfo(
-        val ok: Boolean = false,
+        val ok: Boolean? = false,
         val title: String? = null,
         val poster: String? = null,
         val type: String? = null,
@@ -42,9 +43,9 @@ class ArabRunnersProvider : MainAPI() {
 
     @Serializable
     private data class ArabPlayerQuality(
-        val height: Int = 0,
-        val label: String = "",
-        val src: String = ""
+        val height: Int? = null,
+        val label: String? = null,
+        val src: String? = null
     )
 
     private fun getKnownEpisodes(): List<Int> {
@@ -83,8 +84,7 @@ class ArabRunnersProvider : MainAPI() {
         query: String
     ): List<SearchResponse> {
 
-        val normalizedQuery =
-            query.trim().lowercase()
+        val normalizedQuery = query.trim().lowercase()
 
         if (
             !normalizedQuery.contains("الرجل الجاري") &&
@@ -109,25 +109,17 @@ class ArabRunnersProvider : MainAPI() {
         url: String
     ): LoadResponse? {
 
-        val decodedInputUrl =
-            try {
-                URLDecoder.decode(
-                    url,
-                    "UTF-8"
-                ).trimEnd('/')
-            } catch (_: Exception) {
-                url.trimEnd('/')
-            }
+        val decodedInputUrl = try {
+            URLDecoder.decode(url, "UTF-8").trimEnd('/')
+        } catch (_: Exception) {
+            url.trimEnd('/')
+        }
 
-        val decodedCategoryUrl =
-            try {
-                URLDecoder.decode(
-                    runningManCategory,
-                    "UTF-8"
-                ).trimEnd('/')
-            } catch (_: Exception) {
-                runningManCategory.trimEnd('/')
-            }
+        val decodedCategoryUrl = try {
+            URLDecoder.decode(runningManCategory, "UTF-8").trimEnd('/')
+        } catch (_: Exception) {
+            runningManCategory.trimEnd('/')
+        }
 
         if (
             !decodedInputUrl.contains("running-man") &&
@@ -137,22 +129,13 @@ class ArabRunnersProvider : MainAPI() {
             return null
         }
 
-        val episodeList =
-            getKnownEpisodes().map { episodeNumber ->
-
-                newEpisode(
-                    "RunningMan$episodeNumber"
-                ) {
-                    name =
-                        "الرجل الجاري الحلقة $episodeNumber"
-
-                    episode =
-                        episodeNumber
-
-                    posterUrl =
-                        runningManPoster
-                }
+        val episodeList = getKnownEpisodes().map { episodeNumber ->
+            newEpisode("RunningMan$episodeNumber") {
+                name = "الرجل الجاري الحلقة $episodeNumber"
+                episode = episodeNumber
+                posterUrl = runningManPoster
             }
+        }
 
         return newTvSeriesLoadResponse(
             "الرجل الجاري",
@@ -160,8 +143,7 @@ class ArabRunnersProvider : MainAPI() {
             TvType.TvSeries,
             episodeList
         ) {
-            posterUrl =
-                runningManPoster
+            posterUrl = runningManPoster
         }
     }
 
@@ -172,91 +154,84 @@ class ArabRunnersProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
-        if (!data.startsWith("RunningMan")) {
-            return false
-        }
-
-        val infoUrl =
-            "$mainUrl/ArabPlayer/info.php?v=${
-                URLEncoder.encode(
-                    data,
-                    "UTF-8"
-                )
-            }"
-
-        val response =
-            try {
-                app.get(
-                    infoUrl,
-                    referer =
-                        "$mainUrl/ArabPlayer/embed.php?v=$data",
-                    headers = mapOf(
-                        "User-Agent" to
-                            "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
-                        "Accept" to
-                            "application/json, text/plain, */*",
-                        "Origin" to mainUrl
-                    )
-                )
-            } catch (_: Exception) {
-                return false
+        // استخراج كود الحلقة سواء جاء مسبوقاً بـ RunningMan أو كـ ID صافي
+        var videoId = data
+        if (data.startsWith("http")) {
+            val html = try { app.get(data).text } catch (_: Exception) { "" }
+            val regex = Regex("""embed\.php\?v=([^" '&]+)""")
+            val match = regex.find(html)
+            if (match != null) {
+                videoId = match.groupValues[1]
             }
-
-        val info =
-            try {
-                json.decodeFromString<ArabPlayerInfo>(
-                    response.text
-                )
-            } catch (_: Exception) {
-                return false
-            }
-
-        if (!info.ok) {
-            return false
         }
 
-        if (
-            info.type?.lowercase() != "hls"
-        ) {
-            return false
-        }
+        if (videoId.isBlank()) return false
 
-        if (info.src.isNullOrBlank()) {
-            return false
-        }
+        val infoUrl = "$mainUrl/ArabPlayer/info.php?v=${URLEncoder.encode(videoId, "UTF-8")}"
 
-        val streamUrl =
-            if (
-                info.src.startsWith("http://") ||
-                info.src.startsWith("https://")
-            ) {
-                info.src
-            } else {
-                "$mainUrl/ArabPlayer/${info.src.trimStart('/')}"
-            }
-
-        callback(
-            newExtractorLink(
-                source = name,
-                name = "ArabPlayer",
-                url = streamUrl,
-                type = ExtractorLinkType.M3U8
-            ) {
-                referer =
-                    "$mainUrl/ArabPlayer/embed.php?v=$data"
-
+        val response = try {
+            app.get(
+                infoUrl,
+                referer = "$mainUrl/ArabPlayer/embed.php?v=$videoId",
                 headers = mapOf(
-                    "User-Agent" to
-                        "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
-                    "Accept" to "*/*",
+                    "User-Agent" to "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
+                    "Accept" to "application/json, text/plain, */*",
+                    "X-Requested-With" to "XMLHttpRequest",
                     "Origin" to mainUrl
                 )
+            )
+        } catch (_: Exception) {
+            return false
+        }
 
-                quality =
-                    Qualities.Unknown.value
+        val info = try {
+            json.decodeFromString<ArabPlayerInfo>(response.text)
+        } catch (_: Exception) {
+            null
+        } ?: return false
+
+        // السماح بالروابط طالما الجودات متوفرة
+        val qualities = info.qualities.filter { !it.src.isNullOrBlank() }
+        if (qualities.isEmpty()) {
+            return false
+        }
+
+        var foundLink = false
+
+        qualities.forEach { qualityInfo ->
+            val src = qualityInfo.src ?: return@forEach
+
+            val streamUrl = if (src.startsWith("http://") || src.startsWith("https://")) {
+                src
+            } else {
+                "$mainUrl/ArabPlayer/${src.trimStart('/')}"
             }
-        )
 
-        return true
+            // استخراج دقة الشاشة بأمان بدون مشاكل تحويل الأنواع
+            val parsedQuality = qualityInfo.height 
+                ?: qualityInfo.label?.replace("p", "")?.toIntOrNull() 
+                ?: Qualities.Unknown.value
+
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = "ArabPlayer ${qualityInfo.label ?: ""}".trim(),
+                    url = streamUrl,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = "$mainUrl/ArabPlayer/embed.php?v=$videoId"
+                    this.headers = mapOf(
+                        "User-Agent" to "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
+                        "Accept" to "*/*",
+                        "Origin" to mainUrl
+                    )
+                    this.quality = parsedQuality
+                }
+            )
+
+            foundLink = true
+        }
+
+        return foundLink
     }
 }
