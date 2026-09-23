@@ -5,29 +5,23 @@ import com.lagradost.cloudstream3.utils.*
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
 import java.net.URLEncoder
 
 class ArabRunnersProvider : MainAPI() {
 
     override var mainUrl = "https://arabrunnersteam.org"
-
     override var name = "Arab Runners Team"
-
     override var lang = "ar"
-
     override val hasMainPage = true
 
-    override val supportedTypes = setOf(
-        TvType.TvSeries
-    )
-
-    override val mainPage = mainPageOf(
-        "$mainUrl/category/%d8%a7%d9%84%d9%83%d9%84/%d8%a7%d9%84%d8%b1%d8%ac%d9%84-%d8%a7%d9%84%d8%ac%d8%a7%d8%b1%d9%8a/" to "الرجل الجاري"
-    )
+    override val supportedTypes = setOf(TvType.TvSeries)
 
     private val runningManCategory =
         "$mainUrl/category/%d8%a7%d9%84%d9%83%d9%84/%d8%a7%d9%84%d8%b1%d8%ac%d9%84-%d8%a7%d9%84%d8%ac%d8%a7%d8%b1%d9%8a/"
+
+    override val mainPage = mainPageOf(
+        runningManCategory to "الرجل الجاري"
+    )
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -50,61 +44,29 @@ class ArabRunnersProvider : MainAPI() {
         val src: String = ""
     )
 
-    private fun getPoster(element: Element): String? {
-        return element.selectFirst(
-            "img[src], img[data-src], img[data-lazy-src]"
-        )?.let { image ->
-            image.attr("src")
-                .ifBlank { image.attr("data-src") }
-                .ifBlank { image.attr("data-lazy-src") }
-                .takeIf { it.startsWith("http") }
-        }
-    }
-
-    private fun extractEpisodeNumber(text: String, url: String): Int? {
+    private fun extractEpisodeNumber(url: String): Int? {
         return Regex(
-            """(?:الحلقة|episode)[^\d]*(\d+)""",
+            """الرجل-الجاري-الحلقة-(\d+)""",
             RegexOption.IGNORE_CASE
         )
-            .find(text)
+            .find(url)
             ?.groupValues
             ?.getOrNull(1)
             ?.toIntOrNull()
-            ?: Regex("""الحلقة-(\d+)""")
-                .find(url)
-                ?.groupValues
-                ?.getOrNull(1)
-                ?.toIntOrNull()
     }
 
     private fun extractEpisodeLinks(document: Document): List<Pair<Int, String>> {
         return document
             .select("a[href*='/movies/']")
             .mapNotNull { link ->
+                val href = link.attr("abs:href").trim()
 
-                val href = link
-                    .attr("href")
-                    .trim()
-
-                if (!href.startsWith(mainUrl)) {
+                if (href.isBlank()) {
                     return@mapNotNull null
                 }
 
-                val text = link.text().trim()
-                val alt = link.selectFirst("img")?.attr("alt")?.trim().orEmpty()
-
-                val combinedText = "$text $alt $href"
-
-                if (!combinedText.contains("الرجل الجاري", ignoreCase = true) &&
-                    !combinedText.contains("running man", ignoreCase = true)
-                ) {
-                    return@mapNotNull null
-                }
-
-                val episodeNumber = extractEpisodeNumber(
-                    combinedText,
-                    href
-                ) ?: return@mapNotNull null
+                val episodeNumber = extractEpisodeNumber(href)
+                    ?: return@mapNotNull null
 
                 episodeNumber to href
             }
@@ -117,16 +79,14 @@ class ArabRunnersProvider : MainAPI() {
         var page = 1
 
         while (true) {
+            val pageUrl =
+                if (page == 1) {
+                    runningManCategory
+                } else {
+                    "${runningManCategory.trimEnd('/')}/page/$page/"
+                }
 
-            val pageUrl = if (page == 1) {
-                runningManCategory
-            } else {
-                "${runningManCategory.trimEnd('/')}/page/$page/"
-            }
-
-            val document = app
-                .get(pageUrl)
-                .document
+            val document = app.get(pageUrl).document
 
             val pageEpisodes = extractEpisodeLinks(document)
 
@@ -158,7 +118,6 @@ class ArabRunnersProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-
         if (page != 1) {
             return newHomePageResponse(
                 request.name,
@@ -209,13 +168,16 @@ class ArabRunnersProvider : MainAPI() {
         url: String
     ): LoadResponse? {
 
-        if (url.trimEnd('/') != runningManCategory.trimEnd('/')) {
+        if (
+            url.trimEnd('/') !=
+            runningManCategory.trimEnd('/')
+        ) {
             return null
         }
 
         val episodes = getAllEpisodes()
 
-        val episodeList = episodes.map { (episodeNumber, episodeUrl) ->
+        val episodeList = episodes.map { (episodeNumber, _) ->
 
             newEpisode("RunningMan$episodeNumber") {
                 name = "الرجل الجاري الحلقة $episodeNumber"
@@ -271,14 +233,15 @@ class ArabRunnersProvider : MainAPI() {
             return false
         }
 
-        val streamUrl = if (
-            info.src.startsWith("http://") ||
-            info.src.startsWith("https://")
-        ) {
-            info.src
-        } else {
-            "$mainUrl/ArabPlayer/${info.src.trimStart('/')}"
-        }
+        val streamUrl =
+            if (
+                info.src.startsWith("http://") ||
+                info.src.startsWith("https://")
+            ) {
+                info.src
+            } else {
+                "$mainUrl/ArabPlayer/${info.src.trimStart('/')}"
+            }
 
         callback(
             newExtractorLink(
@@ -287,7 +250,9 @@ class ArabRunnersProvider : MainAPI() {
                 url = streamUrl,
                 type = ExtractorLinkType.M3U8
             ) {
-                referer = "$mainUrl/ArabPlayer/embed.php?v=$data"
+                referer =
+                    "$mainUrl/ArabPlayer/embed.php?v=$data"
+
                 quality = Qualities.Unknown.value
             }
         )
