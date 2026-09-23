@@ -16,29 +16,25 @@ class ArabRunnersProvider : MainAPI() {
     override val hasMainPage = true
 
     override val supportedTypes = setOf(
-        TvType.TvSeries,
-        TvType.Movie
+        TvType.TvSeries
     )
 
     override val mainPage = mainPageOf(
-        "$mainUrl/" to "آخر الحلقات المضافة",
-
-        "$mainUrl/category/%d8%a7%d9%84%d9%83%d9%84/%d8%a7%d9%84%d8%b1%d8%ac%d9%84-%d8%a7%d9%84%d8%ac%d8%a7%d8%b1%d9%8a/" to "الرجل الجاري",
-
-        "$mainUrl/category/%d8%b0%d8%a7-%d8%b2%d9%88%d9%86-%d9%85%d9%87%d9%85%d8%a9-%d8%a7%d9%84%d8%a8%d9%82%d8%a7%d8%a1/" to "ذا زون: مهمة البقاء",
-
-        "$mainUrl/category/%d8%a7%d9%84%d9%83%d9%84/%d9%83%d9%88%d8%b1%d9%8a%d8%a7-%d8%b1%d9%82%d9%85-1/" to "كوريا رقم واحد"
+        "$mainUrl/category/%d8%a7%d9%84%d9%83%d9%84/%d8%a7%d9%84%d8%b1%d8%ac%d9%84-%d8%a7%d9%84%d8%ac%d8%a7%d8%b1%d9%8a/" to "الرجل الجاري"
     )
 
     private fun getTitle(element: Element): String? {
+
         return element.selectFirst(
-            "img[alt], h1, h2, h3, h4, .title, .entry-title"
+            "h1, h2, h3, h4, .title, .entry-title, img[alt]"
         )?.let {
+
             if (it.tagName() == "img") {
                 it.attr("alt")
             } else {
                 it.text()
             }
+
         }?.trim()?.takeIf {
             it.isNotBlank()
         } ?: element.text()
@@ -50,9 +46,11 @@ class ArabRunnersProvider : MainAPI() {
     }
 
     private fun getPoster(element: Element): String? {
+
         return element.selectFirst(
             "img[src], img[data-src], img[data-lazy-src]"
         )?.let { image ->
+
             image.attr("src")
                 .ifBlank {
                     image.attr("data-src")
@@ -71,7 +69,9 @@ class ArabRunnersProvider : MainAPI() {
     ): List<SearchResponse> {
 
         return document
-            .select("article, .post, .item, .post-item")
+            .select(
+                "article, .post, .item, .post-item"
+            )
             .mapNotNull { element ->
 
                 val link = element
@@ -113,14 +113,25 @@ class ArabRunnersProvider : MainAPI() {
             "${request.data.trimEnd('/')}/page/$page/"
         }
 
-        val document = app.get(url).document
+        val document = app
+            .get(url)
+            .document
 
         val results = makeSearchResponses(document)
+
+        val hasNext = document
+            .select("a[href]")
+            .any { link ->
+
+                link.text()
+                    .trim()
+                    .replace(Regex("\\s+"), " ") == "التالي"
+            }
 
         return newHomePageResponse(
             request.name,
             results,
-            hasNext = results.isNotEmpty()
+            hasNext = hasNext
         )
     }
 
@@ -144,7 +155,9 @@ class ArabRunnersProvider : MainAPI() {
         url: String
     ): LoadResponse? {
 
-        val document = app.get(url).document
+        val document = app
+            .get(url)
+            .document
 
         val title = document
             .selectFirst(
@@ -156,7 +169,9 @@ class ArabRunnersProvider : MainAPI() {
                 it.isNotBlank()
             }
             ?: document
-                .selectFirst("meta[property='og:title']")
+                .selectFirst(
+                    "meta[property='og:title']"
+                )
                 ?.attr("content")
                 ?.trim()
             ?: return null
@@ -174,6 +189,7 @@ class ArabRunnersProvider : MainAPI() {
                     "img[src], img[data-src], img[data-lazy-src]"
                 )
                 ?.let {
+
                     it.attr("src")
                         .ifBlank {
                             it.attr("data-src")
@@ -190,77 +206,39 @@ class ArabRunnersProvider : MainAPI() {
             ?.attr("content")
             ?.trim()
 
-        val episodeLinks = document
-            .select("a[href]")
-            .mapNotNull { link ->
+        val episodeNumber =
+            Regex(
+                """(?:الحلقة|episode)[^\d]*(\d+)""",
+                RegexOption.IGNORE_CASE
+            )
+                .find(title)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toIntOrNull()
+                ?: Regex(
+                    """-(\d+)/?$"""
+                )
+                    .find(url)
+                    ?.groupValues
+                    ?.getOrNull(1)
+                    ?.toIntOrNull()
 
-                val episodeUrl = link
-                    .attr("href")
-                    .trim()
-
-                val episodeText = link
-                    .text()
-                    .trim()
-
-                if (
-                    episodeUrl.isBlank() ||
-                    !episodeUrl.startsWith(mainUrl)
-                ) {
-                    return@mapNotNull null
-                }
-
-                val episodeNumber =
-                    Regex(
-                        """(?:الحلقة|episode)[^\d]*(\d+)""",
-                        RegexOption.IGNORE_CASE
-                    )
-                        .find(episodeText)
-                        ?.groupValues
-                        ?.getOrNull(1)
-                        ?.toIntOrNull()
-                        ?: Regex(
-                            """-(\d+)/?$"""
-                        )
-                            .find(episodeUrl)
-                            ?.groupValues
-                            ?.getOrNull(1)
-                            ?.toIntOrNull()
-                        ?: return@mapNotNull null
-
-                val season =
-                    Regex(
-                        """(?:الموسم|season)[^\d]*(\d+)"""
-                    )
-                        .find(episodeText)
-                        ?.groupValues
-                        ?.getOrNull(1)
-                        ?.toIntOrNull()
-                        ?: 1
-
-                newEpisode(episodeUrl) {
-                    name = episodeText.ifBlank {
-                        "Episode $episodeNumber"
-                    }
-                    this.season = season
-                    this.episode = episodeNumber
-                }
-            }
-            .distinctBy {
-                it.data
-            }
-            .sortedWith(
-                compareBy<Episode> {
-                    it.season ?: 1
-                }.thenBy {
-                    it.episode ?: 0
+        val episode = if (episodeNumber != null) {
+            listOf(
+                newEpisode(url) {
+                    name = title
+                    episode = episodeNumber
                 }
             )
+        } else {
+            emptyList()
+        }
 
         return newTvSeriesLoadResponse(
             title,
             url,
             TvType.TvSeries,
-            episodeLinks
+            episode
         ) {
             posterUrl = poster
             this.plot = plot
