@@ -67,10 +67,10 @@ class ArabRunnersProvider : MainAPI() {
             request.name,
             listOf(
                 newTvSeriesSearchResponse(
-                    "الرجل الجاري",
-                    runningManCategory,
-                    TvType.TvSeries,
-                    runningManPoster
+                    name = "الرجل الجاري",
+                    url = runningManCategory,
+                    type = TvType.TvSeries,
+                    posterUrl = runningManPoster
                 )
             ),
             hasNext = false
@@ -94,10 +94,10 @@ class ArabRunnersProvider : MainAPI() {
 
         return listOf(
             newTvSeriesSearchResponse(
-                "الرجل الجاري",
-                runningManCategory,
-                TvType.TvSeries,
-                runningManPoster
+                name = "الرجل الجاري",
+                url = runningManCategory,
+                type = TvType.TvSeries,
+                posterUrl = runningManPoster
             )
         )
     }
