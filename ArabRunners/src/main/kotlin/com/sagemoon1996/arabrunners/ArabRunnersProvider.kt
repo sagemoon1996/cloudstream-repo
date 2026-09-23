@@ -4,7 +4,6 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import org.jsoup.nodes.Document
 import java.net.URLEncoder
 
 class ArabRunnersProvider : MainAPI() {
@@ -44,81 +43,8 @@ class ArabRunnersProvider : MainAPI() {
         val src: String = ""
     )
 
-    private fun extractEpisodeNumber(url: String): Int? {
-        return Regex(
-            """الرجل-الجاري-الحلقة-(\d+)""",
-            RegexOption.IGNORE_CASE
-        )
-            .find(url)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.toIntOrNull()
-    }
-
-    private fun extractEpisodeLinks(
-        document: Document
-    ): List<Pair<Int, String>> {
-
-        return document
-            .select("a[href*='/movies/']")
-            .mapNotNull { link ->
-
-                val href = link.attr("abs:href").trim()
-
-                if (href.isBlank()) {
-                    return@mapNotNull null
-                }
-
-                val episodeNumber =
-                    extractEpisodeNumber(href)
-                        ?: return@mapNotNull null
-
-                episodeNumber to href
-            }
-            .distinctBy { it.first }
-    }
-
-    private suspend fun getAllEpisodes(): List<Pair<Int, String>> {
-
-        val episodes = mutableListOf<Pair<Int, String>>()
-
-        var page = 1
-
-        while (true) {
-
-            val pageUrl =
-                if (page == 1) {
-                    runningManCategory
-                } else {
-                    "${runningManCategory.trimEnd('/')}/page/$page/"
-                }
-
-            val document = app.get(pageUrl).document
-
-            val pageEpisodes =
-                extractEpisodeLinks(document)
-
-            episodes.addAll(pageEpisodes)
-
-            val hasNext =
-                document
-                    .select("a[href]")
-                    .any { link ->
-                        link.text()
-                            .trim()
-                            .replace(Regex("\\s+"), " ") == "التالي"
-                    }
-
-            if (!hasNext) {
-                break
-            }
-
-            page++
-        }
-
-        return episodes
-            .distinctBy { it.first }
-            .sortedByDescending { it.first }
+    private fun getKnownEpisodes(): List<Int> {
+        return (820 downTo 786).toList()
     }
 
     override suspend fun getMainPage(
@@ -182,10 +108,8 @@ class ArabRunnersProvider : MainAPI() {
             return null
         }
 
-        val episodes = getAllEpisodes()
-
         val episodeList =
-            episodes.map { (episodeNumber, _) ->
+            getKnownEpisodes().map { episodeNumber ->
 
                 newEpisode(
                     "RunningMan$episodeNumber"
