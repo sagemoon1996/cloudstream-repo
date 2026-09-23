@@ -106,7 +106,7 @@ class ArabRunnersProvider : MainAPI() {
 
         val episodeList = getKnownEpisodes().map { episodeNumber ->
             newEpisode("RunningMan$episodeNumber") {
-                name = "RunningMan DATA TEST"
+                name = "Running Man $episodeNumber"
                 episode = episodeNumber
                 posterUrl = runningManPoster
             }
@@ -129,15 +129,35 @@ class ArabRunnersProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
-        callback(
-            newExtractorLink(
-                source = name,
-                name = "DATA = $data",
-                url = "https://example.com/test.m3u8",
-                type = ExtractorLinkType.M3U8
-            )
+        val episodeId = data.trim()
+
+        if (episodeId.isBlank()) {
+            return false
+        }
+
+        val streamUrl =
+            "$mainUrl/ArabPlayer/stream.php?v=$episodeId"
+
+        val headers = mapOf(
+            "User-Agent" to
+                "Mozilla/5.0 (Linux; Android 10; K) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/120.0.0.0 Mobile Safari/537.36",
+            "Accept" to "*/*"
         )
 
-        return true
+        return try {
+            M3u8Helper.generateM3u8(
+                name,
+                streamUrl,
+                streamUrl,
+                mainUrl,
+                headers = headers
+            ).forEach(callback)
+
+            true
+        } catch (_: Exception) {
+            false
+        }
     }
 }
