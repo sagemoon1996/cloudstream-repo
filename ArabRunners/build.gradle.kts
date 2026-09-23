@@ -7,5 +7,6 @@ cloudstream {
     tvTypes = listOf(
         "TvSeries"
     )
+    iconUrl = "https://arabrunnersteam.org/wp-content/uploads/2026/05/802.png"
     language = "ar"
 }
