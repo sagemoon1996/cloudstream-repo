@@ -4,7 +4,6 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import java.net.URLDecoder
 import java.net.URLEncoder
 
 class ArabRunnersProvider : MainAPI() {
@@ -33,7 +32,7 @@ class ArabRunnersProvider : MainAPI() {
 
     @Serializable
     private data class ArabPlayerInfo(
-        val ok: Boolean? = false,
+        val ok: Boolean = false,
         val title: String? = null,
         val poster: String? = null,
         val type: String? = null,
@@ -109,23 +108,11 @@ class ArabRunnersProvider : MainAPI() {
         url: String
     ): LoadResponse? {
 
-        val decodedInputUrl = try {
-            URLDecoder.decode(url, "UTF-8").trimEnd('/')
-        } catch (_: Exception) {
-            url.trimEnd('/')
-        }
+        val cleanUrl = url.trimEnd('/')
 
-        val decodedCategoryUrl = try {
-            URLDecoder.decode(runningManCategory, "UTF-8").trimEnd('/')
-        } catch (_: Exception) {
-            runningManCategory.trimEnd('/')
-        }
+        val categoryUrl = runningManCategory.trimEnd('/')
 
-        if (
-            !decodedInputUrl.contains("running-man") &&
-            !decodedInputUrl.contains("الرجل-الجاري") &&
-            decodedInputUrl != decodedCategoryUrl
-        ) {
+        if (cleanUrl != categoryUrl) {
             return null
         }
 
@@ -154,31 +141,32 @@ class ArabRunnersProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
-        // استخراج كود الحلقة سواء جاء مسبوقاً بـ RunningMan أو كـ ID صافي
-        var videoId = data
-        if (data.startsWith("http")) {
-            val html = try { app.get(data).text } catch (_: Exception) { "" }
-            val regex = Regex("""embed\.php\?v=([^" '&]+)""")
-            val match = regex.find(html)
-            if (match != null) {
-                videoId = match.groupValues[1]
-            }
+        if (!data.startsWith("RunningMan")) {
+            return false
         }
 
-        if (videoId.isBlank()) return false
+        val videoId = data.trim()
 
-        val infoUrl = "$mainUrl/ArabPlayer/info.php?v=${URLEncoder.encode(videoId, "UTF-8")}"
+        val infoUrl =
+            "$mainUrl/ArabPlayer/info.php?v=${URLEncoder.encode(videoId, "UTF-8")}"
+
+        val referer =
+            "$mainUrl/ArabPlayer/embed.php?v=$videoId"
+
+        val headers = mapOf(
+            "User-Agent" to
+                "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+            "Accept" to "application/json, text/plain, */*",
+            "X-Requested-With" to "XMLHttpRequest",
+            "Origin" to mainUrl
+        )
 
         val response = try {
             app.get(
                 infoUrl,
-                referer = "$mainUrl/ArabPlayer/embed.php?v=$videoId",
-                headers = mapOf(
-                    "User-Agent" to "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
-                    "Accept" to "application/json, text/plain, */*",
-                    "X-Requested-With" to "XMLHttpRequest",
-                    "Origin" to mainUrl
-                )
+                referer = referer,
+                headers = headers
             )
         } catch (_: Exception) {
             return false
@@ -187,51 +175,67 @@ class ArabRunnersProvider : MainAPI() {
         val info = try {
             json.decodeFromString<ArabPlayerInfo>(response.text)
         } catch (_: Exception) {
-            null
-        } ?: return false
+            return false
+        }
 
-        // السماح بالروابط طالما الجودات متوفرة
-        val qualities = info.qualities.filter { !it.src.isNullOrBlank() }
+        if (!info.ok) {
+            return false
+        }
+
+        if (info.type?.lowercase() != "hls") {
+            return false
+        }
+
+        val qualities = info.qualities.filter {
+            !it.src.isNullOrBlank()
+        }
+
         if (qualities.isEmpty()) {
             return false
         }
 
-        var foundLink = false
+        var linksFound = false
 
-        qualities.forEach { qualityInfo ->
-            val src = qualityInfo.src ?: return@forEach
+        qualities.forEach { quality ->
 
-            val streamUrl = if (src.startsWith("http://") || src.startsWith("https://")) {
-                src
-            } else {
-                "$mainUrl/ArabPlayer/${src.trimStart('/')}"
-            }
+            val src = quality.src ?: return@forEach
 
-            // استخراج دقة الشاشة بأمان بدون مشاكل تحويل الأنواع
-            val parsedQuality = qualityInfo.height 
-                ?: qualityInfo.label?.replace("p", "")?.toIntOrNull() 
-                ?: Qualities.Unknown.value
-
-            callback(
-                newExtractorLink(
-                    source = name,
-                    name = "ArabPlayer ${qualityInfo.label ?: ""}".trim(),
-                    url = streamUrl,
-                    type = ExtractorLinkType.M3U8
+            val streamUrl =
+                if (
+                    src.startsWith("http://") ||
+                    src.startsWith("https://")
                 ) {
-                    this.referer = "$mainUrl/ArabPlayer/embed.php?v=$videoId"
-                    this.headers = mapOf(
-                        "User-Agent" to "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
-                        "Accept" to "*/*",
-                        "Origin" to mainUrl
-                    )
-                    this.quality = parsedQuality
+                    src
+                } else {
+                    "$mainUrl/ArabPlayer/${src.trimStart('/')}"
                 }
-            )
 
-            foundLink = true
+            try {
+                M3u8Helper.generateM3u8(
+                    name = name,
+                    streamUrl = streamUrl,
+                    referer = referer,
+                    headers = headers
+                ).forEach { link ->
+
+                    val qualityValue =
+                        quality.height
+                            ?: quality.label
+                                ?.removeSuffix("p")
+                                ?.toIntOrNull()
+                            ?: Qualities.Unknown.value
+
+                    link.quality = qualityValue
+
+                    callback(link)
+
+                    linksFound = true
+                }
+            } catch (_: Exception) {
+                // نواصل مع بقية الجودات إذا جودة واحدة فشلت
+            }
         }
 
-        return foundLink
+        return linksFound
     }
 }
