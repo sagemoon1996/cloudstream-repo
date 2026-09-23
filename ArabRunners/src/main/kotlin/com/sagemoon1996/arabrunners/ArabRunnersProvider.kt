@@ -122,6 +122,62 @@ class ArabRunnersProvider : MainAPI() {
         }
     }
 
+    private fun decodeBase64Url(
+        encoded: String
+    ): String? {
+
+        return try {
+            val clean = encoded.trim()
+
+            val table =
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
+
+            val bytes = mutableListOf<Byte>()
+
+            var buffer = 0
+            var bits = 0
+
+            for (char in clean) {
+
+                if (char == '=') {
+                    break
+                }
+
+                val index = table.indexOf(char)
+
+                if (index < 0) {
+                    return null
+                }
+
+                buffer = (buffer shl 6) or index
+                bits += 6
+
+                if (bits >= 8) {
+                    bits -= 8
+                    bytes.add((buffer shr bits).toByte())
+                }
+            }
+
+            val decoded =
+                String(
+                    bytes.toByteArray(),
+                    Charsets.UTF_8
+                ).trim()
+
+            if (
+                decoded.startsWith("https://") ||
+                decoded.startsWith("http://")
+            ) {
+                decoded
+            } else {
+                null
+            }
+
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -129,34 +185,152 @@ class ArabRunnersProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
-        val episodeId = data.trim()
+        val videoId =
+            if (data.contains("v=")) {
+                data
+                    .substringAfter("v=")
+                    .substringBefore("&")
+                    .trim()
+            } else {
+                data.trim()
+            }
 
-        if (episodeId.isBlank()) {
+        if (videoId.isBlank()) {
             return false
         }
 
+        val embedUrl =
+            "$mainUrl/ArabPlayer/embed.php?v=$videoId"
+
         val streamUrl =
-            "$mainUrl/ArabPlayer/stream.php?v=$episodeId"
+            "$mainUrl/ArabPlayer/stream.php?v=$videoId"
+
+        val userAgent =
+            "Mozilla/5.0 (Linux; Android 10; K) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) " +
+            "Chrome/120.0.0.0 Mobile Safari/537.36"
 
         val headers = mapOf(
-            "User-Agent" to
-                "Mozilla/5.0 (Linux; Android 10; K) " +
-                "AppleWebKit/537.36 (KHTML, like Gecko) " +
-                "Chrome/120.0.0.0 Mobile Safari/537.36",
-            "Accept" to "*/*"
+            "User-Agent" to userAgent,
+            "Accept" to "*/*",
+            "Referer" to embedUrl,
+            "Origin" to mainUrl
         )
 
-        return try {
-            M3u8Helper.generateM3u8(
-                source = name,
-                streamUrl = streamUrl,
-                referer = mainUrl,
+        val response = try {
+            app.get(
+                streamUrl,
                 headers = headers
-            ).forEach(callback)
-
-            true
+            )
         } catch (_: Exception) {
-            false
+            return false
         }
+
+        val masterContent =
+            response.text
+
+        if (
+            masterContent.isBlank() ||
+            !masterContent.contains("#EXTM3U")
+        ) {
+            return false
+        }
+
+        var currentQuality =
+            Qualities.Unknown.value
+
+        var foundLinks = false
+
+        masterContent
+            .lines()
+            .forEach { line ->
+
+                val trimmed =
+                    line.trim()
+
+                if (
+                    trimmed.startsWith(
+                        "#EXT-X-STREAM-INF"
+                    )
+                ) {
+
+                    val resolution =
+                        Regex(
+                            """RESOLUTION=(\d+)x(\d+)"""
+                        ).find(trimmed)
+
+                    if (resolution != null) {
+
+                        currentQuality =
+                            resolution
+                                .groupValues[2]
+                                .toIntOrNull()
+                                ?: Qualities.Unknown.value
+                    }
+
+                    return@forEach
+                }
+
+                if (
+                    !trimmed.contains(
+                        "proxy.php?u="
+                    )
+                ) {
+                    return@forEach
+                }
+
+                val encodedPart =
+                    try {
+                        trimmed
+                            .substringAfter("u=")
+                            .substringBefore("&")
+                            .substringBefore(" ")
+                            .trim()
+                    } catch (_: Exception) {
+                        return@forEach
+                    }
+
+                if (encodedPart.isBlank()) {
+                    return@forEach
+                }
+
+                val decodedParam =
+                    try {
+                        URLDecoder.decode(
+                            encodedPart,
+                            "UTF-8"
+                        )
+                    } catch (_: Exception) {
+                        encodedPart
+                    }
+
+                val yandexUrl =
+                    decodeBase64Url(decodedParam)
+                        ?: return@forEach
+
+                callback(
+                    ExtractorLink(
+                        source = name,
+                        name =
+                            if (
+                                currentQuality !=
+                                Qualities.Unknown.value
+                            ) {
+                                "ArabPlayer ${currentQuality}p"
+                            } else {
+                                "ArabPlayer HD"
+                            },
+                        url = yandexUrl,
+                        referer = embedUrl,
+                        quality = currentQuality,
+                        type = ExtractorLinkType.M3U8,
+                        headers = headers
+                    )
+                )
+
+                foundLinks = true
+            }
+
+        return foundLinks
     }
 }
