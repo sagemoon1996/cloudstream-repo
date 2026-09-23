@@ -69,9 +69,10 @@ class ArabRunnersProvider : MainAPI() {
                 newTvSeriesSearchResponse(
                     name = "الرجل الجاري",
                     url = runningManCategory,
-                    type = TvType.TvSeries,
+                    type = TvType.TvSeries
+                ) {
                     posterUrl = runningManPoster
-                )
+                }
             ),
             hasNext = false
         )
@@ -96,9 +97,10 @@ class ArabRunnersProvider : MainAPI() {
             newTvSeriesSearchResponse(
                 name = "الرجل الجاري",
                 url = runningManCategory,
-                type = TvType.TvSeries,
+                type = TvType.TvSeries
+            ) {
                 posterUrl = runningManPoster
-            )
+            }
         )
     }
 
