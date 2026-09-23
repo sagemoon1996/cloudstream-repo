@@ -109,7 +109,6 @@ class ArabRunnersProvider : MainAPI() {
     ): LoadResponse? {
 
         val cleanUrl = url.trimEnd('/')
-
         val categoryUrl = runningManCategory.trimEnd('/')
 
         if (cleanUrl != categoryUrl) {
@@ -212,6 +211,7 @@ class ArabRunnersProvider : MainAPI() {
 
             try {
                 M3u8Helper.generateM3u8(
+                    source = name,
                     name = name,
                     streamUrl = streamUrl,
                     referer = referer,
