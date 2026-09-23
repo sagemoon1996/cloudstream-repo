@@ -1,10 +1,10 @@
 [
     {
         "iconUrl": "https://arabrunnersteam.org/wp-content/uploads/2026/05/802.png",
-        "fileHash": "sha256-c1cc948dd979d0755932a329e3160faec436caec3f71b90a02061c2131cca22e",
+        "fileHash": "sha256-881f3b3ae89076b5f6bd2e53892229106de7049b25a189289d0b1ef170dfe32d",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
-        "fileSize": 11478,
+        "fileSize": 11483,
         "status": 1,
         "language": "ar",
         "authors": [
