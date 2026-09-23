@@ -18,6 +18,9 @@ class ArabRunnersProvider : MainAPI() {
     private val runningManCategory =
         "$mainUrl/category/%d8%a7%d9%84%d9%83%d9%84/%d8%a7%d9%84%d8%b1%d8%ac%d9%84-%d8%a7%d9%84%d8%ac%d8%a7%d8%b1%d9%8a/"
 
+    private val runningManPoster =
+        "https://arabrunnersteam.org/wp-content/uploads/2025/09/kGhSem2uEuOiPP9hfc02OMcJZOJ.webp"
+
     override val mainPage = mainPageOf(
         runningManCategory to "الرجل الجاري"
     )
@@ -66,7 +69,8 @@ class ArabRunnersProvider : MainAPI() {
                 newTvSeriesSearchResponse(
                     "الرجل الجاري",
                     runningManCategory,
-                    TvType.TvSeries
+                    TvType.TvSeries,
+                    runningManPoster
                 )
             ),
             hasNext = false
@@ -92,7 +96,8 @@ class ArabRunnersProvider : MainAPI() {
             newTvSeriesSearchResponse(
                 "الرجل الجاري",
                 runningManCategory,
-                TvType.TvSeries
+                TvType.TvSeries,
+                runningManPoster
             )
         )
     }
@@ -118,6 +123,9 @@ class ArabRunnersProvider : MainAPI() {
                         "الرجل الجاري الحلقة $episodeNumber"
 
                     episode = episodeNumber
+
+                    posterUrl =
+                        runningManPoster
                 }
             }
 
@@ -126,7 +134,10 @@ class ArabRunnersProvider : MainAPI() {
             runningManCategory,
             TvType.TvSeries,
             episodeList
-        )
+        ) {
+            posterUrl =
+                runningManPoster
+        }
     }
 
     override suspend fun loadLinks(
@@ -146,11 +157,22 @@ class ArabRunnersProvider : MainAPI() {
             }"
 
         val response =
-            app.get(
-                infoUrl,
-                referer =
-                    "$mainUrl/ArabPlayer/embed.php?v=$data"
-            )
+            try {
+                app.get(
+                    infoUrl,
+                    referer =
+                        "$mainUrl/ArabPlayer/embed.php?v=$data",
+                    headers = mapOf(
+                        "User-Agent" to
+                            "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
+                        "Accept" to
+                            "application/json, text/plain, */*",
+                        "Origin" to mainUrl
+                    )
+                )
+            } catch (_: Exception) {
+                return false
+            }
 
         val info =
             try {
@@ -191,6 +213,13 @@ class ArabRunnersProvider : MainAPI() {
             ) {
                 referer =
                     "$mainUrl/ArabPlayer/embed.php?v=$data"
+
+                headers = mapOf(
+                    "User-Agent" to
+                        "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
+                    "Accept" to "*/*",
+                    "Origin" to mainUrl
+                )
 
                 quality =
                     Qualities.Unknown.value
