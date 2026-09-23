@@ -4,7 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import java.net.URLEncoder
+import java.net.URLDecoder
 
 class ArabRunnersProvider : MainAPI() {
 
@@ -19,7 +19,7 @@ class ArabRunnersProvider : MainAPI() {
         "$mainUrl/category/%d8%a7%d9%84%d9%83%d9%84/%d8%a7%d9%84%d8%b1%d8%ac%d9%84-%d8%a7%d9%84%d8%ac%d8%a7%d8%b1%d9%8a/"
 
     private val runningManPoster =
-        "$mainUrl/wp-content/uploads/2025/09/kGhSem2uEuOiPP9hfc02OMcJZOJ.webp"
+        "https://arabrunnersteam.org/wp-content/uploads/2025/09/kGhSem2uEuOiPP9hfc02OMcJZOJ.webp"
 
     override val mainPage = mainPageOf(
         runningManCategory to "الرجل الجاري"
@@ -27,12 +27,13 @@ class ArabRunnersProvider : MainAPI() {
 
     private val json = Json {
         ignoreUnknownKeys = true
+        isLenient = true
         coerceInputValues = true
     }
 
     @Serializable
     private data class ArabPlayerInfo(
-        val ok: Boolean = false,
+        val ok: Boolean? = false,
         val title: String? = null,
         val poster: String? = null,
         val type: String? = null,
@@ -56,11 +57,7 @@ class ArabRunnersProvider : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse {
         if (page != 1) {
-            return newHomePageResponse(
-                request.name,
-                emptyList(),
-                hasNext = false
-            )
+            return newHomePageResponse(request.name, emptyList(), hasNext = false)
         }
 
         return newHomePageResponse(
@@ -78,10 +75,7 @@ class ArabRunnersProvider : MainAPI() {
         )
     }
 
-    override suspend fun search(
-        query: String
-    ): List<SearchResponse> {
-
+    override suspend fun search(query: String): List<SearchResponse> {
         val normalizedQuery = query.trim().lowercase()
 
         if (
@@ -103,18 +97,8 @@ class ArabRunnersProvider : MainAPI() {
         )
     }
 
-    override suspend fun load(
-        url: String
-    ): LoadResponse? {
-
-        val cleanUrl = url.trimEnd('/')
-        val categoryUrl = runningManCategory.trimEnd('/')
-
-        if (cleanUrl != categoryUrl) {
-            return null
-        }
-
-        val episodes = getKnownEpisodes().map { episodeNumber ->
+    override suspend fun load(url: String): LoadResponse {
+        val episodeList = getKnownEpisodes().map { episodeNumber ->
             newEpisode("RunningMan$episodeNumber") {
                 name = "الرجل الجاري الحلقة $episodeNumber"
                 episode = episodeNumber
@@ -126,9 +110,31 @@ class ArabRunnersProvider : MainAPI() {
             "الرجل الجاري",
             runningManCategory,
             TvType.TvSeries,
-            episodes
+            episodeList
         ) {
             posterUrl = runningManPoster
+        }
+    }
+
+    // دالة فك تشفير Base64 الاستخراجية الخاصة بالروابط المخبأة في proxy.php?u=
+    private fun decodeBase64StreamUrl(rawUrl: String): String {
+        if (!rawUrl.contains("u=")) return rawUrl
+
+        val encodedPart = rawUrl.substringAfter("u=").substringBefore("&")
+        val cleanPart = try { URLDecoder.decode(encodedPart, "UTF-8").trim() } catch (_: Exception) { encodedPart.trim() }
+
+        return try {
+            val bytes = android.util.Base64.decode(cleanPart, android.util.Base64.DEFAULT)
+            val decoded = String(bytes, Charsets.UTF-8).trim()
+            if (decoded.startsWith("http://") || decoded.startsWith("https://")) decoded else rawUrl
+        } catch (_: Exception) {
+            try {
+                val bytes = java.util.Base64.getDecoder().decode(cleanPart)
+                val decoded = String(bytes, Charsets.UTF-8).trim()
+                if (decoded.startsWith("http://") || decoded.startsWith("https://")) decoded else rawUrl
+            } catch (_: Exception) {
+                rawUrl
+            }
         }
     }
 
@@ -139,89 +145,108 @@ class ArabRunnersProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
-        if (!data.startsWith("RunningMan")) {
-            return false
+        val videoId = if (data.contains("v=")) {
+            data.substringAfter("v=").substringBefore("&")
+        } else {
+            data.trim()
         }
 
-        val videoId = data.trim()
+        if (videoId.isBlank()) return false
 
-        val infoUrl =
-            "$mainUrl/ArabPlayer/info.php?v=${URLEncoder.encode(videoId, "UTF-8")}"
+        val embedUrl = "$mainUrl/ArabPlayer/embed.php?v=$videoId"
+        val infoUrl = "$mainUrl/ArabPlayer/info.php?v=$videoId"
+        val userAgent = "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
 
-        val referer =
-            "$mainUrl/ArabPlayer/embed.php?v=$videoId"
-
-        val headers = mapOf(
-            "User-Agent" to
-                "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-            "Accept" to "*/*",
-            "Origin" to mainUrl
-        )
-
+        // 1. طلب بيانات الحلقة من info.php عبر AJAX
         val response = try {
             app.get(
                 infoUrl,
-                referer = referer,
-                headers = headers
+                referer = embedUrl,
+                headers = mapOf(
+                    "User-Agent" to userAgent,
+                    "Accept" to "application/json, text/plain, */*",
+                    "X-Requested-With" to "XMLHttpRequest",
+                    "Origin" to mainUrl
+                )
             )
         } catch (_: Exception) {
             return false
         }
+
+        val responseText = response.text
+        if (responseText.isBlank()) return false
 
         val info = try {
-            json.decodeFromString<ArabPlayerInfo>(response.text)
+            json.decodeFromString<ArabPlayerInfo>(responseText)
         } catch (_: Exception) {
-            return false
+            null
+        } ?: return false
+
+        val sources = mutableListOf<Pair<String, String>>()
+
+        info.qualities.forEach { qualityItem ->
+            if (!qualityItem.src.isNullOrBlank()) {
+                val label = qualityItem.label ?: if (qualityItem.height != null) "${qualityItem.height}p" else "Auto"
+                sources.add(Pair(label, qualityItem.src))
+            }
         }
 
-        if (!info.ok || info.type?.lowercase() != "hls") {
-            return false
+        if (sources.isEmpty() && !info.src.isNullOrBlank()) {
+            sources.add(Pair("Auto", info.src))
         }
 
-        val qualities = info.qualities.filter {
-            !it.src.isNullOrBlank()
-        }
+        if (sources.isEmpty()) return false
 
-        var found = false
+        var foundLink = false
 
-        qualities.forEach { quality ->
+        for ((label, rawSrc) in sources) {
+            val fullRawUrl = if (rawSrc.startsWith("http://") || rawSrc.startsWith("https://")) {
+                rawSrc
+            } else {
+                "$mainUrl/ArabPlayer/${rawSrc.trimStart('/')}"
+            }
 
-            val src = quality.src ?: return@forEach
+            // فك تشفير رابط الـ CDN الأصلي المباشر من Base64
+            val directStreamUrl = decodeBase64StreamUrl(fullRawUrl)
+            val qualityHeight = label.replace("p", "").toIntOrNull() ?: Qualities.Unknown.value
 
-            val streamUrl =
-                if (
-                    src.startsWith("http://") ||
-                    src.startsWith("https://")
-                ) {
-                    src
-                } else {
-                    "$mainUrl/ArabPlayer/${src.trimStart('/')}"
-                }
-
-            val qualityValue =
-                quality.height
-                    ?: quality.label
-                        ?.removeSuffix("p")
-                        ?.toIntOrNull()
-                    ?: Qualities.Unknown.value
-
-            callback(
-                newExtractorLink(
+            // محاولة جلب جودات المانفيست إن وجدت
+            val m3u8Links = try {
+                M3u8Helper.generateSeek264Links(
                     source = name,
-                    name = "ArabPlayer ${quality.label ?: ""}".trim(),
-                    url = streamUrl,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    this.referer = referer
-                    this.headers = headers
-                    this.quality = qualityValue
-                }
-            )
+                    streamUrl = directStreamUrl,
+                    referer = embedUrl,
+                    quality = qualityHeight
+                )
+            } catch (_: Exception) {
+                emptyList()
+            }
 
-            found = true
+            if (m3u8Links.isNotEmpty()) {
+                m3u8Links.forEach { link ->
+                    callback(link)
+                    foundLink = true
+                }
+            } else {
+                callback(
+                    ExtractorLink(
+                        source = name,
+                        name = "ArabPlayer $label".trim(),
+                        url = directStreamUrl,
+                        referer = embedUrl,
+                        quality = qualityHeight,
+                        type = ExtractorLinkType.M3U8,
+                        headers = mapOf(
+                            "User-Agent" to userAgent,
+                            "Referer" to embedUrl,
+                            "Origin" to mainUrl
+                        )
+                    )
+                )
+                foundLink = true
+            }
         }
 
-        return found
+        return foundLink
     }
 }
