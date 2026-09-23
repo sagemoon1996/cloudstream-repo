@@ -148,7 +148,7 @@ class ArabRunnersProvider : MainAPI() {
 
         return try {
             M3u8Helper.generateM3u8(
-                name = name,
+                source = name,
                 streamUrl = streamUrl,
                 referer = mainUrl,
                 headers = headers
