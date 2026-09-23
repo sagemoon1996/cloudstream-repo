@@ -44,7 +44,7 @@ class ArabRunnersProvider : MainAPI() {
     )
 
     private fun getKnownEpisodes(): List<Int> {
-        return (820 downTo 786).toList()
+        return (820 downTo 110).toList()
     }
 
     override suspend fun getMainPage(
