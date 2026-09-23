@@ -2,125 +2,140 @@ package com.sagemoon1996.arabrunners
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import org.jsoup.nodes.Element
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import org.jsoup.nodes.Document
 import java.net.URLEncoder
 
 class ArabRunnersProvider : MainAPI() {
 
     override var mainUrl = "https://arabrunnersteam.org"
-
     override var name = "Arab Runners Team"
-
     override var lang = "ar"
-
     override val hasMainPage = true
 
-    override val supportedTypes = setOf(
-        TvType.TvSeries,
-        TvType.Movie
-    )
+    override val supportedTypes = setOf(TvType.TvSeries)
+
+    private val runningManCategory =
+        "$mainUrl/category/%d8%a7%d9%84%d9%83%d9%84/%d8%a7%d9%84%d8%b1%d8%ac%d9%84-%d8%a7%d9%84%d8%ac%d8%a7%d8%b1%d9%8a/"
 
     override val mainPage = mainPageOf(
-        "$mainUrl/" to "آخر الحلقات المضافة",
-
-        "$mainUrl/category/%d8%a7%d9%84%d9%83%d9%84/%d8%a7%d9%84%d8%b1%d8%ac%d9%84-%d8%a7%d9%84%d8%ac%d8%a7%d8%b1%d9%8a/" to "الرجل الجاري",
-
-        "$mainUrl/category/%d8%b0%d8%a7-%d8%b2%d9%88%d9%86-%d9%85%d9%87%d9%85%d8%a9-%d8%a7%d9%84%d8%a8%d9%82%d8%a7%d8%a1/" to "ذا زون: مهمة البقاء",
-
-        "$mainUrl/category/%d8%a7%d9%84%d9%83%d9%84/%d9%83%d9%88%d8%b1%d9%8a%d8%a7-%d8%b1%d9%82%d9%85-1/" to "كوريا رقم واحد"
+        runningManCategory to "الرجل الجاري"
     )
 
-    private fun getTitle(element: Element): String? {
-        return element.selectFirst(
-            "img[alt], h1, h2, h3, h4, .title, .entry-title"
-        )?.let {
-            if (it.tagName() == "img") {
-                it.attr("alt")
-            } else {
-                it.text()
-            }
-        }?.trim()?.takeIf {
-            it.isNotBlank()
-        } ?: element.text()
-            .trim()
-            .replace(Regex("\\s+"), " ")
-            .takeIf {
-                it.isNotBlank()
-            }
+    private val json = Json {
+        ignoreUnknownKeys = true
     }
 
-    private fun getPoster(element: Element): String? {
-        return element.selectFirst(
-            "img[src], img[data-src], img[data-lazy-src]"
-        )?.let { image ->
-            image.attr("src")
-                .ifBlank {
-                    image.attr("data-src")
-                }
-                .ifBlank {
-                    image.attr("data-lazy-src")
-                }
-                .takeIf {
-                    it.startsWith("http")
-                }
-        }
+    @Serializable
+    private data class ArabPlayerInfo(
+        val ok: Boolean = false,
+        val title: String? = null,
+        val poster: String? = null,
+        val type: String? = null,
+        val src: String? = null,
+        val qualities: List<ArabPlayerQuality> = emptyList()
+    )
+
+    @Serializable
+    private data class ArabPlayerQuality(
+        val height: Int = 0,
+        val label: String = "",
+        val src: String = ""
+    )
+
+    private fun extractEpisodeNumber(url: String): Int? {
+        return Regex(
+            """الرجل-الجاري-الحلقة-(\d+)""",
+            RegexOption.IGNORE_CASE
+        )
+            .find(url)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toIntOrNull()
     }
 
-    private fun makeSearchResponses(
-        document: org.jsoup.nodes.Document
-    ): List<SearchResponse> {
-
+    private fun extractEpisodeLinks(document: Document): List<Pair<Int, String>> {
         return document
-            .select("article, .post, .item, .post-item")
-            .mapNotNull { element ->
+            .select("a[href*='/movies/']")
+            .mapNotNull { link ->
+                val href = link.attr("abs:href").trim()
 
-                val link = element
-                    .selectFirst("a[href]")
-                    ?.attr("href")
-                    ?.trim()
-                    ?: return@mapNotNull null
-
-                if (!link.startsWith(mainUrl)) {
+                if (href.isBlank()) {
                     return@mapNotNull null
                 }
 
-                val title = getTitle(element)
+                val episodeNumber = extractEpisodeNumber(href)
                     ?: return@mapNotNull null
 
-                val poster = getPoster(element)
+                episodeNumber to href
+            }
+            .distinctBy { it.first }
+    }
 
-                newTvSeriesSearchResponse(
-                    title,
-                    link,
-                    TvType.TvSeries
-                ) {
-                    posterUrl = poster
+    private suspend fun getAllEpisodes(): List<Pair<Int, String>> {
+        val episodes = mutableListOf<Pair<Int, String>>()
+
+        var page = 1
+
+        while (true) {
+            val pageUrl =
+                if (page == 1) {
+                    runningManCategory
+                } else {
+                    "${runningManCategory.trimEnd('/')}/page/$page/"
                 }
+
+            val document = app.get(pageUrl).document
+
+            val pageEpisodes = extractEpisodeLinks(document)
+
+            if (pageEpisodes.isNotEmpty()) {
+                episodes.addAll(pageEpisodes)
             }
-            .distinctBy {
-                it.url
+
+            val hasNext = document
+                .select("a[href]")
+                .any { link ->
+                    link.text()
+                        .trim()
+                        .replace(Regex("\\s+"), " ") == "التالي"
+                }
+
+            if (!hasNext) {
+                break
             }
+
+            page++
+        }
+
+        return episodes
+            .distinctBy { it.first }
+            .sortedByDescending { it.first }
     }
 
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-
-        val url = if (page == 1) {
-            request.data
-        } else {
-            "${request.data.trimEnd('/')}/page/$page/"
+        if (page != 1) {
+            return newHomePageResponse(
+                request.name,
+                emptyList(),
+                hasNext = false
+            )
         }
-
-        val document = app.get(url).document
-
-        val results = makeSearchResponses(document)
 
         return newHomePageResponse(
             request.name,
-            results,
-            hasNext = results.isNotEmpty()
+            listOf(
+                newTvSeriesSearchResponse(
+                    "الرجل الجاري",
+                    runningManCategory,
+                    TvType.TvSeries
+                )
+            ),
+            hasNext = false
         )
     }
 
@@ -128,15 +143,24 @@ class ArabRunnersProvider : MainAPI() {
         query: String
     ): List<SearchResponse> {
 
-        val encodedQuery = URLEncoder.encode(
-            query,
-            "UTF-8"
-        )
+        val normalizedQuery = query
+            .trim()
+            .lowercase()
 
-        val url = "$mainUrl/?s=$encodedQuery"
+        if (
+            !normalizedQuery.contains("الرجل الجاري") &&
+            !normalizedQuery.contains("running man") &&
+            !normalizedQuery.contains("runningman")
+        ) {
+            return emptyList()
+        }
 
-        return makeSearchResponses(
-            app.get(url).document
+        return listOf(
+            newTvSeriesSearchResponse(
+                "الرجل الجاري",
+                runningManCategory,
+                TvType.TvSeries
+            )
         )
     }
 
@@ -144,127 +168,29 @@ class ArabRunnersProvider : MainAPI() {
         url: String
     ): LoadResponse? {
 
-        val document = app.get(url).document
+        if (
+            url.trimEnd('/') !=
+            runningManCategory.trimEnd('/')
+        ) {
+            return null
+        }
 
-        val title = document
-            .selectFirst(
-                "h1.entry-title, h1.post-title, h1"
-            )
-            ?.text()
-            ?.trim()
-            ?.takeIf {
-                it.isNotBlank()
+        val episodes = getAllEpisodes()
+
+        val episodeList = episodes.map { (episodeNumber, _) ->
+
+            newEpisode("RunningMan$episodeNumber") {
+                name = "الرجل الجاري الحلقة $episodeNumber"
+                episode = episodeNumber
             }
-            ?: document
-                .selectFirst("meta[property='og:title']")
-                ?.attr("content")
-                ?.trim()
-            ?: return null
-
-        val poster = document
-            .selectFirst(
-                "meta[property='og:image']"
-            )
-            ?.attr("content")
-            ?.takeIf {
-                it.isNotBlank()
-            }
-            ?: document
-                .selectFirst(
-                    "img[src], img[data-src], img[data-lazy-src]"
-                )
-                ?.let {
-                    it.attr("src")
-                        .ifBlank {
-                            it.attr("data-src")
-                        }
-                        .ifBlank {
-                            it.attr("data-lazy-src")
-                        }
-                }
-
-        val plot = document
-            .selectFirst(
-                "meta[name='description'], meta[property='og:description']"
-            )
-            ?.attr("content")
-            ?.trim()
-
-        val episodeLinks = document
-            .select("a[href]")
-            .mapNotNull { link ->
-
-                val episodeUrl = link
-                    .attr("href")
-                    .trim()
-
-                val episodeText = link
-                    .text()
-                    .trim()
-
-                if (
-                    episodeUrl.isBlank() ||
-                    !episodeUrl.startsWith(mainUrl)
-                ) {
-                    return@mapNotNull null
-                }
-
-                val episodeNumber =
-                    Regex(
-                        """(?:الحلقة|episode)[^\d]*(\d+)""",
-                        RegexOption.IGNORE_CASE
-                    )
-                        .find(episodeText)
-                        ?.groupValues
-                        ?.getOrNull(1)
-                        ?.toIntOrNull()
-                        ?: Regex(
-                            """-(\d+)/?$"""
-                        )
-                            .find(episodeUrl)
-                            ?.groupValues
-                            ?.getOrNull(1)
-                            ?.toIntOrNull()
-                        ?: return@mapNotNull null
-
-                val season =
-                    Regex(
-                        """(?:الموسم|season)[^\d]*(\d+)"""
-                    )
-                        .find(episodeText)
-                        ?.groupValues
-                        ?.getOrNull(1)
-                        ?.toIntOrNull()
-                        ?: 1
-
-                newEpisode(episodeUrl) {
-                    name = episodeText.ifBlank {
-                        "Episode $episodeNumber"
-                    }
-                    this.season = season
-                    this.episode = episodeNumber
-                }
-            }
-            .distinctBy {
-                it.data
-            }
-            .sortedWith(
-                compareBy<Episode> {
-                    it.season ?: 1
-                }.thenBy {
-                    it.episode ?: 0
-                }
-            )
+        }
 
         return newTvSeriesLoadResponse(
-            title,
-            url,
+            "الرجل الجاري",
+            runningManCategory,
             TvType.TvSeries,
-            episodeLinks
-        ) {
-            posterUrl = poster
-            this.plot = plot
-        }
+            episodeList
+        )
     }
 
     override suspend fun loadLinks(
@@ -274,18 +200,61 @@ class ArabRunnersProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
+        if (!data.startsWith("RunningMan")) {
+            return false
+        }
+
+        val infoUrl =
+            "$mainUrl/ArabPlayer/info.php?v=${
+                URLEncoder.encode(data, "UTF-8")
+            }"
+
+        val response = app.get(
+            infoUrl,
+            referer = "$mainUrl/ArabPlayer/embed.php?v=$data"
+        )
+
+        val info = try {
+            json.decodeFromString<ArabPlayerInfo>(
+                response.text
+            )
+        } catch (_: Exception) {
+            return false
+        }
+
+        if (!info.ok) {
+            return false
+        }
+
         if (
-            !data.startsWith("http://") &&
-            !data.startsWith("https://")
+            info.type?.lowercase() != "hls" ||
+            info.src.isNullOrBlank()
         ) {
             return false
         }
 
-        loadExtractor(
-            data,
-            mainUrl,
-            subtitleCallback,
-            callback
+        val streamUrl =
+            if (
+                info.src.startsWith("http://") ||
+                info.src.startsWith("https://")
+            ) {
+                info.src
+            } else {
+                "$mainUrl/ArabPlayer/${info.src.trimStart('/')}"
+            }
+
+        callback(
+            newExtractorLink(
+                source = name,
+                name = "ArabPlayer",
+                url = streamUrl,
+                type = ExtractorLinkType.M3U8
+            ) {
+                referer =
+                    "$mainUrl/ArabPlayer/embed.php?v=$data"
+
+                quality = Qualities.Unknown.value
+            }
         )
 
         return true
