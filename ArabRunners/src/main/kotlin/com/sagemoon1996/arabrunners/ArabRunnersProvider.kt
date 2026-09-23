@@ -22,7 +22,12 @@ class ArabRunnersProvider : MainAPI() {
 
     override val mainPage = mainPageOf(
         "$mainUrl/" to "آخر الحلقات المضافة",
-        "$mainUrl/category/%d8%a7%d9%84%d9%83%d9%84/%d8%a7%d9%84%d8%b1%d8%ac%d9%84-%d8%a7%d9%84%d8%ac%d8%a7%d8%b1%d9%8a/" to "الرجل الجاري"
+
+        "$mainUrl/category/%d8%a7%d9%84%d9%83%d9%84/%d8%a7%d9%84%d8%b1%d8%ac%d9%84-%d8%a7%d9%84%d8%ac%d8%a7%d8%b1%d9%8a/" to "الرجل الجاري",
+
+        "$mainUrl/category/%d8%b0%d8%a7-%d8%b2%d9%88%d9%86-%d9%85%d9%87%d9%85%d8%a9-%d8%a7%d9%84%d8%a8%d9%82%d8%a7%d8%a1/" to "ذا زون: مهمة البقاء",
+
+        "$mainUrl/category/%d8%a7%d9%84%d9%83%d9%84/%d9%83%d9%88%d8%b1%d9%8a%d8%a7-%d8%b1%d9%82%d9%85-1/" to "كوريا رقم واحد"
     )
 
     private fun getTitle(element: Element): String? {
@@ -110,10 +115,12 @@ class ArabRunnersProvider : MainAPI() {
 
         val document = app.get(url).document
 
+        val results = makeSearchResponses(document)
+
         return newHomePageResponse(
             request.name,
-            makeSearchResponses(document),
-            hasNext = makeSearchResponses(document).isNotEmpty()
+            results,
+            hasNext = results.isNotEmpty()
         )
     }
 
@@ -222,8 +229,7 @@ class ArabRunnersProvider : MainAPI() {
 
                 val season =
                     Regex(
-                        """(?:الموسم|season)[^\d]*(\d+)""",
-                        RegexOption.IGNORE_CASE
+                        """(?:الموسم|season)[^\d]*(\d+)"""
                     )
                         .find(episodeText)
                         ?.groupValues
