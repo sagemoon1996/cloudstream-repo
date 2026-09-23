@@ -106,7 +106,7 @@ class ArabRunnersProvider : MainAPI() {
 
         val episodeList = getKnownEpisodes().map { episodeNumber ->
             newEpisode("RunningMan$episodeNumber") {
-                name = "الرجل الجاري الحلقة $episodeNumber"
+                name = "RunningMan DATA TEST"
                 episode = episodeNumber
                 posterUrl = runningManPoster
             }
@@ -129,208 +129,15 @@ class ArabRunnersProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
-        val videoId = data
-            .substringAfter("v=", data)
-            .substringBefore("&")
-            .trim()
-
-        if (videoId.isBlank()) {
-            return false
-        }
-
-        val embedUrl =
-            "$mainUrl/ArabPlayer/embed.php?v=$videoId"
-
-        val streamUrl =
-            "$mainUrl/ArabPlayer/stream.php?v=$videoId"
-
-        val userAgent =
-            "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
-
-        val streamResponse = try {
-            app.get(
-                streamUrl,
-                headers = mapOf(
-                    "User-Agent" to userAgent,
-                    "Referer" to embedUrl
-                )
+        callback(
+            newExtractorLink(
+                source = name,
+                name = "DATA = $data",
+                url = "https://example.com/test.m3u8",
+                type = ExtractorLinkType.M3U8
             )
-        } catch (_: Exception) {
-            return false
-        }
+        )
 
-        val master = streamResponse.text
-
-        if (!master.contains("#EXTM3U")) {
-            return false
-        }
-
-        /*
-         * Find every proxy.php quality from the MASTER playlist.
-         */
-        val masterLines = master
-            .replace("\r", "")
-            .lines()
-
-        val qualityLinks = mutableListOf<Pair<Int, String>>()
-
-        var pendingQuality = Qualities.Unknown.value
-
-        for (line in masterLines) {
-
-            val trimmed = line.trim()
-
-            if (trimmed.startsWith("#EXT-X-STREAM-INF:")) {
-
-                val height = Regex(
-                    """RESOLUTION=\d+x(\d+)"""
-                )
-                    .find(trimmed)
-                    ?.groupValues
-                    ?.getOrNull(1)
-                    ?.toIntOrNull()
-
-                pendingQuality = height ?: Qualities.Unknown.value
-                continue
-            }
-
-            if (
-                trimmed.contains("proxy.php?u=") &&
-                !trimmed.startsWith("#")
-            ) {
-                val absoluteProxyUrl =
-                    if (
-                        trimmed.startsWith("http://") ||
-                        trimmed.startsWith("https://")
-                    ) {
-                        trimmed
-                    } else {
-                        "$mainUrl/ArabPlayer/$trimmed"
-                    }
-
-                qualityLinks.add(
-                    pendingQuality to absoluteProxyUrl
-                )
-
-                pendingQuality = Qualities.Unknown.value
-            }
-        }
-
-        if (qualityLinks.isEmpty()) {
-            return false
-        }
-
-        var foundLink = false
-
-        /*
-         * Each quality proxy returns a MEDIA playlist.
-         * We convert its TS segment URLs into CloudStream's
-         * playlist representation to avoid the HLS parser issue.
-         */
-        for ((quality, proxyUrl) in qualityLinks) {
-
-            val mediaResponse = try {
-                app.get(
-                    proxyUrl,
-                    headers = mapOf(
-                        "User-Agent" to userAgent,
-                        "Referer" to embedUrl
-                    )
-                )
-            } catch (_: Exception) {
-                continue
-            }
-
-            val mediaPlaylist =
-                mediaResponse.text
-                    .replace("\r", "")
-
-            if (!mediaPlaylist.contains("#EXTM3U")) {
-                continue
-            }
-
-            val lines = mediaPlaylist.lines()
-
-            val playlistItems = mutableListOf<PlayListItem>()
-
-            var durationSeconds = 0.0
-
-            for (line in lines) {
-
-                val trimmed = line.trim()
-
-                if (trimmed.startsWith("#EXTINF:")) {
-
-                    durationSeconds =
-                        trimmed
-                            .substringAfter("#EXTINF:")
-                            .substringBefore(",")
-                            .toDoubleOrNull()
-                            ?: 0.0
-
-                    continue
-                }
-
-                if (
-                    trimmed.isBlank() ||
-                    trimmed.startsWith("#")
-                ) {
-                    continue
-                }
-
-                val segmentUrl =
-                    if (
-                        trimmed.startsWith("http://") ||
-                        trimmed.startsWith("https://")
-                    ) {
-                        trimmed
-                    } else {
-                        "$mainUrl/ArabPlayer/$trimmed"
-                    }
-
-                playlistItems.add(
-                    PlayListItem(
-                        url = segmentUrl,
-                        durationUs = (durationSeconds * 1_000_000L).toLong()
-                    )
-                )
-
-                durationSeconds = 0.0
-            }
-
-            if (playlistItems.isEmpty()) {
-                continue
-            }
-
-            val finalQuality =
-                when (quality) {
-                    720 -> Qualities.P720.value
-                    480 -> Qualities.P480.value
-                    360 -> Qualities.P360.value
-                    240 -> Qualities.P240.value
-                    else -> Qualities.Unknown.value
-                }
-
-            callback(
-                ExtractorLinkPlayList(
-                    source = name,
-                    name = "ArabPlayer ${quality}p",
-                    playlist = playlistItems,
-                    referer = embedUrl,
-                    quality = finalQuality,
-                    isM3u8 = true,
-                    headers = mapOf(
-                        "User-Agent" to userAgent,
-                        "Referer" to embedUrl,
-                        "Origin" to mainUrl
-                    )
-                )
-            )
-
-            foundLink = true
-        }
-
-        return foundLink
+        return true
     }
 }
