@@ -211,61 +211,52 @@ class ArabRunnersProvider : MainAPI() {
                 return false
             }
 
+        if (!info.ok) {
+            return false
+        }
+
         if (
-            !info.ok ||
             info.type?.lowercase() != "hls"
         ) {
             return false
         }
 
-        val qualities =
-            info.qualities.filter {
-                it.src.isNotBlank()
-            }
-
-        if (qualities.isEmpty()) {
+        if (info.src.isNullOrBlank()) {
             return false
         }
 
-        var foundLink = false
+        val streamUrl =
+            if (
+                info.src.startsWith("http://") ||
+                info.src.startsWith("https://")
+            ) {
+                info.src
+            } else {
+                "$mainUrl/ArabPlayer/${info.src.trimStart('/')}"
+            }
 
-        qualities.forEach { qualityInfo ->
+        callback(
+            newExtractorLink(
+                source = name,
+                name = "ArabPlayer",
+                url = streamUrl,
+                type = ExtractorLinkType.M3U8
+            ) {
+                referer =
+                    "$mainUrl/ArabPlayer/embed.php?v=$data"
 
-            val streamUrl =
-                if (
-                    qualityInfo.src.startsWith("http://") ||
-                    qualityInfo.src.startsWith("https://")
-                ) {
-                    qualityInfo.src
-                } else {
-                    "$mainUrl/ArabPlayer/${qualityInfo.src.trimStart('/')}"
-                }
+                headers = mapOf(
+                    "User-Agent" to
+                        "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
+                    "Accept" to "*/*",
+                    "Origin" to mainUrl
+                )
 
-            callback(
-                newExtractorLink(
-                    source = name,
-                    name = "ArabPlayer ${qualityInfo.label}",
-                    url = streamUrl,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    referer =
-                        "$mainUrl/ArabPlayer/embed.php?v=$data"
+                quality =
+                    Qualities.Unknown.value
+            }
+        )
 
-                    headers = mapOf(
-                        "User-Agent" to
-                            "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
-                        "Accept" to "*/*",
-                        "Origin" to mainUrl
-                    )
-
-                    quality =
-                        qualityInfo.height
-                }
-            )
-
-            foundLink = true
-        }
-
-        return foundLink
+        return true
     }
 }
