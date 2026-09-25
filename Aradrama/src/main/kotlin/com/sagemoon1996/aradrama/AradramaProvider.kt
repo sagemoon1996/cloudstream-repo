@@ -36,6 +36,7 @@ class AradramaProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
+
         val url = if (page == 1) {
             request.data
         } else {
@@ -61,6 +62,7 @@ class AradramaProvider : MainAPI() {
     }
 
     private fun parseSearchResult(element: Element): SearchResponse? {
+
         val link = element.selectFirst(
             "a[href]"
         ) ?: return null
@@ -89,7 +91,9 @@ class AradramaProvider : MainAPI() {
             image.attr("data-src").ifBlank {
                 image.attr("src")
             }
-        }?.takeIf { it.startsWith("http") }
+        }?.takeIf {
+            it.startsWith("http")
+        }
 
         val isMovie = href.contains(
             "الافلام",
@@ -108,10 +112,12 @@ class AradramaProvider : MainAPI() {
             )
         } else {
             newTvSeriesSearchResponse(
-                title = title,
-                url = href,
-                posterUrl = poster
-            )
+                title,
+                href,
+                TvType.TvSeries
+            ) {
+                this.posterUrl = poster
+            }
         }
     }
 
@@ -204,13 +210,14 @@ class AradramaProvider : MainAPI() {
             }
 
             Episode(
-                data = href,
-                name = if (text.isBlank()) {
+                href,
+                if (text.isBlank()) {
                     "الحلقة $episodeNumber"
                 } else {
                     text
                 },
-                episode = episodeNumber
+                null,
+                episodeNumber
             )
         }.distinctBy { it.data }
 
@@ -259,18 +266,6 @@ class AradramaProvider : MainAPI() {
 
         var found = false
 
-        /*
-         * Aradrama stores the actual server/embed URLs
-         * in:
-         *
-         * <li class="server" data-url="...">
-         *
-         * Filemoon uses:
-         * https://bysevepoin.com/e/...
-         *
-         * CloudStream 4.8.0 already contains the
-         * ByseVepoin extractor for this exact domain.
-         */
         val serverUrls = document.select(
             "li.server[data-url]"
         ).mapNotNull { server ->
@@ -304,10 +299,6 @@ class AradramaProvider : MainAPI() {
             }
         }
 
-        /*
-         * Some Aradrama pages may expose an iframe directly
-         * instead of putting it in data-url.
-         */
         val iframeUrls = document.select(
             "iframe[src], iframe[data-src]"
         ).mapNotNull { iframe ->
