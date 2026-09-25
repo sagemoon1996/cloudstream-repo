@@ -2,6 +2,7 @@ package com.sagemoon1996.asiashow
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 
@@ -22,7 +23,7 @@ class AsiaShowProvider : MainAPI() {
 
     override val mainPage = mainPageOf(
         "$mainUrl/%D8%A3%D8%AE%D8%B1-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A7%D8%AA/" to "آخر الحلقات",
-        "$mainUrl/series" to "المسلسلات",
+        "$mainUrl/series/" to "المسلسلات",
         "$mainUrl/movies/" to "الأفلام",
         "$mainUrl/country/cn/" to "الصينية",
         "$mainUrl/country/jp/" to "اليابانية",
@@ -53,7 +54,7 @@ class AsiaShowProvider : MainAPI() {
         }
     }
 
-    private fun posterUrl(
+    private fun posterFromElement(
         element: Element
     ): String? {
 
@@ -69,15 +70,36 @@ class AsiaShowProvider : MainAPI() {
                 image.attr("src")
             }
             .trim()
-            .takeIf { it.startsWith("http") }
+            .takeIf {
+                it.startsWith("http")
+            }
     }
 
-    private fun parseSearchResult(
-        element: Element
-    ): SearchResponse? {
+    private fun titleFromLink(
+        link: Element
+    ): String {
 
-        val link = element.selectFirst("a[href]")
-            ?: return null
+        val title = link
+            .attr("title")
+            .trim()
+
+        if (title.isNotBlank()) {
+            return title
+        }
+
+        return link
+            .text()
+            .trim()
+            .replace(
+                Regex("""^\s*(كوريا|الصين|اليابان|تايلاند|تايوان|ماليزيا|امريكا|بريطانيا|الهند|اندونيسيا|تركيا|بولندا|الفلبين)\s+"""),
+                ""
+            )
+            .trim()
+    }
+
+    private fun parseContentLink(
+        link: Element
+    ): SearchResponse? {
 
         val href = absoluteUrl(link)
 
@@ -86,30 +108,43 @@ class AsiaShowProvider : MainAPI() {
         }
 
         if (
+            href.contains("/episodes/") ||
             href.contains("/category/") ||
             href.contains("/country/") ||
-            href.contains("/episodes/")
+            href.contains("/genre/")
         ) {
             return null
         }
 
-        val title = (
-            element.selectFirst(
-                ".title, .entry-title, h2, h3, h4"
-            )?.text()
-                ?: link.attr("title")
-                ?: link.text()
-        ).trim()
+        val isSeries = href.contains(
+            "/series/",
+            ignoreCase = true
+        )
+
+        val isMovie = href.contains(
+            "/movies/",
+            ignoreCase = true
+        )
+
+        if (!isSeries && !isMovie) {
+            return null
+        }
+
+        val title = titleFromLink(
+            link
+        )
 
         if (title.isBlank()) {
             return null
         }
 
-        val poster = posterUrl(element)
+        val container = link.parent()
 
-        val isMovie =
-            href.contains("/movies/", ignoreCase = true) ||
-            title.contains("فيلم", ignoreCase = true)
+        val poster =
+            posterFromElement(link)
+                ?: posterFromElement(
+                    container
+                )
 
         return if (isMovie) {
 
@@ -138,14 +173,6 @@ class AsiaShowProvider : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse {
 
-        /*
-         * AsiaShow currently uses a JavaScript "Load more"
-         * button instead of a confirmed /page/2/ URL.
-         *
-         * We therefore only request the real page here and do not
-         * invent pagination.
-         */
-
         if (page > 1) {
             return newHomePageResponse(
                 request.name,
@@ -160,9 +187,15 @@ class AsiaShowProvider : MainAPI() {
         ).document
 
         val items = document
-            .select("article, .item, .post, .movie, .series")
-            .mapNotNull { parseSearchResult(it) }
-            .distinctBy { it.url }
+            .select(
+                "a[href*='/series/'], a[href*='/movies/']"
+            )
+            .mapNotNull {
+                parseContentLink(it)
+            }
+            .distinctBy {
+                it.url
+            }
 
         return newHomePageResponse(
             request.name,
@@ -176,19 +209,28 @@ class AsiaShowProvider : MainAPI() {
     ): List<SearchResponse> {
 
         val encodedQuery = URLEncoder.encode(
-            query,
+            query.trim(),
             "UTF-8"
         )
 
+        val searchUrl =
+            "$mainUrl/?s=$encodedQuery"
+
         val document = app.get(
-            "$mainUrl/?s=$encodedQuery",
+            searchUrl,
             referer = mainUrl
         ).document
 
         return document
-            .select("article, .item, .post, .movie, .series")
-            .mapNotNull { parseSearchResult(it) }
-            .distinctBy { it.url }
+            .select(
+                "a[href*='/series/'], a[href*='/movies/']"
+            )
+            .mapNotNull {
+                parseContentLink(it)
+            }
+            .distinctBy {
+                it.url
+            }
     }
 
     private fun episodeNumber(
@@ -211,12 +253,12 @@ class AsiaShowProvider : MainAPI() {
                 ?.toIntOrNull()
     }
 
-    private fun parseEpisodeLinks(
-        document: org.jsoup.nodes.Document
+    private fun parseEpisodes(
+        document: Document
     ): List<Episode> {
 
         return document
-            .select("a[href]")
+            .select("a[href*='/episodes/']")
             .mapNotNull { link ->
 
                 val href = absoluteUrl(link)
@@ -225,11 +267,9 @@ class AsiaShowProvider : MainAPI() {
                     return@mapNotNull null
                 }
 
-                if (!href.contains("/episodes/")) {
-                    return@mapNotNull null
-                }
-
-                val text = link.text().trim()
+                val text = link
+                    .text()
+                    .trim()
 
                 val number = episodeNumber(
                     text,
@@ -248,19 +288,27 @@ class AsiaShowProvider : MainAPI() {
                     episode = number
                 }
             }
-            .distinctBy { it.data }
-            .sortedBy { it.episode }
+            .distinctBy {
+                it.data
+            }
+            .sortedBy {
+                it.episode
+            }
     }
 
     private fun extractTitle(
-        document: org.jsoup.nodes.Document
+        document: Document
     ): String? {
 
         val ogTitle = document
-            .selectFirst("meta[property=og:title]")
+            .selectFirst(
+                "meta[property=og:title]"
+            )
             ?.attr("content")
             ?.trim()
-            ?.takeIf { it.isNotBlank() }
+            ?.takeIf {
+                it.isNotBlank()
+            }
 
         if (ogTitle != null) {
             return ogTitle
@@ -277,11 +325,13 @@ class AsiaShowProvider : MainAPI() {
             )
             ?.text()
             ?.trim()
-            ?.takeIf { it.isNotBlank() }
+            ?.takeIf {
+                it.isNotBlank()
+            }
     }
 
     private fun extractPoster(
-        document: org.jsoup.nodes.Document
+        document: Document
     ): String? {
 
         return document
@@ -290,7 +340,9 @@ class AsiaShowProvider : MainAPI() {
             )
             ?.attr("content")
             ?.trim()
-            ?.takeIf { it.startsWith("http") }
+            ?.takeIf {
+                it.startsWith("http")
+            }
             ?: document
                 .selectFirst(
                     ".poster img, .cover img, img"
@@ -305,11 +357,13 @@ class AsiaShowProvider : MainAPI() {
                         }
                 }
                 ?.trim()
-                ?.takeIf { it.startsWith("http") }
+                ?.takeIf {
+                    it.startsWith("http")
+                }
     }
 
     private fun extractDescription(
-        document: org.jsoup.nodes.Document
+        document: Document
     ): String? {
 
         return document
@@ -318,14 +372,18 @@ class AsiaShowProvider : MainAPI() {
             )
             ?.attr("content")
             ?.trim()
-            ?.takeIf { it.isNotBlank() }
+            ?.takeIf {
+                it.isNotBlank()
+            }
             ?: document
                 .selectFirst(
                     ".description, .desc, .entry-content"
                 )
                 ?.text()
                 ?.trim()
-                ?.takeIf { it.isNotBlank() }
+                ?.takeIf {
+                    it.isNotBlank()
+                }
     }
 
     override suspend fun load(
@@ -349,52 +407,11 @@ class AsiaShowProvider : MainAPI() {
             document
         )
 
-        /*
-         * Episode pages on AsiaShow use /episodes/.
-         */
-        val isEpisode =
-            url.contains(
-                "/episodes/",
-                ignoreCase = true
-            )
-
-        if (isEpisode) {
-
-            val number = episodeNumber(
-                title,
-                url
-            ) ?: 1
-
-            val episode = newEpisode(url) {
-                name = title
-                season = 1
-                episode = number
-            }
-
-            return newTvSeriesLoadResponse(
-                name = title,
-                url = url,
-                type = TvType.TvSeries,
-                episodes = listOf(episode)
-            ) {
-                posterUrl = poster
-                plot = description
-            }
-        }
-
-        val episodes = parseEpisodeLinks(
-            document
-        )
-
         val isMovie =
             url.contains(
                 "/movies/",
                 ignoreCase = true
-            ) ||
-                title.contains(
-                    "فيلم",
-                    ignoreCase = true
-                )
+            )
 
         if (isMovie) {
 
@@ -409,6 +426,10 @@ class AsiaShowProvider : MainAPI() {
             }
         }
 
+        val episodes = parseEpisodes(
+            document
+        )
+
         return newTvSeriesLoadResponse(
             name = title,
             url = url,
@@ -417,6 +438,75 @@ class AsiaShowProvider : MainAPI() {
         ) {
             posterUrl = poster
             plot = description
+        }
+    }
+
+    private fun decodeServerUrl(
+        encoded: String
+    ): String? {
+
+        if (encoded.isBlank()) {
+            return null
+        }
+
+        return try {
+
+            base64Decode(
+                encoded.trim()
+            )
+                .trim()
+                .takeIf {
+                    it.startsWith("http")
+                }
+
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private suspend fun loadDirectVideo(
+        serverUrl: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+
+        return try {
+
+            val document = app.get(
+                serverUrl,
+                referer = mainUrl
+            ).document
+
+            val mediaUrl = document
+                .selectFirst(
+                    "video[data-link]"
+                )
+                ?.attr("data-link")
+                ?.trim()
+                ?.takeIf {
+                    it.startsWith("http")
+                }
+
+            if (mediaUrl == null) {
+                false
+            } else {
+
+                callback(
+                    newExtractorLink(
+                        source = "Ult4vid",
+                        name = "Ult4vid",
+                        url = mediaUrl,
+                        type = ExtractorLinkType.VIDEO
+                    ) {
+                        referer = serverUrl
+                    }
+                )
+
+                true
+            }
+
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -432,47 +522,55 @@ class AsiaShowProvider : MainAPI() {
             referer = mainUrl
         ).document
 
-        /*
-         * AsiaShow stores server URLs in data-etk-src
-         * as Base64 encoded strings.
-         *
-         * Example:
-         * aHR0cHM6Ly92aWRtb2x5Lm5ldC...
-         *
-         * This decodes to the real Vidmoly embed URL.
-         */
-
         val serverUrls = document
             .select("[data-etk-src]")
             .mapNotNull { element ->
 
-                val encoded = element
-                    .attr("data-etk-src")
-                    .trim()
-
-                if (encoded.isBlank()) {
-                    return@mapNotNull null
-                }
-
-                try {
-
-                    base64Decode(
-                        encoded
+                decodeServerUrl(
+                    element.attr(
+                        "data-etk-src"
                     )
-                        .trim()
-                        .takeIf {
-                            it.startsWith("http")
-                        }
+                )
 
-                } catch (_: Exception) {
-                    null
-                }
             }
             .distinct()
 
         var foundLinks = false
 
-        for (serverUrl in serverUrls) {
+        /*
+         * Ult4vid:
+         * The embed page contains the current temporary
+         * Cloudflare R2 MP4 directly in video[data-link].
+         */
+        val ult4vidUrls = serverUrls.filter {
+            it.contains(
+                "ult4vid",
+                ignoreCase = true
+            )
+        }
+
+        for (serverUrl in ult4vidUrls) {
+
+            if (
+                loadDirectVideo(
+                    serverUrl = serverUrl,
+                    subtitleCallback = subtitleCallback,
+                    callback = callback
+                )
+            ) {
+                foundLinks = true
+            }
+        }
+
+        /*
+         * Other servers:
+         * Keep CloudStream's normal extractor system as fallback.
+         */
+        val otherUrls = serverUrls.filterNot {
+            ult4vidUrls.contains(it)
+        }
+
+        for (serverUrl in otherUrls) {
 
             try {
 
@@ -491,12 +589,8 @@ class AsiaShowProvider : MainAPI() {
         }
 
         /*
-         * Fallback:
-         * Some AsiaShow pages expose the current player iframe
-         * directly. Try it only if the server buttons did not
-         * produce a link.
+         * Direct iframe fallback.
          */
-
         if (!foundLinks) {
 
             val iframeUrls = document
@@ -505,34 +599,53 @@ class AsiaShowProvider : MainAPI() {
                 )
                 .mapNotNull { iframe ->
 
-                    val iframeUrl = iframe
+                    iframe
                         .attr("src")
                         .ifBlank {
                             iframe.attr("data-src")
                         }
                         .trim()
-
-                    iframeUrl.takeIf {
-                        it.startsWith("http")
-                    }
+                        .takeIf {
+                            it.startsWith("http")
+                        }
                 }
                 .distinct()
 
             for (iframeUrl in iframeUrls) {
 
-                try {
+                if (
+                    iframeUrl.contains(
+                        "ult4vid",
+                        ignoreCase = true
+                    )
+                ) {
 
-                    loadExtractor(
-                        url = iframeUrl,
-                        referer = iframeUrl,
-                        subtitleCallback = subtitleCallback
-                    ) { link ->
-
+                    if (
+                        loadDirectVideo(
+                            serverUrl = iframeUrl,
+                            subtitleCallback = subtitleCallback,
+                            callback = callback
+                        )
+                    ) {
                         foundLinks = true
-                        callback(link)
                     }
 
-                } catch (_: Exception) {
+                } else {
+
+                    try {
+
+                        loadExtractor(
+                            url = iframeUrl,
+                            referer = iframeUrl,
+                            subtitleCallback = subtitleCallback
+                        ) { link ->
+
+                            foundLinks = true
+                            callback(link)
+                        }
+
+                    } catch (_: Exception) {
+                    }
                 }
             }
         }
