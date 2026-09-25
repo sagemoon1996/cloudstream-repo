@@ -105,7 +105,7 @@ class AradramaProvider : MainAPI() {
 
         return if (isMovie) {
             newMovieSearchResponse(
-                title = title,
+                name = title,
                 url = href,
                 type = TvType.Movie,
                 posterUrl = poster
@@ -200,8 +200,7 @@ class AradramaProvider : MainAPI() {
             ).find(text)?.groupValues?.getOrNull(1)
                 ?.toIntOrNull()
                 ?: Regex(
-                    """(?:الحلقة|episode|ep)[^\d]*(\d+)""",
-                    RegexOption.IGNORE_CASE
+                    """(?:الحلقة|episode|ep)[^\d]*(\d+)"""
                 ).find(href)?.groupValues?.getOrNull(1)
                     ?.toIntOrNull()
 
@@ -210,14 +209,14 @@ class AradramaProvider : MainAPI() {
             }
 
             Episode(
-                href,
-                if (text.isBlank()) {
+                data = href,
+                name = if (text.isBlank()) {
                     "الحلقة $episodeNumber"
                 } else {
                     text
                 },
-                null,
-                episodeNumber
+                season = null,
+                episode = episodeNumber
             )
         }.distinctBy { it.data }
 
@@ -295,7 +294,6 @@ class AradramaProvider : MainAPI() {
                 }
 
             } catch (_: Exception) {
-                // Try the next server.
             }
         }
 
@@ -330,7 +328,6 @@ class AradramaProvider : MainAPI() {
                 }
 
             } catch (_: Exception) {
-                // Try the next iframe.
             }
         }
 
