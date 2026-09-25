@@ -6,7 +6,10 @@ import com.lagradost.cloudstream3.plugins.Plugin
 
 @CloudstreamPlugin
 class AsiaShowPlugin : Plugin() {
+
     override fun load(context: Context) {
-        registerMainAPI(AsiaShowProvider())
+        registerMainAPI(
+            AsiaShowProvider()
+        )
     }
 }
