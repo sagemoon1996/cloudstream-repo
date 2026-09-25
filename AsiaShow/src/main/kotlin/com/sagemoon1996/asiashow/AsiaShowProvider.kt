@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.utils.*
 import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.net.URLDecoder
 import java.net.URLEncoder
 
 class AsiaShowProvider : MainAPI() {
@@ -25,6 +26,7 @@ class AsiaShowProvider : MainAPI() {
         "$mainUrl/series/" to "المسلسلات",
         "$mainUrl/movies/" to "الأفلام",
         "$mainUrl/country/cn/" to "الصينية",
+        "$mainUrl/country/kr/" to "الكورية",
         "$mainUrl/country/jp/" to "اليابانية",
         "$mainUrl/country/th/" to "التايلاندية"
     )
@@ -304,11 +306,29 @@ class AsiaShowProvider : MainAPI() {
             referer = mainUrl
         ).document
 
-        val isLatest =
-            request.data.contains(
-                "/%D8%A3%D8%AE%D8%B1-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A7%D8%AA/",
-                ignoreCase = true
+        val normalizedRequestData = try {
+            URLDecoder.decode(
+                request.data,
+                "UTF-8"
             )
+        } catch (_: Exception) {
+            request.data
+        }
+
+        val isLatest =
+            request.name == "آخر الحلقات" ||
+                normalizedRequestData.contains(
+                    "/أخر-الحلقات/",
+                    ignoreCase = true
+                ) ||
+                normalizedRequestData.contains(
+                    "/آخر-الحلقات/",
+                    ignoreCase = true
+                ) ||
+                request.data.contains(
+                    "/%D8%A3%D8%AE%D8%B1-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A7%D8%AA/",
+                    ignoreCase = true
+                )
 
         val items =
             if (isLatest) {
