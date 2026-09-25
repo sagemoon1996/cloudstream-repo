@@ -24,7 +24,7 @@ class AradramaProvider : MainAPI() {
         "$mainUrl/category/ongoing/" to "الدراما التي تبث حاليا",
         "$mainUrl/category/recent-completed/" to "الدراما المنتهية مؤخرا",
         "$mainUrl/category/%d8%af%d8%b1%d8%a7%d9%85%d8%a7-%d8%aa%d9%85-%d8%a7%d8%b9%d8%a7%d8%af%d8%a9-%d8%b1%d9%81%d8%b9%d9%87%d8%a7/" to "دراما تم إعادة رفعها",
-        "$mainUrl/category/%d8%a7%d9%84%d8%a7%d9%81%d9%84%d8%a7%d9%85-%d8%a7%d9%84%d8%a2%d8%b3%d9%8a%d9%88%d9%8a%d8%a9/" to "الأفلام الآسيوية",
+        "$mainUrl/category/%d8%a7%d9%84%d8%a7%d9%81%d9%84%d8%a7%d9%85-%d8%a7%d9%84%d8%a7%d8%b3%d9%8a%d9%88%d9%8a%d8%a9/" to "الأفلام الآسيوية",
         "$mainUrl/category/serie/korea/" to "الدراما الكورية",
         "$mainUrl/category/serie/chinese-taiwan/" to "الدراما الصينية والتايوانية",
         "$mainUrl/category/serie/japanese/" to "الدراما اليابانية",
@@ -209,14 +209,14 @@ class AradramaProvider : MainAPI() {
             }
 
             Episode(
-                data = href,
-                name = if (text.isBlank()) {
+                href,
+                if (text.isBlank()) {
                     "الحلقة $episodeNumber"
                 } else {
                     text
                 },
-                season = null,
-                episode = episodeNumber
+                null,
+                episodeNumber
             )
         }.distinctBy { it.data }
 
