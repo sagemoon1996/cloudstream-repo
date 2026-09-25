@@ -297,13 +297,26 @@ class AradramaProvider : MainAPI() {
             referer = mainUrl
         ).document
 
+        /*
+         * ملاحظة مهمة:
+         * لا نستعمل "h1" بمفردها فهذا السيلكتور، لأن الـ <h1> الوحيد
+         * الموجود فصفحات الموقع هو شعار الموقع نفسه (AradramaTv) اللي
+         * يظهر فأعلى كل صفحة قبل عنوان المسلسل/الفيلم بمراحل فالـ DOM.
+         * عنوان المسلسل الحقيقي يظهر فعنصر بمستوى أقل (h3) وموش h1،
+         * فإذا خلينا "h1" ضمن السيلكتور، selectFirst راح يختار شعار
+         * الموقع دايماً بدل العنوان الحقيقي.
+         * الحل: نعتمد أولاً على meta[property=og:title] اللي دايماً
+         * صحيح ومطابق للعنوان الفعلي، ونستعمل ".entry-title" (بلا h1)
+         * كـ fallback ثاني فقط.
+         */
         val title =
             document.selectFirst(
-                "h1.entry-title, .entry-title, h1"
-            )?.text()?.trim()
+                "meta[property=og:title]"
+            )?.attr("content")?.trim()
+                ?.takeIf { it.isNotBlank() }
                 ?: document.selectFirst(
-                    "meta[property=og:title]"
-                )?.attr("content")?.trim()
+                    ".entry-title"
+                )?.text()?.trim()
                 ?: return null
 
         val poster =
