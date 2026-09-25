@@ -247,7 +247,7 @@ class AsiaShowProvider : MainAPI() {
     ): List<SearchResponse> {
 
         return document
-            .select("a.etk-card-link[href*='/episodes/']")
+            .select("a[href*='/episodes/']")
             .mapNotNull { link ->
 
                 val episodeUrl = absoluteUrl(link)
@@ -260,16 +260,22 @@ class AsiaShowProvider : MainAPI() {
                     episodeToSeriesUrl(episodeUrl)
                         ?: return@mapNotNull null
 
-                val title = cardTitle(link)
+                val title =
+                    cardTitle(link)
+                        .ifBlank {
+                            link.text().trim()
+                        }
 
                 val seriesTitle =
-                    title.replace(
-                        Regex(
-                            """\s*الحلقة\s*\d+\s*$""",
-                            RegexOption.IGNORE_CASE
-                        ),
-                        ""
-                    ).trim()
+                    title
+                        .replace(
+                            Regex(
+                                """\s*الحلقة\s*\d+\s*$""",
+                                RegexOption.IGNORE_CASE
+                            ),
+                            ""
+                        )
+                        .trim()
 
                 if (seriesTitle.isBlank()) {
                     return@mapNotNull null
