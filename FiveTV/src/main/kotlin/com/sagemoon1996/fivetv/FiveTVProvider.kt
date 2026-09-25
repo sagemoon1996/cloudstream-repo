@@ -24,97 +24,165 @@ class FiveTVProvider : MainAPI() {
         "$mainUrl/" to "الرئيسية",
         "$mainUrl/latest-episodes/" to "آخر الحلقات",
         "$mainUrl/new-rows/" to "آخر الإضافات",
+        "$mainUrl/latest-series/" to "جديد الدراما",
+        "$mainUrl/latest-movies/" to "جديد الأفلام",
+        "$mainUrl/category/%d8%a7%d9%84%d8%af%d8%b1%d8%a7%d9%85%d8%a7-%d8%a7%d9%84%d8%aa%d8%a7%d9%8a%d9%84%d8%a7%d9%86%d8%af%d9%8a%d8%a9/" to "الدراما التايلاندية",
         "$mainUrl/schedule/" to "الجدول الأسبوعي"
     )
 
-    private fun getTitle(link: Element): String? {
-        val title = link.selectFirst(
-            "img[alt], h1, h2, h3, h4, .title, .entry-title"
-        )?.let {
-            if (it.tagName() == "img") {
-                it.attr("alt")
-            } else {
-                it.text()
+    /*
+     * سيلكتور واحد يحاول يلقط رابط البوستر من عنصر "img" عادي بكل
+     * الأتربيوتات الممكنة اللي تستعملها مواقع الـ lazy-load، وإذا ما
+     * لقاش، يفتش على background-image جوه attribute "style"
+     * (برشا قوالب ووردبريس تحط صورة الكارد كخلفية CSS موش كـ <img>).
+     */
+    private fun extractPosterUrl(element: Element): String? {
+
+        element.selectFirst(
+            "img[src], img[data-src], img[data-lazy-src], " +
+                "img[data-original], img[data-srcset], source[srcset]"
+        )?.let { image ->
+
+            val direct = image.attr("src")
+                .ifBlank { image.attr("data-src") }
+                .ifBlank { image.attr("data-lazy-src") }
+                .ifBlank { image.attr("data-original") }
+                .ifBlank {
+                    image.attr("data-srcset")
+                        .ifBlank { image.attr("srcset") }
+                        .split(",")
+                        .firstOrNull()
+                        ?.trim()
+                        ?.split(" ")
+                        ?.firstOrNull()
+                        .orEmpty()
+                }
+
+            if (direct.startsWith("http")) {
+                return direct
             }
-        }?.trim()?.takeIf {
-            it.isNotBlank()
         }
 
-        return title ?: link.text()
-            .trim()
-            .replace(Regex("\\s+"), " ")
-            .takeIf {
-                it.isNotBlank()
+        val bgRegex = Regex(
+            """background-image\s*:\s*url\((['"]?)([^'")]+)\1\)"""
+        )
+
+        val styledElement = element.selectFirst("[style*=background-image]")
+            ?: element.takeIf {
+                it.attr("style").contains("background-image")
             }
+
+        styledElement?.attr("style")?.let { style ->
+            bgRegex.find(style)
+                ?.groupValues
+                ?.getOrNull(2)
+                ?.trim()
+                ?.takeIf { it.startsWith("http") }
+                ?.let { return it }
+        }
+
+        return null
     }
 
-    private fun getPoster(link: Element): String? {
-        return link.selectFirst(
-            "img[src], img[data-src], img[data-lazy-src]"
-        )?.let { image ->
-            image.attr("src")
-                .ifBlank {
-                    image.attr("data-src")
-                }
-                .ifBlank {
-                    image.attr("data-lazy-src")
-                }
-                .takeIf {
-                    it.startsWith("http")
-                }
+    /*
+     * فهذا الموقع، نفس المسلسل/الفيلم يقدر يكون مرتبط بـ 2 روابط
+     * <a> منفصلة تأشر لنفس الصفحة (وحدة فيها الصورة بَرك، وأخرى فيها
+     * العنوان بَرك). الكود القديم كان يوقف عند أول رابط يلقاه، وإذا
+     * صادف الرابط اللي بلا صورة (أو صورة بأتربيوت ما يعرفهاش)، البوستر
+     * يولي فارغ. هوني نلمو (group) كل الروابط اللي تأشر لنفس الصفحة،
+     * ونفتشو على البوستر والعنوان عبر المجموعة كاملة (بما فيها الأب
+     * المباشر تاع كل رابط، لأن الصورة تقدر تكون خارج الـ <a> نفسه).
+     */
+    private fun findPoster(elements: List<Element>): String? {
+
+        for (el in elements) {
+
+            extractPosterUrl(el)?.let { return it }
+
+            el.parent()?.let { parent ->
+                extractPosterUrl(parent)?.let { return it }
+            }
         }
+
+        return null
+    }
+
+    private fun findTitle(elements: List<Element>): String? {
+
+        // أولوية 1: عنوان واضح من عنصر نصي حقيقي (h1-h4, .title, .entry-title)
+        elements.firstNotNullOfOrNull { el ->
+            el.selectFirst("h1, h2, h3, h4, .title, .entry-title")
+                ?.text()
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+        }?.let { return it }
+
+        // أولوية 2: نص الرابط نفسه (لو مافيهوش صورة بَرك)
+        elements.firstNotNullOfOrNull { el ->
+            el.text()
+                .trim()
+                .replace(Regex("\\s+"), " ")
+                .takeIf { it.isNotBlank() }
+        }?.let { return it }
+
+        // أولوية 3 (آخر حل): alt تاع الصورة، حتى لو فيه سنة/تصنيف زايد
+        elements.firstNotNullOfOrNull { el ->
+            el.selectFirst("img[alt]")
+                ?.attr("alt")
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+        }?.let { return it }
+
+        return null
     }
 
     private fun makeSearchResponses(
         document: org.jsoup.nodes.Document
     ): List<SearchResponse> {
 
-        return document
-            .select(
-                "a[href*='/series/'], a[href*='/movie/']"
-            )
-            .mapNotNull { link ->
+        val links = document.select(
+            "a[href*='/series/'], a[href*='/movie/']"
+        )
 
-                val href = link
-                    .attr("href")
-                    .trim()
+        val grouped = links.groupBy {
+            it.attr("href").trim()
+        }
 
-                if (href.isBlank()) {
-                    return@mapNotNull null
+        return grouped.mapNotNull { (href, elements) ->
+
+            if (href.isBlank()) {
+                return@mapNotNull null
+            }
+
+            val title = findTitle(elements)
+                ?: return@mapNotNull null
+
+            val poster = findPoster(elements)
+
+            when {
+                href.contains("/movie/") -> {
+                    newMovieSearchResponse(
+                        title,
+                        href,
+                        TvType.Movie
+                    ) {
+                        posterUrl = poster
+                    }
                 }
 
-                val title = getTitle(link)
-                    ?: return@mapNotNull null
-
-                val poster = getPoster(link)
-
-                when {
-                    href.contains("/movie/") -> {
-                        newMovieSearchResponse(
-                            title,
-                            href,
-                            TvType.Movie
-                        ) {
-                            posterUrl = poster
-                        }
+                href.contains("/series/") -> {
+                    newTvSeriesSearchResponse(
+                        title,
+                        href,
+                        TvType.TvSeries
+                    ) {
+                        posterUrl = poster
                     }
-
-                    href.contains("/series/") -> {
-                        newTvSeriesSearchResponse(
-                            title,
-                            href,
-                            TvType.TvSeries
-                        ) {
-                            posterUrl = poster
-                        }
-                    }
-
-                    else -> null
                 }
+
+                else -> null
             }
-            .distinctBy {
-                it.url
-            }
+        }
     }
 
     override suspend fun getMainPage(
