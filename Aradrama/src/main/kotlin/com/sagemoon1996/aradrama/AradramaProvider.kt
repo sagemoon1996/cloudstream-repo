@@ -11,8 +11,13 @@ class AradramaProvider : MainAPI() {
     override var mainUrl = "https://aradramatv.cc"
     override var name = "Aradrama"
     override var lang = "ar"
+
     override val hasMainPage = true
-    override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
+
+    override val supportedTypes = setOf(
+        TvType.TvSeries,
+        TvType.Movie
+    )
 
     override val mainPage = mainPageOf(
         "$mainUrl/category/ongoing/" to "الدراما التي تبث حاليا",
@@ -30,6 +35,7 @@ class AradramaProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
+
         val url = if (page == 1) {
             request.data
         } else {
@@ -41,10 +47,9 @@ class AradramaProvider : MainAPI() {
             referer = mainUrl
         ).document
 
-        val items = document.select("article, .post, .item, .bsx, .bs")
-            .mapNotNull { element ->
-                parseSearchResult(element)
-            }
+        val items = document
+            .select("article, .post, .item, .bsx, .bs")
+            .mapNotNull { parseSearchResult(it) }
             .distinctBy { it.url }
 
         return newHomePageResponse(
@@ -54,12 +59,32 @@ class AradramaProvider : MainAPI() {
         )
     }
 
-    private fun parseSearchResult(element: Element): SearchResponse? {
+    private fun absoluteUrl(element: Element): String {
+        val absolute = element.attr("abs:href").trim()
+
+        if (absolute.startsWith("http")) {
+            return absolute
+        }
+
+        val href = element.attr("href").trim()
+
+        return when {
+            href.startsWith("http") -> href
+            href.startsWith("/") -> "$mainUrl$href"
+            href.isNotBlank() -> "$mainUrl/${href.trimStart('/')}"
+            else -> ""
+        }
+    }
+
+    private fun parseSearchResult(
+        element: Element
+    ): SearchResponse? {
+
         val link = element.selectFirst("a[href]") ?: return null
 
-        val href = link.attr("href").trim()
+        val href = absoluteUrl(link)
 
-        if (!href.startsWith("http")) {
+        if (!href.startsWith(mainUrl)) {
             return null
         }
 
@@ -77,14 +102,13 @@ class AradramaProvider : MainAPI() {
 
         val poster = element
             .selectFirst("img[data-src], img[src]")
-            ?.let { image ->
-                image.attr("data-src")
-                    .ifBlank { image.attr("src") }
+            ?.let {
+                it.attr("data-src")
+                    .ifBlank { it.attr("src") }
             }
             ?.takeIf { it.startsWith("http") }
 
         val isMovie =
-            href.contains("/%d8%a7%d9%84%d8%a7%d9%81%d9%84%d8%a7%d9%85/", ignoreCase = true) ||
             href.contains("/الافلام/", ignoreCase = true) ||
             title.contains("فيلم", ignoreCase = true)
 
@@ -94,7 +118,7 @@ class AradramaProvider : MainAPI() {
                 url = href,
                 type = TvType.Movie
             ) {
-                this.posterUrl = poster
+                posterUrl = poster
             }
         } else {
             newTvSeriesSearchResponse(
@@ -102,13 +126,20 @@ class AradramaProvider : MainAPI() {
                 href,
                 TvType.TvSeries
             ) {
-                this.posterUrl = poster
+                posterUrl = poster
             }
         }
     }
 
-    override suspend fun search(query: String): List<SearchResponse> {
-        val encodedQuery = URLEncoder.encode(query, "UTF-8")
+    override suspend fun search(
+        query: String
+    ): List<SearchResponse> {
+
+        val encodedQuery = URLEncoder.encode(
+            query,
+            "UTF-8"
+        )
+
         val url = "$mainUrl/?s=$encodedQuery"
 
         val document = app.get(
@@ -116,38 +147,41 @@ class AradramaProvider : MainAPI() {
             referer = mainUrl
         ).document
 
-        return document.select("article, .post, .item, .bsx, .bs")
-            .mapNotNull { element ->
-                parseSearchResult(element)
-            }
+        return document
+            .select("article, .post, .item, .bsx, .bs")
+            .mapNotNull { parseSearchResult(it) }
             .distinctBy { it.url }
     }
 
-    private fun episodeNumberFrom(
+    private fun getEpisodeNumber(
         text: String,
         href: String
     ): Int? {
-        val fromText = Regex(
+
+        val regex = Regex(
             """(?:الحلقة|episode|ep)[^\d]*(\d+)""",
             RegexOption.IGNORE_CASE
-        ).find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        )
 
-        if (fromText != null) {
-            return fromText
-        }
-
-        return Regex(
-            """(?:الحلقة|episode|ep)[^\d]*(\d+)""",
-            RegexOption.IGNORE_CASE
-        ).find(href)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        return regex.find(text)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toIntOrNull()
+            ?: regex.find(href)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toIntOrNull()
     }
 
-    private fun parseEpisodeLinks(
+    private fun parseEpisodes(
         document: Document
     ): List<Episode> {
-        return document.select("a[href]")
+
+        return document
+            .select("a[href]")
             .mapNotNull { link ->
-                val href = link.attr("href").trim()
+
+                val href = absoluteUrl(link)
 
                 if (!href.startsWith(mainUrl)) {
                     return@mapNotNull null
@@ -155,9 +189,9 @@ class AradramaProvider : MainAPI() {
 
                 val text = link.text().trim()
 
-                val episode = episodeNumberFrom(
-                    text = text,
-                    href = href
+                val episode = getEpisodeNumber(
+                    text,
+                    href
                 ) ?: return@mapNotNull null
 
                 newEpisode(href) {
@@ -167,39 +201,65 @@ class AradramaProvider : MainAPI() {
                         text
                     }
 
-                    this.season = 1
+                    season = 1
                     this.episode = episode
                 }
             }
             .distinctBy { it.data }
     }
 
-    private suspend fun getAllEpisodes(
+    private fun findEpisodeListUrl(
+        document: Document
+    ): String? {
+
+        val links = document.select("a[href]")
+
+        return links
+            .map { link ->
+                link to absoluteUrl(link)
+            }
+            .firstOrNull { (link, href) ->
+
+                val text = link.text()
+                    .trim()
+                    .lowercase()
+
+                href.contains(
+                    "/category/episodes/",
+                    ignoreCase = true
+                ) ||
+                    text.contains("مشاهدة حلقات") ||
+                    text.contains("حلقات المسلسل")
+            }
+            ?.second
+            ?.takeIf { it.startsWith(mainUrl) }
+    }
+
+    private suspend fun getSeriesEpisodes(
         seriesDocument: Document
     ): List<Episode> {
 
-        val episodeListUrl = seriesDocument
-            .select("a[href*='/category/episodes/']")
-            .map { it.attr("href").trim() }
-            .firstOrNull { it.startsWith(mainUrl) }
+        val episodeListUrl =
+            findEpisodeListUrl(seriesDocument)
 
         if (episodeListUrl == null) {
-            return parseEpisodeLinks(seriesDocument)
+            return parseEpisodes(seriesDocument)
                 .sortedBy { it.episode }
         }
 
-        val allEpisodes = mutableListOf<Episode>()
-        val seenEpisodeUrls = mutableSetOf<String>()
+        val result = mutableListOf<Episode>()
+        val seen = mutableSetOf<String>()
 
         var page = 1
 
         while (page <= 50) {
 
-            val pageUrl = if (page == 1) {
-                episodeListUrl
-            } else {
-                "${episodeListUrl.trimEnd('/')}/page/$page/"
-            }
+            val pageUrl =
+                if (page == 1) {
+                    episodeListUrl
+                } else {
+                    "${episodeListUrl.trimEnd('/')}/page/$page/"
+                }
 
             val document = try {
                 app.get(
@@ -210,27 +270,30 @@ class AradramaProvider : MainAPI() {
                 break
             }
 
-            val episodes = parseEpisodeLinks(document)
+            val episodes = parseEpisodes(document)
 
             val newEpisodes = episodes.filter {
-                seenEpisodeUrls.add(it.data)
+                seen.add(it.data)
             }
 
             if (newEpisodes.isEmpty()) {
                 break
             }
 
-            allEpisodes.addAll(newEpisodes)
+            result.addAll(newEpisodes)
 
             page++
         }
 
-        return allEpisodes
+        return result
             .distinctBy { it.data }
             .sortedBy { it.episode }
     }
 
-    override suspend fun load(url: String): LoadResponse? {
+    override suspend fun load(
+        url: String
+    ): LoadResponse? {
+
         val document = app.get(
             url,
             referer = mainUrl
@@ -255,7 +318,8 @@ class AradramaProvider : MainAPI() {
                 )?.let {
                     it.attr("data-src")
                         .ifBlank { it.attr("src") }
-                }?.takeIf { it.startsWith("http") }
+                }
+                ?.takeIf { it.startsWith("http") }
 
         val description =
             document.selectFirst(
@@ -266,9 +330,14 @@ class AradramaProvider : MainAPI() {
                 )?.text()?.trim()
 
         val isMovie =
-            url.contains("/%d8%a7%d9%84%d8%a7%d9%81%d9%84%d8%a7%d9%85/", ignoreCase = true) ||
-            url.contains("/الافلام/", ignoreCase = true) ||
-            title.contains("فيلم", ignoreCase = true)
+            url.contains(
+                "/الافلام/",
+                ignoreCase = true
+            ) ||
+                title.contains(
+                    "فيلم",
+                    ignoreCase = true
+                )
 
         if (isMovie) {
             return newMovieLoadResponse(
@@ -277,12 +346,14 @@ class AradramaProvider : MainAPI() {
                 type = TvType.Movie,
                 dataUrl = url
             ) {
-                this.posterUrl = poster
-                this.plot = description
+                posterUrl = poster
+                plot = description
             }
         }
 
-        val episodes = getAllEpisodes(document)
+        val episodes = getSeriesEpisodes(
+            document
+        )
 
         return newTvSeriesLoadResponse(
             name = title,
@@ -290,8 +361,8 @@ class AradramaProvider : MainAPI() {
             type = TvType.TvSeries,
             episodes = episodes
         ) {
-            this.posterUrl = poster
-            this.plot = description
+            posterUrl = poster
+            plot = description
         }
     }
 
@@ -312,46 +383,33 @@ class AradramaProvider : MainAPI() {
 
         val serverUrls = serverElements
             .mapNotNull { server ->
-                val serverUrl = server.attr("data-url").trim()
-
-                if (serverUrl.startsWith("http")) {
-                    serverUrl
-                } else {
-                    null
-                }
-            }
-            .distinct()
-
-        var foundLinks = false
-
-        // Filemoon / ByseVepoin first.
-        val filemoonServers = serverElements
-            .filter { server ->
-                server.text().contains(
-                    "Filemoon",
-                    ignoreCase = true
-                ) ||
-                    server.attr("data-url")
-                        .contains(
-                            "bysevepoin.com",
-                            ignoreCase = true
-                        )
-            }
-            .mapNotNull { server ->
                 server.attr("data-url")
                     .trim()
                     .takeIf { it.startsWith("http") }
             }
             .distinct()
 
-        for (serverUrl in filemoonServers) {
+        var foundLinks = false
+
+        // Filemoon / ByseVepoin أولاً.
+        val filemoonUrls = serverUrls.filter {
+            it.contains(
+                "bysevepoin.com",
+                ignoreCase = true
+            )
+        }
+
+        for (serverUrl in filemoonUrls) {
+
             try {
                 loadExtractor(
                     url = serverUrl,
-                    referer = data,
+                    referer = serverUrl,
                     subtitleCallback = subtitleCallback
                 ) { link ->
+
                     foundLinks = true
+
                     callback(link)
                 }
             } catch (_: Exception) {
@@ -359,51 +417,56 @@ class AradramaProvider : MainAPI() {
         }
 
         // باقي السيرفرات.
-        val otherServers = serverUrls.filterNot { url ->
-            filemoonServers.contains(url)
+        val otherUrls = serverUrls.filterNot {
+            filemoonUrls.contains(it)
         }
 
-        for (serverUrl in otherServers) {
+        for (serverUrl in otherUrls) {
+
             try {
                 loadExtractor(
                     url = serverUrl,
-                    referer = data,
+                    referer = serverUrl,
                     subtitleCallback = subtitleCallback
                 ) { link ->
+
                     foundLinks = true
+
                     callback(link)
                 }
             } catch (_: Exception) {
             }
         }
 
-        // Fallback لأي iframe موجود في صفحة الحلقة.
+        // Iframe fallback.
         val iframeUrls = document
             .select("iframe[src], iframe[data-src]")
             .mapNotNull { iframe ->
-                val iframeUrl = iframe
+
+                val url = iframe
                     .attr("src")
                     .ifBlank {
                         iframe.attr("data-src")
                     }
                     .trim()
 
-                if (iframeUrl.startsWith("http")) {
-                    iframeUrl
-                } else {
-                    null
+                url.takeIf {
+                    it.startsWith("http")
                 }
             }
             .distinct()
 
         for (iframeUrl in iframeUrls) {
+
             try {
                 loadExtractor(
                     url = iframeUrl,
-                    referer = data,
+                    referer = iframeUrl,
                     subtitleCallback = subtitleCallback
                 ) { link ->
+
                     foundLinks = true
+
                     callback(link)
                 }
             } catch (_: Exception) {
