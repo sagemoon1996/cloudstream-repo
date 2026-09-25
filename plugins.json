@@ -20,6 +20,26 @@
         "name": "Aradrama"
     },
     {
+        "fileHash": "sha256-5025a764c9058a0f9cb2d8bf63f4d20a57abe8ba721cc8931b5e5401a4977d05",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
+        "fileSize": 16602,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "sagemoon1996"
+        ],
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "version": 1,
+        "internalName": "AsiaShow",
+        "description": "AsiaShow Arabic streaming provider",
+        "url": "https://raw.githubusercontent.com/sagemoon1996/cloudstream-repo/builds/AsiaShow.cs3",
+        "name": "AsiaShow"
+    },
+    {
         "iconUrl": "https://new61.5tv.lol/wp-content/uploads/2026/09/yjPlfO23INYLyMWr1yr7rhwJhKO.jpg",
         "fileHash": "sha256-43ed1fc1a29ef6da2d6cb4251cdad6f468c35310f75dd65732ea2602ae84eacf",
         "apiVersion": 1,
