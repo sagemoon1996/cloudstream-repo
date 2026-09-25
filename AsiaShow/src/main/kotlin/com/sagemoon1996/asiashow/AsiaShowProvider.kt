@@ -21,10 +21,14 @@ class AsiaShowProvider : MainAPI() {
         TvType.Movie
     )
 
+    // ملاحظة: شلت رو "أخر الحلقات" من الصفحة الرئيسية لأن روابطها توجه
+    // مباشرة لصفحة الحلقة (مش صفحة المسلسل)، وباش نحولها لصفحة المسلسل
+    // بطريقة موثوقة لازمنا JS. حطيت بدالها "برامج" وكوريا زادة.
     override val mainPage = mainPageOf(
-        "$mainUrl/%D8%A3%D8%AE%D8%B1-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A7%D8%AA/" to "آخر الحلقات",
         "$mainUrl/series/" to "المسلسلات",
         "$mainUrl/movies/" to "الأفلام",
+        "$mainUrl/genre/shows/" to "برامج",
+        "$mainUrl/country/kr/" to "الكورية",
         "$mainUrl/country/cn/" to "الصينية",
         "$mainUrl/country/jp/" to "اليابانية",
         "$mainUrl/country/th/" to "التايلاندية"
@@ -75,28 +79,61 @@ class AsiaShowProvider : MainAPI() {
             }
     }
 
+    /**
+     * الموقع الجديد يكرر النص جوه الرابط بشكل "العنوان الدولة العنوان"
+     * (مثلا: "العاشق المقنع الصين العاشق المقنع") بدل "الدولة العنوان" القديمة.
+     * هاذي الدالة تلقى أطول جزء يتكرر في البداية والنهاية (بلا فرضية أسماء
+     * دول معروفة مسبقا) وتاخذو كالعنوان الحقيقي.
+     */
+    private fun dedupTitle(
+        rawText: String
+    ): String {
+
+        val words = rawText
+            .trim()
+            .split(Regex("\\s+"))
+            .filter {
+                it.isNotBlank()
+            }
+
+        if (words.size < 3) {
+            return rawText.trim()
+        }
+
+        for (k in words.size / 2 downTo 1) {
+
+            if (words.size < 2 * k + 1) {
+                continue
+            }
+
+            val prefix = words.subList(0, k)
+            val suffix = words.subList(words.size - k, words.size)
+
+            if (prefix == suffix) {
+                return prefix.joinToString(" ")
+            }
+        }
+
+        return rawText.trim()
+    }
+
     private fun titleFromLink(
         link: Element
     ): String {
 
-        val title = link
+        val attrTitle = link
             .attr("title")
             .trim()
 
-        if (title.isNotBlank()) {
-            return title
+        val rawText = attrTitle.ifBlank {
+            link.text().trim()
         }
 
-        return link
-            .text()
-            .trim()
-            .replace(
-                Regex(
-                    """^\s*(كوريا|الصين|اليابان|تايلاند|تايوان|ماليزيا|امريكا|بريطانيا|الهند|اندونيسيا|تركيا|بولندا|الفلبين)\s+"""
-                ),
-                ""
-            )
-            .trim()
+        if (rawText.isBlank()) {
+            return ""
+        }
+
+        return dedupTitle(rawText)
     }
 
     private fun parseContentLink(
@@ -113,7 +150,8 @@ class AsiaShowProvider : MainAPI() {
             href.contains("/episodes/") ||
             href.contains("/category/") ||
             href.contains("/country/") ||
-            href.contains("/genre/")
+            href.contains("/genre/") ||
+            href.contains("/person/")
         ) {
             return null
         }
@@ -206,33 +244,73 @@ class AsiaShowProvider : MainAPI() {
         )
     }
 
+    private fun normalizeArabic(
+        text: String
+    ): String {
+
+        return text
+            .lowercase()
+            .replace(Regex("[إأآا]"), "ا")
+            .replace('ى', 'ي')
+            .replace('ة', 'ه')
+            .replace(Regex("[\\u064B-\\u0652]"), "")
+            .trim()
+    }
+
+    /**
+     * الموقع رمى الـ ?s= القديمة (ترجع الصفحة الرئيسية بلا فلترة).
+     * البحث الحقيقي أصبح مودال JS (⌘+K) ما نجمش نوصلولو بلا تشغيل
+     * جافاسكريبت. كبديل: نفلترو محليا في الصفحة الرئيسية + أرشيف
+     * المسلسلات والأفلام (الصفحة الأولى فقط، الباقي محمّل بـ"Load more"
+     * عبر JS).
+     */
     override suspend fun search(
         query: String
     ): List<SearchResponse> {
 
-        val encodedQuery = URLEncoder.encode(
-            query.trim(),
-            "UTF-8"
+        val normalizedQuery = normalizeArabic(
+            query
         )
 
-        val searchUrl =
-            "$mainUrl/?s=$encodedQuery"
+        if (normalizedQuery.isBlank()) {
+            return emptyList()
+        }
 
-        val document = app.get(
-            searchUrl,
-            referer = mainUrl
-        ).document
+        val pagesToSearch = listOf(
+            mainUrl,
+            "$mainUrl/series/",
+            "$mainUrl/movies/"
+        )
 
-        return document
-            .select(
-                "a[href*='/series/'], a[href*='/movies/']"
-            )
-            .mapNotNull {
-                parseContentLink(it)
+        val results = mutableListOf<SearchResponse>()
+
+        for (pageUrl in pagesToSearch) {
+
+            try {
+
+                val document = app.get(
+                    pageUrl,
+                    referer = mainUrl
+                ).document
+
+                document
+                    .select(
+                        "a[href*='/series/'], a[href*='/movies/']"
+                    )
+                    .mapNotNull {
+                        parseContentLink(it)
+                    }
+                    .filterTo(results) {
+                        normalizeArabic(it.name).contains(normalizedQuery)
+                    }
+
+            } catch (_: Exception) {
             }
-            .distinctBy {
-                it.url
-            }
+        }
+
+        return results.distinctBy {
+            it.url
+        }
     }
 
     private fun episodeNumber(
@@ -255,8 +333,25 @@ class AsiaShowProvider : MainAPI() {
                 ?.toIntOrNull()
     }
 
-    private fun parseEpisodes(
+    private fun extractSeason(
         document: Document
+    ): Int {
+
+        val text = document
+            .select("body")
+            .text()
+
+        return Regex("""الموسم\s*(\d+)""")
+            .find(text)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toIntOrNull()
+            ?: 1
+    }
+
+    private fun parseEpisodes(
+        document: Document,
+        seasonNumber: Int
     ): List<Episode> {
 
         return document
@@ -269,33 +364,106 @@ class AsiaShowProvider : MainAPI() {
                     return@mapNotNull null
                 }
 
-                val text = link
+                val rawText = link
                     .text()
                     .trim()
 
                 val number = episodeNumber(
-                    text,
+                    rawText,
                     href
                 ) ?: return@mapNotNull null
 
+                val displayName = dedupTitle(
+                    rawText
+                ).ifBlank {
+                    "الحلقة $number"
+                }
+
                 newEpisode(href) {
 
-                    name = if (text.isBlank()) {
-                        "الحلقة $number"
-                    } else {
-                        text
-                    }
-
-                    season = 1
+                    name = displayName
+                    season = seasonNumber
                     episode = number
                 }
             }
             .distinctBy {
                 it.data
             }
-            .sortedBy {
-                it.episode
+    }
+
+    /**
+     * محاولة "best effort" لجلب حلقات إضافية لو المسلسل عندو أكثر من
+     * دفعة واحدة محملة عبر "Load more". ما نجمتش نلقى الـ endpoint
+     * الحقيقي متاع الموقع (JS)، فنجرب أنماط pagination شائعة في
+     * ووردبريس. إذا حتى نمط ما زادش حلقات جديدة، نوقفو بسرعة بلا
+     * ضياع وقت.
+     */
+    private suspend fun loadAdditionalEpisodes(
+        seriesUrl: String,
+        seasonNumber: Int,
+        collected: MutableList<Episode>
+    ) {
+
+        val existingUrls = collected
+            .map {
+                it.data
             }
+            .toMutableSet()
+
+        val patterns = listOf(
+            "page",
+            "paged",
+            "ep_page"
+        )
+
+        for (pattern in patterns) {
+
+            var page = 2
+            var gainedAny = false
+
+            while (page <= 10) {
+
+                val separator = if (seriesUrl.contains("?")) "&" else "?"
+                val pageUrl = "$seriesUrl$separator$pattern=$page"
+
+                val newEpisodes = try {
+
+                    val doc = app.get(
+                        pageUrl,
+                        referer = seriesUrl
+                    ).document
+
+                    parseEpisodes(
+                        doc,
+                        seasonNumber
+                    )
+
+                } catch (_: Exception) {
+                    emptyList()
+                }
+
+                val fresh = newEpisodes.filter {
+                    it.data !in existingUrls
+                }
+
+                if (fresh.isEmpty()) {
+                    break
+                }
+
+                fresh.forEach {
+                    existingUrls.add(it.data)
+                    collected.add(it)
+                }
+
+                gainedAny = true
+                page++
+            }
+
+            if (gainedAny) {
+                // هاذا النمط خدم، مانيش محتاج نجرب الباقي
+                break
+            }
+        }
     }
 
     private fun extractTitle(
@@ -428,15 +596,34 @@ class AsiaShowProvider : MainAPI() {
             }
         }
 
-        val episodes = parseEpisodes(
+        val seasonNumber = extractSeason(
             document
         )
+
+        val episodes = parseEpisodes(
+            document,
+            seasonNumber
+        ).toMutableList()
+
+        loadAdditionalEpisodes(
+            url,
+            seasonNumber,
+            episodes
+        )
+
+        val sortedEpisodes = episodes
+            .distinctBy {
+                it.data
+            }
+            .sortedBy {
+                it.episode
+            }
 
         return newTvSeriesLoadResponse(
             name = title,
             url = url,
             type = TvType.TvSeries,
-            episodes = episodes
+            episodes = sortedEpisodes
         ) {
             posterUrl = poster
             plot = description
@@ -524,28 +711,37 @@ class AsiaShowProvider : MainAPI() {
             referer = mainUrl
         ).document
 
-        val serverUrls = document
-            .select("[data-etk-src]")
-            .mapNotNull { element ->
+        var foundLinks = false
 
-                decodeServerUrl(
-                    element.attr(
-                        "data-etk-src"
-                    )
-                )
+        // 1) التصميم الجديد يحط رابط السيرفر مباشرة في iframe[src]
+        // (بلا ترميز base64)، فنجربو هاذا أول حاجة لأنه الأكثر احتمالا
+        // يخدم مع الموقع الحالي.
+        val iframeUrls = document
+            .select(
+                "iframe[src], iframe[data-src]"
+            )
+            .mapNotNull { iframe ->
+
+                iframe
+                    .attr("src")
+                    .ifBlank {
+                        iframe.attr("data-src")
+                    }
+                    .trim()
+                    .takeIf {
+                        it.startsWith("http")
+                    }
             }
             .distinct()
 
-        var foundLinks = false
-
-        val ult4vidUrls = serverUrls.filter {
+        val ult4vidIframes = iframeUrls.filter {
             it.contains(
                 "ult4vid",
                 ignoreCase = true
             )
         }
 
-        for (serverUrl in ult4vidUrls) {
+        for (serverUrl in ult4vidIframes) {
 
             if (
                 loadDirectVideo(
@@ -558,17 +754,13 @@ class AsiaShowProvider : MainAPI() {
             }
         }
 
-        val otherUrls = serverUrls.filterNot {
-            ult4vidUrls.contains(it)
-        }
-
-        for (serverUrl in otherUrls) {
+        for (iframeUrl in iframeUrls.filterNot { ult4vidIframes.contains(it) }) {
 
             try {
 
                 loadExtractor(
-                    url = serverUrl,
-                    referer = serverUrl,
+                    url = iframeUrl,
+                    referer = iframeUrl,
                     subtitleCallback = subtitleCallback
                 ) { link ->
 
@@ -580,61 +772,57 @@ class AsiaShowProvider : MainAPI() {
             }
         }
 
+        // 2) fallback للآلية القديمة: data-etk-src مرمز base64، في حالة
+        // كان الموقع يستعملها في بعض الصفحات القديمة أو مستقبلا.
         if (!foundLinks) {
 
-            val iframeUrls = document
-                .select(
-                    "iframe[src], iframe[data-src]"
-                )
-                .mapNotNull { iframe ->
+            val serverUrls = document
+                .select("[data-etk-src]")
+                .mapNotNull { element ->
 
-                    iframe
-                        .attr("src")
-                        .ifBlank {
-                            iframe.attr("data-src")
-                        }
-                        .trim()
-                        .takeIf {
-                            it.startsWith("http")
-                        }
+                    decodeServerUrl(
+                        element.attr(
+                            "data-etk-src"
+                        )
+                    )
                 }
                 .distinct()
 
-            for (iframeUrl in iframeUrls) {
+            val ult4vidUrls = serverUrls.filter {
+                it.contains(
+                    "ult4vid",
+                    ignoreCase = true
+                )
+            }
+
+            for (serverUrl in ult4vidUrls) {
 
                 if (
-                    iframeUrl.contains(
-                        "ult4vid",
-                        ignoreCase = true
+                    loadDirectVideo(
+                        serverUrl = serverUrl,
+                        subtitleCallback = subtitleCallback,
+                        callback = callback
                     )
                 ) {
+                    foundLinks = true
+                }
+            }
 
-                    if (
-                        loadDirectVideo(
-                            serverUrl = iframeUrl,
-                            subtitleCallback = subtitleCallback,
-                            callback = callback
-                        )
-                    ) {
+            for (serverUrl in serverUrls.filterNot { ult4vidUrls.contains(it) }) {
+
+                try {
+
+                    loadExtractor(
+                        url = serverUrl,
+                        referer = serverUrl,
+                        subtitleCallback = subtitleCallback
+                    ) { link ->
+
                         foundLinks = true
+                        callback(link)
                     }
 
-                } else {
-
-                    try {
-
-                        loadExtractor(
-                            url = iframeUrl,
-                            referer = iframeUrl,
-                            subtitleCallback = subtitleCallback
-                        ) { link ->
-
-                            foundLinks = true
-                            callback(link)
-                        }
-
-                    } catch (_: Exception) {
-                    }
+                } catch (_: Exception) {
                 }
             }
         }
