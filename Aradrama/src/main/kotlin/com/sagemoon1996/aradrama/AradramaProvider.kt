@@ -107,9 +107,10 @@ class AradramaProvider : MainAPI() {
             newMovieSearchResponse(
                 name = title,
                 url = href,
-                type = TvType.Movie,
-                posterUrl = poster
-            )
+                type = TvType.Movie
+            ) {
+                this.posterUrl = poster
+            }
         } else {
             newTvSeriesSearchResponse(
                 title,
