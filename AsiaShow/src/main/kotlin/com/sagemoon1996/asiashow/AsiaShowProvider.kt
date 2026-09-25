@@ -2,6 +2,7 @@ package com.sagemoon1996.asiashow
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
@@ -9,9 +10,7 @@ import java.net.URLEncoder
 class AsiaShowProvider : MainAPI() {
 
     override var mainUrl = "https://asiashow.net"
-
     override var name = "AsiaShow"
-
     override var lang = "ar"
 
     override val hasMainPage = true
@@ -21,34 +20,26 @@ class AsiaShowProvider : MainAPI() {
         TvType.Movie
     )
 
-    // ملاحظة: شلت رو "أخر الحلقات" من الصفحة الرئيسية لأن روابطها توجه
-    // مباشرة لصفحة الحلقة (مش صفحة المسلسل)، وباش نحولها لصفحة المسلسل
-    // بطريقة موثوقة لازمنا JS. حطيت بدالها "برامج" وكوريا زادة.
     override val mainPage = mainPageOf(
+        "$mainUrl/%D8%A3%D8%AE%D8%B1-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A7%D8%AA/" to "آخر الحلقات",
         "$mainUrl/series/" to "المسلسلات",
         "$mainUrl/movies/" to "الأفلام",
-        "$mainUrl/genre/shows/" to "برامج",
-        "$mainUrl/country/kr/" to "الكورية",
         "$mainUrl/country/cn/" to "الصينية",
         "$mainUrl/country/jp/" to "اليابانية",
         "$mainUrl/country/th/" to "التايلاندية"
     )
 
-    private fun absoluteUrl(
-        element: Element
-    ): String {
+    private val searchPostTypes =
+        """{"movies":{"filter_key":"keywords","taxonomies":[]},"series":{"filter_key":"keywords","taxonomies":[]}}"""
 
-        val absolute = element
-            .attr("abs:href")
-            .trim()
+    private fun absoluteUrl(element: Element): String {
+        val absolute = element.attr("abs:href").trim()
 
         if (absolute.startsWith("http")) {
             return absolute
         }
 
-        val href = element
-            .attr("href")
-            .trim()
+        val href = element.attr("href").trim()
 
         return when {
             href.startsWith("http") -> href
@@ -58,154 +49,241 @@ class AsiaShowProvider : MainAPI() {
         }
     }
 
-    private fun posterFromElement(
-        element: Element
-    ): String? {
-
-        val image = element.selectFirst(
-            "img[data-src], img[data-lazy-src], img[src]"
-        ) ?: return null
-
-        return image.attr("data-src")
-            .ifBlank {
-                image.attr("data-lazy-src")
+    private fun elementImage(element: Element): String? {
+        return element
+            .selectFirst(
+                "img[data-src], img[data-lazy-src], img[src]"
+            )
+            ?.let {
+                it.attr("data-src")
+                    .ifBlank { it.attr("data-lazy-src") }
+                    .ifBlank { it.attr("src") }
+                    .trim()
             }
-            .ifBlank {
-                image.attr("src")
-            }
-            .trim()
-            .takeIf {
-                it.startsWith("http")
-            }
+            ?.takeIf { it.startsWith("http") }
     }
 
-    /**
-     * الموقع الجديد يكرر النص جوه الرابط بشكل "العنوان الدولة العنوان"
-     * (مثلا: "العاشق المقنع الصين العاشق المقنع") بدل "الدولة العنوان" القديمة.
-     * هاذي الدالة تلقى أطول جزء يتكرر في البداية والنهاية (بلا فرضية أسماء
-     * دول معروفة مسبقا) وتاخذو كالعنوان الحقيقي.
-     */
-    private fun dedupTitle(
-        rawText: String
-    ): String {
-
-        val words = rawText
-            .trim()
-            .split(Regex("\\s+"))
-            .filter {
-                it.isNotBlank()
-            }
-
-        if (words.size < 3) {
-            return rawText.trim()
-        }
-
-        for (k in words.size / 2 downTo 1) {
-
-            if (words.size < 2 * k + 1) {
-                continue
-            }
-
-            val prefix = words.subList(0, k)
-            val suffix = words.subList(words.size - k, words.size)
-
-            if (prefix == suffix) {
-                return prefix.joinToString(" ")
-            }
-        }
-
-        return rawText.trim()
+    private fun cardTitle(element: Element): String {
+        return element
+            .selectFirst(".etk-card-title")
+            ?.text()
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: element
+                .attr("aria-label")
+                .trim()
     }
 
-    private fun titleFromLink(
-        link: Element
-    ): String {
-
-        val attrTitle = link
-            .attr("title")
-            .trim()
-
-        val rawText = attrTitle.ifBlank {
-            link.text().trim()
-        }
-
-        if (rawText.isBlank()) {
-            return ""
-        }
-
-        return dedupTitle(rawText)
-    }
-
-    private fun parseContentLink(
+    private fun parseContentCard(
         link: Element
     ): SearchResponse? {
 
-        val href = absoluteUrl(link)
+        val url = absoluteUrl(link)
 
-        if (!href.startsWith(mainUrl)) {
+        if (!url.startsWith(mainUrl)) {
             return null
         }
 
-        if (
-            href.contains("/episodes/") ||
-            href.contains("/category/") ||
-            href.contains("/country/") ||
-            href.contains("/genre/") ||
-            href.contains("/person/")
-        ) {
+        if (url.contains("/episodes/")) {
             return null
         }
 
-        val isSeries = href.contains(
-            "/series/",
-            ignoreCase = true
-        )
-
-        val isMovie = href.contains(
-            "/movies/",
-            ignoreCase = true
-        )
-
-        if (!isSeries && !isMovie) {
-            return null
-        }
-
-        val title = titleFromLink(
-            link
-        )
+        val title = cardTitle(link)
 
         if (title.isBlank()) {
             return null
         }
 
-        val container = link.parent()
+        val poster = elementImage(link)
 
-        val poster =
-            posterFromElement(link)
-                ?: container?.let {
-                    posterFromElement(it)
+        return when {
+            url.contains("/series/", ignoreCase = true) -> {
+                newTvSeriesSearchResponse(
+                    name = title,
+                    url = url,
+                    type = TvType.TvSeries
+                ) {
+                    posterUrl = poster
+                }
+            }
+
+            url.contains("/movies/", ignoreCase = true) -> {
+                newMovieSearchResponse(
+                    name = title,
+                    url = url,
+                    type = TvType.Movie
+                ) {
+                    posterUrl = poster
+                }
+            }
+
+            else -> null
+        }
+    }
+
+    private fun parseContentCards(
+        document: Document
+    ): List<SearchResponse> {
+
+        return document
+            .select(
+                ".etk-card-link[href*='/series/'], " +
+                    ".etk-card-link[href*='/movies/']"
+            )
+            .mapNotNull {
+                parseContentCard(it)
+            }
+            .distinctBy {
+                it.url
+            }
+    }
+
+    private fun episodeNumber(
+        title: String,
+        url: String
+    ): Int? {
+
+        val source = "$title $url"
+
+        return Regex(
+            """(?:الحلقة|episode|ep)[^\d]*(\d+)""",
+            RegexOption.IGNORE_CASE
+        )
+            .find(source)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toIntOrNull()
+    }
+
+    private fun parseEpisode(
+        link: Element
+    ): Episode? {
+
+        val url = absoluteUrl(link)
+
+        if (!url.contains("/episodes/")) {
+            return null
+        }
+
+        val title = cardTitle(link)
+
+        val number = episodeNumber(
+            title,
+            url
+        ) ?: return null
+
+        return newEpisode(url) {
+            name = title.ifBlank {
+                "الحلقة $number"
+            }
+
+            season = 1
+            episode = number
+        }
+    }
+
+    private fun parseEpisodes(
+        document: Document
+    ): List<Episode> {
+
+        val scoped =
+            document.select(
+                ".ts-preview a.etk-card-link[href*='/episodes/']"
+            )
+
+        val links =
+            if (scoped.isNotEmpty()) {
+                scoped
+            } else {
+                document.select(
+                    "a.etk-card-link[href*='/episodes/']"
+                )
+            }
+
+        return links
+            .mapNotNull {
+                parseEpisode(it)
+            }
+            .distinctBy {
+                it.data
+            }
+            .sortedBy {
+                it.episode ?: Int.MAX_VALUE
+            }
+    }
+
+    private fun episodeToSeriesUrl(
+        episodeUrl: String
+    ): String? {
+
+        val path = episodeUrl
+            .substringAfter("$mainUrl/")
+            .trimEnd('/')
+
+        if (!path.startsWith("episodes/")) {
+            return null
+        }
+
+        val episodeSlug =
+            path.removePrefix("episodes/")
+
+        val seriesSlug =
+            episodeSlug.replace(
+                Regex("""-الحلقة-\d+$"""),
+                ""
+            )
+
+        if (seriesSlug.isBlank() || seriesSlug == episodeSlug) {
+            return null
+        }
+
+        return "$mainUrl/series/$seriesSlug/"
+    }
+
+    private fun parseLatestEpisodes(
+        document: Document
+    ): List<SearchResponse> {
+
+        return document
+            .select("a.etk-card-link[href*='/episodes/']")
+            .mapNotNull { link ->
+
+                val episodeUrl = absoluteUrl(link)
+
+                if (!episodeUrl.startsWith(mainUrl)) {
+                    return@mapNotNull null
                 }
 
-        return if (isMovie) {
+                val seriesUrl =
+                    episodeToSeriesUrl(episodeUrl)
+                        ?: return@mapNotNull null
 
-            newMovieSearchResponse(
-                name = title,
-                url = href,
-                type = TvType.Movie
-            ) {
-                posterUrl = poster
+                val title = cardTitle(link)
+
+                val seriesTitle =
+                    title.replace(
+                        Regex(
+                            """\s*الحلقة\s*\d+\s*$""",
+                            RegexOption.IGNORE_CASE
+                        ),
+                        ""
+                    ).trim()
+
+                if (seriesTitle.isBlank()) {
+                    return@mapNotNull null
+                }
+
+                newTvSeriesSearchResponse(
+                    name = seriesTitle,
+                    url = seriesUrl,
+                    type = TvType.TvSeries
+                ) {
+                    posterUrl = elementImage(link)
+                }
             }
-
-        } else {
-
-            newTvSeriesSearchResponse(
-                title,
-                href,
-                TvType.TvSeries
-            ) {
-                posterUrl = poster
+            .distinctBy {
+                it.url
             }
-        }
     }
 
     override suspend fun getMainPage(
@@ -226,15 +304,17 @@ class AsiaShowProvider : MainAPI() {
             referer = mainUrl
         ).document
 
-        val items = document
-            .select(
-                "a[href*='/series/'], a[href*='/movies/']"
+        val isLatest =
+            request.data.contains(
+                "/%D8%A3%D8%AE%D8%B1-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A7%D8%AA/",
+                ignoreCase = true
             )
-            .mapNotNull {
-                parseContentLink(it)
-            }
-            .distinctBy {
-                it.url
+
+        val items =
+            if (isLatest) {
+                parseLatestEpisodes(document)
+            } else {
+                parseContentCards(document)
             }
 
         return newHomePageResponse(
@@ -244,225 +324,112 @@ class AsiaShowProvider : MainAPI() {
         )
     }
 
-    private fun normalizeArabic(
-        text: String
-    ): String {
-
-        return text
-            .lowercase()
-            .replace(Regex("[إأآا]"), "ا")
-            .replace('ى', 'ي')
-            .replace('ة', 'ه')
-            .replace(Regex("[\\u064B-\\u0652]"), "")
-            .trim()
-    }
-
-    /**
-     * الموقع رمى الـ ?s= القديمة (ترجع الصفحة الرئيسية بلا فلترة).
-     * البحث الحقيقي أصبح مودال JS (⌘+K) ما نجمش نوصلولو بلا تشغيل
-     * جافاسكريبت. كبديل: نفلترو محليا في الصفحة الرئيسية + أرشيف
-     * المسلسلات والأفلام (الصفحة الأولى فقط، الباقي محمّل بـ"Load more"
-     * عبر JS).
-     */
     override suspend fun search(
         query: String
     ): List<SearchResponse> {
 
-        val normalizedQuery = normalizeArabic(
-            query
-        )
-
-        if (normalizedQuery.isBlank()) {
+        if (query.trim().length < 3) {
             return emptyList()
         }
 
-        val pagesToSearch = listOf(
-            mainUrl,
-            "$mainUrl/series/",
-            "$mainUrl/movies/"
-        )
+        val encodedQuery =
+            URLEncoder.encode(
+                query.trim(),
+                "UTF-8"
+            )
 
-        val results = mutableListOf<SearchResponse>()
+        val encodedPostTypes =
+            URLEncoder.encode(
+                searchPostTypes,
+                "UTF-8"
+            )
 
-        for (pageUrl in pagesToSearch) {
+        val url =
+            "$mainUrl/?vx=1" +
+                "&action=quick_search" +
+                "&search=$encodedQuery" +
+                "&post_types=$encodedPostTypes"
 
-            try {
+        return try {
 
-                val document = app.get(
-                    pageUrl,
-                    referer = mainUrl
-                ).document
+            val response = app.get(
+                url,
+                referer = mainUrl
+            )
 
-                document
-                    .select(
-                        "a[href*='/series/'], a[href*='/movies/']"
-                    )
-                    .mapNotNull {
-                        parseContentLink(it)
+            val json =
+                JSONObject(response.text)
+
+            val data =
+                json.optJSONArray("data")
+                    ?: return emptyList()
+
+            buildList {
+
+                for (index in 0 until data.length()) {
+
+                    val item =
+                        data.optJSONObject(index)
+                            ?: continue
+
+                    val title =
+                        item.optString("title")
+                            .trim()
+
+                    val rawUrl =
+                        item.optString("link")
+                            .trim()
+
+                    if (
+                        title.isBlank() ||
+                        rawUrl.isBlank()
+                    ) {
+                        continue
                     }
-                    .filterTo(results) {
-                        normalizeArabic(it.name).contains(normalizedQuery)
+
+                    val resultUrl =
+                        if (rawUrl.startsWith("http")) {
+                            rawUrl
+                        } else {
+                            "$mainUrl/${rawUrl.trimStart('/')}"
+                        }
+
+                    when {
+                        resultUrl.contains(
+                            "/series/",
+                            ignoreCase = true
+                        ) -> {
+
+                            add(
+                                newTvSeriesSearchResponse(
+                                    name = title,
+                                    url = resultUrl,
+                                    type = TvType.TvSeries
+                                )
+                            )
+                        }
+
+                        resultUrl.contains(
+                            "/movies/",
+                            ignoreCase = true
+                        ) -> {
+
+                            add(
+                                newMovieSearchResponse(
+                                    name = title,
+                                    url = resultUrl,
+                                    type = TvType.Movie
+                                )
+                            )
+                        }
                     }
-
-            } catch (_: Exception) {
-            }
-        }
-
-        return results.distinctBy {
-            it.url
-        }
-    }
-
-    private fun episodeNumber(
-        text: String,
-        href: String
-    ): Int? {
-
-        val regex = Regex(
-            """(?:الحلقة|episode|ep)[^\d]*(\d+)""",
-            RegexOption.IGNORE_CASE
-        )
-
-        return regex.find(text)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.toIntOrNull()
-            ?: regex.find(href)
-                ?.groupValues
-                ?.getOrNull(1)
-                ?.toIntOrNull()
-    }
-
-    private fun extractSeason(
-        document: Document
-    ): Int {
-
-        val text = document
-            .select("body")
-            .text()
-
-        return Regex("""الموسم\s*(\d+)""")
-            .find(text)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.toIntOrNull()
-            ?: 1
-    }
-
-    private fun parseEpisodes(
-        document: Document,
-        seasonNumber: Int
-    ): List<Episode> {
-
-        return document
-            .select("a[href*='/episodes/']")
-            .mapNotNull { link ->
-
-                val href = absoluteUrl(link)
-
-                if (!href.startsWith(mainUrl)) {
-                    return@mapNotNull null
                 }
-
-                val rawText = link
-                    .text()
-                    .trim()
-
-                val number = episodeNumber(
-                    rawText,
-                    href
-                ) ?: return@mapNotNull null
-
-                val displayName = dedupTitle(
-                    rawText
-                ).ifBlank {
-                    "الحلقة $number"
-                }
-
-                newEpisode(href) {
-
-                    name = displayName
-                    season = seasonNumber
-                    episode = number
-                }
-            }
-            .distinctBy {
-                it.data
-            }
-    }
-
-    /**
-     * محاولة "best effort" لجلب حلقات إضافية لو المسلسل عندو أكثر من
-     * دفعة واحدة محملة عبر "Load more". ما نجمتش نلقى الـ endpoint
-     * الحقيقي متاع الموقع (JS)، فنجرب أنماط pagination شائعة في
-     * ووردبريس. إذا حتى نمط ما زادش حلقات جديدة، نوقفو بسرعة بلا
-     * ضياع وقت.
-     */
-    private suspend fun loadAdditionalEpisodes(
-        seriesUrl: String,
-        seasonNumber: Int,
-        collected: MutableList<Episode>
-    ) {
-
-        val existingUrls = collected
-            .map {
-                it.data
-            }
-            .toMutableSet()
-
-        val patterns = listOf(
-            "page",
-            "paged",
-            "ep_page"
-        )
-
-        for (pattern in patterns) {
-
-            var page = 2
-            var gainedAny = false
-
-            while (page <= 10) {
-
-                val separator = if (seriesUrl.contains("?")) "&" else "?"
-                val pageUrl = "$seriesUrl$separator$pattern=$page"
-
-                val newEpisodes = try {
-
-                    val doc = app.get(
-                        pageUrl,
-                        referer = seriesUrl
-                    ).document
-
-                    parseEpisodes(
-                        doc,
-                        seasonNumber
-                    )
-
-                } catch (_: Exception) {
-                    emptyList()
-                }
-
-                val fresh = newEpisodes.filter {
-                    it.data !in existingUrls
-                }
-
-                if (fresh.isEmpty()) {
-                    break
-                }
-
-                fresh.forEach {
-                    existingUrls.add(it.data)
-                    collected.add(it)
-                }
-
-                gainedAny = true
-                page++
+            }.distinctBy {
+                it.url
             }
 
-            if (gainedAny) {
-                // هاذا النمط خدم، مانيش محتاج نجرب الباقي
-                break
-            }
+        } catch (_: Exception) {
+            emptyList()
         }
     }
 
@@ -470,34 +437,28 @@ class AsiaShowProvider : MainAPI() {
         document: Document
     ): String? {
 
-        val ogTitle = document
+        return document
             .selectFirst(
                 "meta[property=og:title]"
             )
             ?.attr("content")
             ?.trim()
-            ?.takeIf {
-                it.isNotBlank()
-            }
-
-        if (ogTitle != null) {
-            return ogTitle
-                .replace(
-                    Regex("""\s*[–-]\s*اسيا شو.*$"""),
-                    ""
-                )
-                .trim()
-        }
-
-        return document
-            .selectFirst(
-                ".entry-title, h1, h2"
+            ?.replace(
+                Regex("""\s*[–-]\s*اسيا شو.*$"""),
+                ""
             )
-            ?.text()
-            ?.trim()
             ?.takeIf {
                 it.isNotBlank()
             }
+            ?: document
+                .selectFirst(
+                    ".entry-title, h1"
+                )
+                ?.text()
+                ?.trim()
+                ?.takeIf {
+                    it.isNotBlank()
+                }
     }
 
     private fun extractPoster(
@@ -525,8 +486,8 @@ class AsiaShowProvider : MainAPI() {
                         .ifBlank {
                             it.attr("src")
                         }
+                        .trim()
                 }
-                ?.trim()
                 ?.takeIf {
                     it.startsWith("http")
                 }
@@ -565,25 +526,22 @@ class AsiaShowProvider : MainAPI() {
             referer = mainUrl
         ).document
 
-        val title = extractTitle(
-            document
-        ) ?: return null
+        val title =
+            extractTitle(document)
+                ?: return null
 
-        val poster = extractPoster(
-            document
-        )
+        val poster =
+            extractPoster(document)
 
-        val description = extractDescription(
-            document
-        )
+        val description =
+            extractDescription(document)
 
-        val isMovie =
+        if (
             url.contains(
                 "/movies/",
                 ignoreCase = true
             )
-
-        if (isMovie) {
+        ) {
 
             return newMovieLoadResponse(
                 name = title,
@@ -596,34 +554,14 @@ class AsiaShowProvider : MainAPI() {
             }
         }
 
-        val seasonNumber = extractSeason(
-            document
-        )
-
-        val episodes = parseEpisodes(
-            document,
-            seasonNumber
-        ).toMutableList()
-
-        loadAdditionalEpisodes(
-            url,
-            seasonNumber,
-            episodes
-        )
-
-        val sortedEpisodes = episodes
-            .distinctBy {
-                it.data
-            }
-            .sortedBy {
-                it.episode
-            }
+        val episodes =
+            parseEpisodes(document)
 
         return newTvSeriesLoadResponse(
             name = title,
             url = url,
             type = TvType.TvSeries,
-            episodes = sortedEpisodes
+            episodes = episodes
         ) {
             posterUrl = poster
             plot = description
@@ -633,10 +571,6 @@ class AsiaShowProvider : MainAPI() {
     private fun decodeServerUrl(
         encoded: String
     ): String? {
-
-        if (encoded.isBlank()) {
-            return null
-        }
 
         return try {
 
@@ -653,9 +587,9 @@ class AsiaShowProvider : MainAPI() {
         }
     }
 
-    private suspend fun loadDirectVideo(
+    private suspend fun loadUlt4vid(
         serverUrl: String,
-        subtitleCallback: (SubtitleFile) -> Unit,
+        episodeUrl: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
@@ -663,113 +597,32 @@ class AsiaShowProvider : MainAPI() {
 
             val document = app.get(
                 serverUrl,
-                referer = mainUrl
+                referer = episodeUrl
             ).document
 
-            val mediaUrl = document
-                .selectFirst(
-                    "video[data-link]"
-                )
-                ?.attr("data-link")
-                ?.trim()
-                ?.takeIf {
-                    it.startsWith("http")
-                }
-
-            if (mediaUrl == null) {
-                false
-            } else {
-
-                callback(
-                    newExtractorLink(
-                        source = "Ult4vid",
-                        name = "Ult4vid",
-                        url = mediaUrl,
-                        type = ExtractorLinkType.VIDEO
-                    ) {
-                        referer = serverUrl
+            val mediaUrl =
+                document
+                    .selectFirst(
+                        "video[data-link]"
+                    )
+                    ?.attr("data-link")
+                    ?.trim()
+                    ?.takeIf {
+                        it.startsWith("http")
                     }
-                )
+                    ?: return false
 
-                true
-            }
-
-        } catch (_: Exception) {
-            false
-        }
-    }
-
-    /**
-     * بعض الاستضافات (مثلا 71stream.one) ماعندهمش extractor مبني في
-     * CloudStream، فـ loadExtractor() ترجع بلا نتيجة بصمت حتى لو
-     * الرابط صحيح. هاذي محاولة احتياطية عامة: نفتحو صفحة الـ embed
-     * إحنا وندورو على أنماط شائعة عند مشغلات jwplayer/مشابهة
-     * ("file": "...", source: "...m3u8", أو رابط m3u8 مباشر جوه
-     * أي <script>). إذا الموقع يستخدم تشفير/JS معقد أكثر من هذا،
-     * هاذي المحاولة ما تنجحش وتحتاج extractor مخصص حقيقي.
-     */
-    private suspend fun tryGenericExtraction(
-        embedUrl: String,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-
-        return try {
-
-            val response = app.get(
-                embedUrl,
-                referer = mainUrl
-            )
-
-            val body = response.text
-
-            val filePattern = Regex(
-                """["']file["']\s*:\s*["']([^"']+)["']"""
-            )
-
-            val sourcePattern = Regex(
-                """source\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""",
-                RegexOption.IGNORE_CASE
-            )
-
-            val directM3u8Pattern = Regex(
-                """https?://[^"'\s]+\.m3u8[^"'\s]*"""
-            )
-
-            val candidate =
-                filePattern.find(body)?.groupValues?.getOrNull(1)
-                    ?: sourcePattern.find(body)?.groupValues?.getOrNull(1)
-                    ?: directM3u8Pattern.find(body)?.value
-
-            if (
-                candidate.isNullOrBlank() ||
-                !candidate.startsWith("http")
-            ) {
-                return false
-            }
-
-            if (candidate.contains(".m3u8")) {
-
-                M3u8Helper.generateM3u8(
-                    name,
-                    candidate,
-                    embedUrl
-                ).forEach {
-                    callback(it)
+            callback(
+                newExtractorLink(
+                    source = "Ult4vid",
+                    name = "Ult4vid",
+                    url = mediaUrl,
+                    type = ExtractorLinkType.VIDEO
+                ) {
+                    referer = serverUrl
+                    quality = Qualities.Unknown.value
                 }
-
-            } else {
-
-                callback(
-                    newExtractorLink(
-                        source = name,
-                        name = name,
-                        url = candidate,
-                        type = ExtractorLinkType.VIDEO
-                    ) {
-                        referer = embedUrl
-                    }
-                )
-            }
+            )
 
             true
 
@@ -785,47 +638,57 @@ class AsiaShowProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
-        val document = app.get(
-            data,
-            referer = mainUrl
-        ).document
+        val episodeUrl = data.trim()
+
+        if (!episodeUrl.startsWith("http")) {
+            return false
+        }
+
+        val document = try {
+
+            app.get(
+                episodeUrl,
+                referer = mainUrl
+            ).document
+
+        } catch (_: Exception) {
+
+            return false
+        }
+
+        val serverUrls =
+            document
+                .select(
+                    "a[data-etk-server-btn][data-etk-src]"
+                )
+                .mapNotNull { server ->
+
+                    decodeServerUrl(
+                        server.attr("data-etk-src")
+                    )
+                }
+                .distinct()
+
+        if (serverUrls.isEmpty()) {
+            return false
+        }
 
         var foundLinks = false
 
-        // 1) التصميم الجديد يحط رابط السيرفر مباشرة في iframe[src]
-        // (بلا ترميز base64)، فنجربو هاذا أول حاجة لأنه الأكثر احتمالا
-        // يخدم مع الموقع الحالي.
-        val iframeUrls = document
-            .select(
-                "iframe[src], iframe[data-src]"
-            )
-            .mapNotNull { iframe ->
-
-                iframe
-                    .attr("src")
-                    .ifBlank {
-                        iframe.attr("data-src")
-                    }
-                    .trim()
-                    .takeIf {
-                        it.startsWith("http")
-                    }
+        val ult4vidUrls =
+            serverUrls.filter {
+                it.contains(
+                    "ult4vid",
+                    ignoreCase = true
+                )
             }
-            .distinct()
 
-        val ult4vidIframes = iframeUrls.filter {
-            it.contains(
-                "ult4vid",
-                ignoreCase = true
-            )
-        }
-
-        for (serverUrl in ult4vidIframes) {
+        for (serverUrl in ult4vidUrls) {
 
             if (
-                loadDirectVideo(
+                loadUlt4vid(
                     serverUrl = serverUrl,
-                    subtitleCallback = subtitleCallback,
+                    episodeUrl = episodeUrl,
                     callback = callback
                 )
             ) {
@@ -833,84 +696,19 @@ class AsiaShowProvider : MainAPI() {
             }
         }
 
-        for (iframeUrl in iframeUrls.filterNot { ult4vidIframes.contains(it) }) {
+        val otherUrls =
+            serverUrls.filterNot {
+                ult4vidUrls.contains(it)
+            }
 
-            var urlFoundLinks = false
+        for (serverUrl in otherUrls) {
 
             try {
 
-                loadExtractor(
-                    url = iframeUrl,
-                    referer = iframeUrl,
-                    subtitleCallback = subtitleCallback
-                ) { link ->
-
-                    urlFoundLinks = true
-                    foundLinks = true
-                    callback(link)
-                }
-
-            } catch (_: Exception) {
-            }
-
-            // 2) لا CloudStream عندو extractor لهاذا الهوست، نجربو
-            // الطريقة العامة الاحتياطية قبل ما نخليه بلا نتيجة.
-            if (!urlFoundLinks) {
-
-                if (
-                    tryGenericExtraction(
-                        embedUrl = iframeUrl,
-                        callback = callback
-                    )
-                ) {
-                    foundLinks = true
-                }
-            }
-        }
-
-        // 2) fallback للآلية القديمة: data-etk-src مرمز base64، في حالة
-        // كان الموقع يستعملها في بعض الصفحات القديمة أو مستقبلا.
-        if (!foundLinks) {
-
-            val serverUrls = document
-                .select("[data-etk-src]")
-                .mapNotNull { element ->
-
-                    decodeServerUrl(
-                        element.attr(
-                            "data-etk-src"
-                        )
-                    )
-                }
-                .distinct()
-
-            val ult4vidUrls = serverUrls.filter {
-                it.contains(
-                    "ult4vid",
-                    ignoreCase = true
-                )
-            }
-
-            for (serverUrl in ult4vidUrls) {
-
-                if (
-                    loadDirectVideo(
-                        serverUrl = serverUrl,
-                        subtitleCallback = subtitleCallback,
-                        callback = callback
-                    )
-                ) {
-                    foundLinks = true
-                }
-            }
-
-            for (serverUrl in serverUrls.filterNot { ult4vidUrls.contains(it) }) {
-
-                try {
-
+                val loaded =
                     loadExtractor(
                         url = serverUrl,
-                        referer = serverUrl,
+                        referer = episodeUrl,
                         subtitleCallback = subtitleCallback
                     ) { link ->
 
@@ -918,8 +716,11 @@ class AsiaShowProvider : MainAPI() {
                         callback(link)
                     }
 
-                } catch (_: Exception) {
+                if (loaded) {
+                    foundLinks = true
                 }
+
+            } catch (_: Exception) {
             }
         }
 
