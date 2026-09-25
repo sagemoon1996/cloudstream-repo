@@ -91,7 +91,9 @@ class AsiaShowProvider : MainAPI() {
             .text()
             .trim()
             .replace(
-                Regex("""^\s*(كوريا|الصين|اليابان|تايلاند|تايوان|ماليزيا|امريكا|بريطانيا|الهند|اندونيسيا|تركيا|بولندا|الفلبين)\s+"""),
+                Regex(
+                    """^\s*(كوريا|الصين|اليابان|تايلاند|تايوان|ماليزيا|امريكا|بريطانيا|الهند|اندونيسيا|تركيا|بولندا|الفلبين)\s+"""
+                ),
                 ""
             )
             .trim()
@@ -142,9 +144,9 @@ class AsiaShowProvider : MainAPI() {
 
         val poster =
             posterFromElement(link)
-                ?: posterFromElement(
-                    container
-                )
+                ?: container?.let {
+                    posterFromElement(it)
+                }
 
         return if (isMovie) {
 
@@ -531,17 +533,11 @@ class AsiaShowProvider : MainAPI() {
                         "data-etk-src"
                     )
                 )
-
             }
             .distinct()
 
         var foundLinks = false
 
-        /*
-         * Ult4vid:
-         * The embed page contains the current temporary
-         * Cloudflare R2 MP4 directly in video[data-link].
-         */
         val ult4vidUrls = serverUrls.filter {
             it.contains(
                 "ult4vid",
@@ -562,10 +558,6 @@ class AsiaShowProvider : MainAPI() {
             }
         }
 
-        /*
-         * Other servers:
-         * Keep CloudStream's normal extractor system as fallback.
-         */
         val otherUrls = serverUrls.filterNot {
             ult4vidUrls.contains(it)
         }
@@ -588,9 +580,6 @@ class AsiaShowProvider : MainAPI() {
             }
         }
 
-        /*
-         * Direct iframe fallback.
-         */
         if (!foundLinks) {
 
             val iframeUrls = document
