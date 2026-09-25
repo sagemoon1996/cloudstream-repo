@@ -61,7 +61,9 @@ class AradramaProvider : MainAPI() {
         )
     }
 
-    private fun parseSearchResult(element: Element): SearchResponse? {
+    private fun parseSearchResult(
+        element: Element
+    ): SearchResponse? {
 
         val link = element.selectFirst(
             "a[href]"
@@ -213,17 +215,20 @@ class AradramaProvider : MainAPI() {
             val episode = episodeNumber
                 ?: return@mapNotNull null
 
-            Episode(
-                data = href,
+            newEpisode(href) {
+
                 name = if (text.isBlank()) {
                     "الحلقة $episode"
                 } else {
                     text
-                },
-                season = null,
-                episode = episode
-            )
-        }.distinctBy { it.data }
+                }
+
+                this.season = 1
+                this.episode = episode
+            }
+        }.distinctBy {
+            it.data
+        }
 
         val isMovie = url.contains(
             "/الافلام/",
@@ -274,7 +279,9 @@ class AradramaProvider : MainAPI() {
             "li.server[data-url]"
         ).mapNotNull { server ->
 
-            val serverUrl = server.attr("data-url").trim()
+            val serverUrl = server.attr(
+                "data-url"
+            ).trim()
 
             if (serverUrl.startsWith("http")) {
                 serverUrl
@@ -306,7 +313,9 @@ class AradramaProvider : MainAPI() {
             "iframe[src], iframe[data-src]"
         ).mapNotNull { iframe ->
 
-            val iframeUrl = iframe.attr("src").ifBlank {
+            val iframeUrl = iframe.attr(
+                "src"
+            ).ifBlank {
                 iframe.attr("data-src")
             }.trim()
 
