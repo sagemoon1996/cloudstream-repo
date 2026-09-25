@@ -1,5 +1,25 @@
 [
     {
+        "fileHash": "sha256-63045f7716e24f110d5179f7c3727a3183e685c7ea5e8e421a1965954e05820b",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
+        "fileSize": 18618,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "sagemoon1996"
+        ],
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "version": 1,
+        "internalName": "Aradrama",
+        "description": "Aradrama Arabic streaming provider",
+        "url": "https://raw.githubusercontent.com/sagemoon1996/cloudstream-repo/builds/Aradrama.cs3",
+        "name": "Aradrama"
+    },
+    {
         "iconUrl": "https://new61.5tv.lol/wp-content/uploads/2026/09/yjPlfO23INYLyMWr1yr7rhwJhKO.jpg",
         "fileHash": "sha256-188681104f094e073a62f6e9d903b3c29a619d1e061fd0cf5a4d04a24ab2b9bb",
         "apiVersion": 1,
