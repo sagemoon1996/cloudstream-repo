@@ -1,9 +1,9 @@
 [
     {
-        "fileHash": "sha256-1fcf7006390978a7ede09f9ccc00451a615a335d5aebaf1f0846fb91aefddebc",
+        "fileHash": "sha256-c9fc6ed64324d61a1fc2a2ffe08384acc6d9e8e9f93a444d3e258ddaed4d5e26",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
-        "fileSize": 21996,
+        "fileSize": 21906,
         "status": 1,
         "language": "ar",
         "authors": [
