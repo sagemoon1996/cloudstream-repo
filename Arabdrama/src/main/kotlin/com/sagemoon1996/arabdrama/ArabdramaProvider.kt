@@ -31,12 +31,20 @@ class ArabdramaProvider : MainAPI() {
             referer = mainUrl
         ).document
 
-        return document
+        val results = document
             .select("div.show div.cover > a[href*='/show-']")
             .mapNotNull { element ->
                 parseShowResult(element)
             }
             .distinctBy { it.url }
+
+        results.forEach {
+            println(
+                "ARABDRAMA FINAL SEARCH URL = ${it.url}"
+            )
+        }
+
+        return results
     }
 
     private fun parseShowResult(
