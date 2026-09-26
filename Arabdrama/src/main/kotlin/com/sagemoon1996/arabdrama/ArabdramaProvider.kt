@@ -31,10 +31,8 @@ class ArabdramaProvider : MainAPI() {
             referer = mainUrl
         ).document
 
-        println("ARABDRAMA SEARCH QUERY = $query")
-
         return document
-            .select("a[href*='/show-']")
+            .select("div.show div.cover > a[href*='/show-']")
             .mapNotNull { element ->
                 parseShowResult(element)
             }
@@ -53,39 +51,16 @@ class ArabdramaProvider : MainAPI() {
 
         val fullUrl = fixUrl(href)
 
-        println("ARABDRAMA RAW HREF = $href")
-        println("ARABDRAMA FIXED URL = $fullUrl")
-
-        if (!fullUrl.contains("/show-")) {
-            return null
-        }
-
-        val title =
-            element
-                .attr("title")
-                .trim()
-                .takeIf { it.isNotBlank() }
-                ?: element
-                    .text()
-                    .trim()
-                    .takeIf { it.isNotBlank() }
-                ?: element
-                    .selectFirst("img")
-                    ?.attr("alt")
-                    ?.trim()
-                    ?.takeIf { it.isNotBlank() }
-                ?: return null
+        val title = element
+            .attr("title")
+            .trim()
+            .takeIf { it.isNotBlank() }
+            ?: return null
 
         val poster = element
-            .selectFirst("img[data-src], img[src]")
-            ?.let { image ->
-                image
-                    .attr("data-src")
-                    .ifBlank {
-                        image.attr("src")
-                    }
-                    .trim()
-            }
+            .selectFirst("img")
+            ?.attr("src")
+            ?.trim()
             ?.takeIf { it.isNotBlank() }
             ?.let { fixUrl(it) }
 
@@ -103,15 +78,13 @@ class ArabdramaProvider : MainAPI() {
                     ignoreCase = true
                 )
 
-        println("ARABDRAMA SEARCH TITLE = $title")
-        println("ARABDRAMA SEARCH RESPONSE URL = $fullUrl")
-
         return if (isMovie) {
 
             newMovieSearchResponse(
                 name = title,
                 url = fullUrl,
-                type = TvType.Movie
+                type = TvType.Movie,
+                fix = false
             ) {
                 posterUrl = poster
             }
@@ -121,7 +94,8 @@ class ArabdramaProvider : MainAPI() {
             newTvSeriesSearchResponse(
                 title,
                 fullUrl,
-                TvType.TvSeries
+                TvType.TvSeries,
+                false
             ) {
                 posterUrl = poster
             }
