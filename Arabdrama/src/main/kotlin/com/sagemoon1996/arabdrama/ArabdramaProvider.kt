@@ -97,6 +97,12 @@ class ArabdramaProvider : MainAPI() {
         url: String
     ): LoadResponse? {
 
+        if (url.contains("caIl-it-love")) {
+            throw ErrorLoadingException(
+                "DEBUG_LOAD_URL=$url"
+            )
+        }
+
         val document = app.get(
             url,
             referer = mainUrl
