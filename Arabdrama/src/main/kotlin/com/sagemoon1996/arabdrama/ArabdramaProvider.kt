@@ -5,7 +5,6 @@ import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import java.net.URLEncoder
 
 class ArabdramaProvider : MainAPI() {
 
@@ -13,58 +12,22 @@ class ArabdramaProvider : MainAPI() {
     override var name = "Arabdrama"
     override var lang = "ar"
 
-    override val hasMainPage = true
+    override val hasMainPage = false
 
     override val supportedTypes = setOf(
         TvType.TvSeries,
         TvType.Movie
     )
 
-    override val mainPage = mainPageOf(
-        "$mainUrl/all" to "كل الدراما"
-    )
-
-    override suspend fun getMainPage(
-        page: Int,
-        request: MainPageRequest
-    ): HomePageResponse {
-
-        val url = if (page == 1) {
-            request.data
-        } else {
-            "${request.data.trimEnd('/')}?page=$page"
-        }
-
-        val document = app.get(
-            url,
-            referer = mainUrl
-        ).document
-
-        val items = document
-            .select("a[href*='/show-']")
-            .mapNotNull { element ->
-                parseShowResult(element)
-            }
-            .distinctBy { it.url }
-
-        return newHomePageResponse(
-            request.name,
-            items,
-            hasNext = items.isNotEmpty()
-        )
-    }
-
     override suspend fun search(
         query: String
     ): List<SearchResponse> {
 
-        val encodedQuery = URLEncoder.encode(
-            query,
-            "UTF-8"
-        )
-
-        val document = app.get(
-            "$mainUrl/search?q=$encodedQuery",
+        val document = app.post(
+            "$mainUrl/searchq",
+            data = mapOf(
+                "searchq" to query
+            ),
             referer = mainUrl
         ).document
 
@@ -93,8 +56,7 @@ class ArabdramaProvider : MainAPI() {
         }
 
         val title =
-            element
-                .text()
+            element.text()
                 .trim()
                 .takeIf { it.isNotBlank() }
                 ?: element
@@ -111,7 +73,6 @@ class ArabdramaProvider : MainAPI() {
         val poster = element
             .selectFirst("img[data-src], img[src]")
             ?.let { image ->
-
                 image
                     .attr("data-src")
                     .ifBlank {
