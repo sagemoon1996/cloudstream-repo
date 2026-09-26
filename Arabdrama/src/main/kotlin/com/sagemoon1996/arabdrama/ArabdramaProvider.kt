@@ -31,6 +31,8 @@ class ArabdramaProvider : MainAPI() {
             referer = mainUrl
         ).document
 
+        println("ARABDRAMA SEARCH QUERY = $query")
+
         return document
             .select("a[href*='/show-']")
             .mapNotNull { element ->
@@ -51,23 +53,27 @@ class ArabdramaProvider : MainAPI() {
 
         val fullUrl = fixUrl(href)
 
+        println("ARABDRAMA RAW HREF = $href")
+        println("ARABDRAMA FIXED URL = $fullUrl")
+
         if (!fullUrl.contains("/show-")) {
             return null
         }
 
         val title =
-            element.text()
+            element
+                .attr("title")
                 .trim()
                 .takeIf { it.isNotBlank() }
+                ?: element
+                    .text()
+                    .trim()
+                    .takeIf { it.isNotBlank() }
                 ?: element
                     .selectFirst("img")
                     ?.attr("alt")
                     ?.trim()
                     ?.takeIf { it.isNotBlank() }
-                ?: element
-                    .attr("title")
-                    .trim()
-                    .takeIf { it.isNotBlank() }
                 ?: return null
 
         val poster = element
@@ -96,6 +102,9 @@ class ArabdramaProvider : MainAPI() {
                     "فيلم",
                     ignoreCase = true
                 )
+
+        println("ARABDRAMA SEARCH TITLE = $title")
+        println("ARABDRAMA SEARCH RESPONSE URL = $fullUrl")
 
         return if (isMovie) {
 
