@@ -31,14 +31,12 @@ class ArabdramaProvider : MainAPI() {
             referer = mainUrl
         ).document
 
-        val results = document
+        return document
             .select("div.show div.cover > a[href*='/show-']")
             .mapNotNull { element ->
                 parseShowResult(element)
             }
             .distinctBy { it.url }
-
-        return results
     }
 
     private fun parseShowResult(
@@ -67,34 +65,14 @@ class ArabdramaProvider : MainAPI() {
             ?.let { fixUrl(it) }
 
         val isMovie =
-            fullUrl.contains(
-                "/movie-",
-                ignoreCase = true
-            ) ||
-                fullUrl.contains(
-                    "/film-",
-                    ignoreCase = true
-                ) ||
-                title.contains(
-                    "فيلم",
-                    ignoreCase = true
-                )
-
-        /*
-         * DIAGNOSTIC ONLY:
-         *
-         * We put the exact URL returned by the provider
-         * inside the visible search-result title.
-         *
-         * This lets us determine whether the URL changes
-         * before or after CloudStream receives the result.
-         */
-        val debugTitle = "$title [DEBUG_URL=$fullUrl]"
+            fullUrl.contains("/movie-", ignoreCase = true) ||
+                fullUrl.contains("/film-", ignoreCase = true) ||
+                title.contains("فيلم", ignoreCase = true)
 
         return if (isMovie) {
 
             newMovieSearchResponse(
-                name = debugTitle,
+                name = title,
                 url = fullUrl,
                 type = TvType.Movie,
                 fix = false
@@ -105,7 +83,7 @@ class ArabdramaProvider : MainAPI() {
         } else {
 
             newTvSeriesSearchResponse(
-                debugTitle,
+                title,
                 fullUrl,
                 TvType.TvSeries,
                 false
@@ -135,9 +113,7 @@ class ArabdramaProvider : MainAPI() {
                 ?.trim()
                 ?.takeIf { it.isNotBlank() }
                 ?: document
-                    .selectFirst(
-                        "meta[property=og:title]"
-                    )
+                    .selectFirst("meta[property=og:title]")
                     ?.attr("content")
                     ?.trim()
                     ?.takeIf { it.isNotBlank() }
@@ -165,15 +141,13 @@ class ArabdramaProvider : MainAPI() {
                     ?.takeIf { it.isNotBlank() }
                     ?: return@mapNotNull null
 
-                val number = episodeData
-                    .episodeNumber
+                val number = episodeData.episodeNumber
                     ?.toIntOrNull()
                     ?: return@mapNotNull null
 
                 newEpisode(
                     fixUrl(episodeUrl)
                 ) {
-
                     name = episodeData.episodeName
                         ?.trim()
                         ?.takeIf { it.isNotBlank() }
@@ -191,7 +165,6 @@ class ArabdramaProvider : MainAPI() {
             TvType.TvSeries,
             episodes
         ) {
-
             posterUrl = poster
             plot = description
         }
@@ -248,7 +221,6 @@ class ArabdramaProvider : MainAPI() {
                 lowerUrl.contains(".m3u8") -> {
 
                     runCatching {
-
                         callback(
                             newExtractorLink(
                                 source = name,
@@ -267,7 +239,6 @@ class ArabdramaProvider : MainAPI() {
                 lowerUrl.contains(".mpd") -> {
 
                     runCatching {
-
                         callback(
                             newExtractorLink(
                                 source = name,
@@ -286,7 +257,6 @@ class ArabdramaProvider : MainAPI() {
                 lowerUrl.contains(".mp4") -> {
 
                     runCatching {
-
                         callback(
                             newExtractorLink(
                                 source = name,
@@ -305,13 +275,11 @@ class ArabdramaProvider : MainAPI() {
                 else -> {
 
                     try {
-
                         val extracted = loadExtractor(
                             url = serverUrl,
                             referer = data,
                             subtitleCallback = subtitleCallback
                         ) { link ->
-
                             foundLinks = true
                             callback(link)
                         }
