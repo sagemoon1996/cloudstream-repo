@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import java.net.URLEncoder
 
 class ArabdramaProvider : MainAPI() {
@@ -12,12 +13,46 @@ class ArabdramaProvider : MainAPI() {
     override var name = "Arabdrama"
     override var lang = "ar"
 
-    override val hasMainPage = false
+    override val hasMainPage = true
 
     override val supportedTypes = setOf(
         TvType.TvSeries,
         TvType.Movie
     )
+
+    override val mainPage = mainPageOf(
+        "$mainUrl/all" to "كل الدراما"
+    )
+
+    override suspend fun getMainPage(
+        page: Int,
+        request: MainPageRequest
+    ): HomePageResponse {
+
+        val url = if (page == 1) {
+            request.data
+        } else {
+            "${request.data.trimEnd('/')}?page=$page"
+        }
+
+        val document = app.get(
+            url,
+            referer = mainUrl
+        ).document
+
+        val items = document
+            .select("a[href*='/show-']")
+            .mapNotNull { element ->
+                parseShowResult(element)
+            }
+            .distinctBy { it.url }
+
+        return newHomePageResponse(
+            request.name,
+            items,
+            hasNext = items.isNotEmpty()
+        )
+    }
 
     override suspend fun search(
         query: String
@@ -28,55 +63,99 @@ class ArabdramaProvider : MainAPI() {
             "UTF-8"
         )
 
-        val url = "$mainUrl/search?q=$encodedQuery"
-
         val document = app.get(
-            url,
+            "$mainUrl/search?q=$encodedQuery",
             referer = mainUrl
         ).document
 
         return document
             .select("a[href*='/show-']")
             .mapNotNull { element ->
-
-                val href = element
-                    .attr("href")
-                    .trim()
-                    .takeIf { it.isNotBlank() }
-                    ?: return@mapNotNull null
-
-                val title =
-                    element.text()
-                        .trim()
-                        .takeIf { it.isNotBlank() }
-                        ?: element
-                            .selectFirst("img")
-                            ?.attr("alt")
-                            ?.trim()
-                            ?.takeIf { it.isNotBlank() }
-                        ?: return@mapNotNull null
-
-                val poster = element
-                    .selectFirst("img")
-                    ?.let { image ->
-                        image.attr("data-src")
-                            .ifBlank {
-                                image.attr("src")
-                            }
-                            .trim()
-                    }
-                    ?.takeIf { it.isNotBlank() }
-                    ?.let { fixUrl(it) }
-
-                newTvSeriesSearchResponse(
-                    title,
-                    fixUrl(href),
-                    TvType.TvSeries
-                ) {
-                    posterUrl = poster
-                }
+                parseShowResult(element)
             }
             .distinctBy { it.url }
+    }
+
+    private fun parseShowResult(
+        element: Element
+    ): SearchResponse? {
+
+        val href = element
+            .attr("href")
+            .trim()
+            .takeIf { it.isNotBlank() }
+            ?: return null
+
+        val fullUrl = fixUrl(href)
+
+        if (!fullUrl.contains("/show-")) {
+            return null
+        }
+
+        val title =
+            element
+                .text()
+                .trim()
+                .takeIf { it.isNotBlank() }
+                ?: element
+                    .selectFirst("img")
+                    ?.attr("alt")
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                ?: element
+                    .attr("title")
+                    .trim()
+                    .takeIf { it.isNotBlank() }
+                ?: return null
+
+        val poster = element
+            .selectFirst("img[data-src], img[src]")
+            ?.let { image ->
+
+                image
+                    .attr("data-src")
+                    .ifBlank {
+                        image.attr("src")
+                    }
+                    .trim()
+            }
+            ?.takeIf { it.isNotBlank() }
+            ?.let { fixUrl(it) }
+
+        val isMovie =
+            fullUrl.contains(
+                "/movie-",
+                ignoreCase = true
+            ) ||
+                fullUrl.contains(
+                    "/film-",
+                    ignoreCase = true
+                ) ||
+                title.contains(
+                    "فيلم",
+                    ignoreCase = true
+                )
+
+        return if (isMovie) {
+
+            newMovieSearchResponse(
+                name = title,
+                url = fullUrl,
+                type = TvType.Movie
+            ) {
+                posterUrl = poster
+            }
+
+        } else {
+
+            newTvSeriesSearchResponse(
+                title,
+                fullUrl,
+                TvType.TvSeries
+            ) {
+                posterUrl = poster
+            }
+        }
     }
 
     override suspend fun load(
@@ -99,7 +178,9 @@ class ArabdramaProvider : MainAPI() {
                 ?.trim()
                 ?.takeIf { it.isNotBlank() }
                 ?: document
-                    .selectFirst("meta[property=og:title]")
+                    .selectFirst(
+                        "meta[property=og:title]"
+                    )
                     ?.attr("content")
                     ?.trim()
                     ?.takeIf { it.isNotBlank() }
@@ -109,6 +190,15 @@ class ArabdramaProvider : MainAPI() {
                     ?.trim()
                     ?.takeIf { it.isNotBlank() }
                 ?: return null
+
+        val poster = show.coverImage
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { fixUrl(it) }
+
+        val description = show.description
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
 
         val episodes = data.epsUrls
             .mapNotNull { episodeData ->
@@ -145,14 +235,8 @@ class ArabdramaProvider : MainAPI() {
             episodes
         ) {
 
-            posterUrl = show.coverImage
-                ?.trim()
-                ?.takeIf { it.isNotBlank() }
-                ?.let { fixUrl(it) }
-
-            plot = show.description
-                ?.trim()
-                ?.takeIf { it.isNotBlank() }
+            posterUrl = poster
+            plot = description
         }
     }
 
