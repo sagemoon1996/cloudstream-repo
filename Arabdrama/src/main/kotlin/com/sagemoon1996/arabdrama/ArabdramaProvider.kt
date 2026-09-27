@@ -513,7 +513,7 @@ class ArabdramaProvider : MainAPI() {
             return null
         }
 
-        repeat(3) {
+        repeat(5) {
 
             if (
                 current.startsWith("http://") ||
@@ -522,15 +522,15 @@ class ArabdramaProvider : MainAPI() {
                 return current
             }
 
-            val decoded = runCatching {
-                decodeBase64(current)
+            val base64Decoded = runCatching {
+                decodeBase64(current).trim()
             }.getOrNull()
 
             if (
-                !decoded.isNullOrBlank() &&
-                decoded != current
+                !base64Decoded.isNullOrBlank() &&
+                base64Decoded != current
             ) {
-                current = decoded.trim()
+                current = base64Decoded
                 return@repeat
             }
 
@@ -538,14 +538,14 @@ class ArabdramaProvider : MainAPI() {
                 URLDecoder.decode(
                     current,
                     StandardCharsets.UTF_8.name()
-                )
+                ).trim()
             }.getOrNull()
 
             if (
                 !urlDecoded.isNullOrBlank() &&
                 urlDecoded != current
             ) {
-                current = urlDecoded.trim()
+                current = urlDecoded
                 return@repeat
             }
 
