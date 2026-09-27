@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
+import java.text.Normalizer
 
 class ArabdramaProvider : MainAPI() {
 
@@ -36,7 +37,10 @@ class ArabdramaProvider : MainAPI() {
         }
 
         return document
-            .select("div.show div.cover > a[href*='/show-'], div.show div.cover > a[href*='/movie-']")
+            .select(
+                "div.show div.cover > a[href*='/show-'], " +
+                    "div.show div.cover > a[href*='/movie-']"
+            )
             .mapNotNull { parseShowResult(it) }
             .distinctBy { it.url }
     }
@@ -47,8 +51,6 @@ class ArabdramaProvider : MainAPI() {
             .takeIf { it.isNotBlank() }
             ?: return null
 
-        val url = fixUrl(href)
-
         val title = element.attr("title")
             .trim()
             .takeIf { it.isNotBlank() }
@@ -58,6 +60,15 @@ class ArabdramaProvider : MainAPI() {
                 ?.takeIf { it.isNotBlank() }
             ?: return null
 
+        val originalUrl = fixUrl(href)
+
+        val generatedUrl = buildUrlFromSearchResult(
+            href = href,
+            title = title
+        )
+
+        val url = generatedUrl ?: originalUrl
+
         val poster = element.selectFirst("img")
             ?.attr("src")
             ?.trim()
@@ -66,8 +77,8 @@ class ArabdramaProvider : MainAPI() {
 
         val isMovie =
             url.contains("/movie-", ignoreCase = true) ||
-            url.contains("/film-", ignoreCase = true) ||
-            title.contains("فيلم", ignoreCase = true)
+                url.contains("/film-", ignoreCase = true) ||
+                title.contains("فيلم", ignoreCase = true)
 
         return if (isMovie) {
             newMovieSearchResponse(
@@ -90,6 +101,53 @@ class ArabdramaProvider : MainAPI() {
         }
     }
 
+    private fun buildUrlFromSearchResult(
+        href: String,
+        title: String
+    ): String? {
+
+        val match = Regex(
+            """(?:/|^)(show|movie|film)-(\d+)"""
+        ).find(href)
+            ?: return null
+
+        val type = match.groupValues[1]
+        val id = match.groupValues[2]
+
+        val slug = createSlug(title)
+            .takeIf { it.isNotBlank() }
+            ?: return null
+
+        return "$mainUrl/$type-$id/$slug"
+    }
+
+    private fun createSlug(title: String): String {
+        var value = title.trim()
+
+        if (value.isBlank()) {
+            return ""
+        }
+
+        value = Normalizer.normalize(
+            value,
+            Normalizer.Form.NFD
+        )
+
+        value = value
+            .replace("\\p{InCombiningDiacriticalMarks}+".toRegex(), "")
+            .lowercase()
+
+        value = value
+            .replace("&", " and ")
+            .replace("@", " at ")
+
+        value = value
+            .replace("[^a-z0-9]+".toRegex(), "-")
+            .trim('-')
+
+        return value
+    }
+
     override suspend fun load(url: String): LoadResponse? {
         val document = try {
             app.get(
@@ -104,7 +162,9 @@ class ArabdramaProvider : MainAPI() {
         val show = data.showInfo.firstOrNull()
 
         val title =
-            show?.dramaName?.trim()?.takeIf { it.isNotBlank() }
+            show?.dramaName
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
                 ?: document.selectFirst("meta[property=og:title]")
                     ?.attr("content")
                     ?.trim()
@@ -126,6 +186,7 @@ class ArabdramaProvider : MainAPI() {
 
         val episodes = data.epsUrls
             .mapNotNull { episodeData ->
+
                 val episodeUrl = episodeData.watchUrl
                     ?.trim()
                     ?.takeIf { it.isNotBlank() }
@@ -271,7 +332,8 @@ class ArabdramaProvider : MainAPI() {
             return null
         }
 
-        val decoded = decodeBase64Flexible(encoded) ?: return null
+        val decoded = decodeBase64Flexible(encoded)
+            ?: return null
 
         return runCatching {
             parseJson<ArabdramaData>(decoded)
@@ -306,7 +368,8 @@ class ArabdramaProvider : MainAPI() {
                 return@repeat
             }
 
-            val decoded = decodeBase64Flexible(current) ?: return null
+            val decoded = decodeBase64Flexible(current)
+                ?: return null
 
             if (decoded.isBlank() || decoded == current) {
                 return null
@@ -352,7 +415,7 @@ class ArabdramaProvider : MainAPI() {
 
         return when {
             value.startsWith("http://") ||
-            value.startsWith("https://") -> value
+                value.startsWith("https://") -> value
 
             value.startsWith("//") -> "https:$value"
 
