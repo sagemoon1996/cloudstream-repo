@@ -31,6 +31,7 @@ class ArabdramaProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
+
         val document = app.get(
             request.data,
             referer = mainUrl
@@ -38,8 +39,54 @@ class ArabdramaProvider : MainAPI() {
 
         return newHomePageResponse(
             request.name,
-            parseListingDocument(document)
+            parseMainPageDocument(document)
         )
+    }
+
+    private fun parseMainPageDocument(
+        document: Document
+    ): List<SearchResponse> {
+
+        return document
+            .select("a[href*='/watch-']")
+            .mapNotNull { element ->
+
+                val rawHref = element.attr("href").trim()
+
+                if (rawHref.isBlank()) {
+                    return@mapNotNull null
+                }
+
+                val url = fixUrl(rawHref)
+
+                val rawTitle = element.attr("title")
+                    .trim()
+                    .ifBlank {
+                        element.text().trim()
+                    }
+
+                if (rawTitle.isBlank()) {
+                    return@mapNotNull null
+                }
+
+                val title = rawTitle
+                    .replace(
+                        Regex("\\s+الحلقة\\s+\\d+.*$"),
+                        ""
+                    )
+                    .trim()
+                    .ifBlank {
+                        rawTitle
+                    }
+
+                newTvSeriesSearchResponse(
+                    title,
+                    url,
+                    TvType.TvSeries,
+                    false
+                )
+            }
+            .distinctBy { it.url }
     }
 
     override suspend fun search(
