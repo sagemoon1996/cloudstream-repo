@@ -1,12 +1,28 @@
 package com.sagemoon1996.arabdrama
 
-import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.*
+import com.fasterxml.jackson.annotation.JsonProperty
+import com.lagradost.cloudstream3.Episode
+import com.lagradost.cloudstream3.ExtractorLink
+import com.lagradost.cloudstream3.MainAPI
+import com.lagradost.cloudstream3.MainPageRequest
+import com.lagradost.cloudstream3.SearchResponse
+import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.TvType
+import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.newEpisode
+import com.lagradost.cloudstream3.newExtractorLink
+import com.lagradost.cloudstream3.newHomePageResponse
+import com.lagradost.cloudstream3.newMovieLoadResponse
+import com.lagradost.cloudstream3.newMovieSearchResponse
+import com.lagradost.cloudstream3.newTvSeriesLoadResponse
+import com.lagradost.cloudstream3.newTvSeriesSearchResponse
+import com.lagradost.cloudstream3.utils.AppUtils.base64Decode
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
-import java.text.Normalizer
+import java.nio.charset.StandardCharsets
 
 class ArabdramaProvider : MainAPI() {
 
@@ -14,175 +30,166 @@ class ArabdramaProvider : MainAPI() {
     override var name = "Arabdrama"
     override var lang = "ar"
 
-    override val hasMainPage = false
+    override val hasMainPage = true
 
     override val supportedTypes = setOf(
         TvType.TvSeries,
         TvType.Movie
     )
 
+    override val mainPage = mainPageOf(
+        "$mainUrl/" to "أحدث الحلقات المضافة"
+    )
+
+    override suspend fun getMainPage(
+        page: Int,
+        request: MainPageRequest
+    ) : com.lagradost.cloudstream3.HomePageResponse {
+        val document = app.get(
+            request.data,
+            referer = mainUrl
+        ).document
+
+        val items = parseListingDocument(document)
+
+        return newHomePageResponse(
+            request.name,
+            items
+        )
+    }
+
     override suspend fun search(query: String): List<SearchResponse> {
-        if (query.isBlank()) {
+        val trimmed = query.trim()
+
+        if (trimmed.isBlank()) {
             return emptyList()
         }
 
-        val document = try {
+        val document = runCatching {
             app.post(
                 "$mainUrl/searchq",
-                data = mapOf("searchq" to query.trim()),
+                data = mapOf(
+                    "searchq" to trimmed
+                ),
                 referer = mainUrl
             ).document
-        } catch (_: Exception) {
-            return emptyList()
-        }
+        }.getOrNull() ?: return emptyList()
 
+        return parseListingDocument(document)
+    }
+
+    private fun parseListingDocument(
+        document: Document
+    ): List<SearchResponse> {
         return document
             .select(
-                "div.show div.cover > a[href*='/show-'], " +
-                    "div.show div.cover > a[href*='/movie-']"
+                "a[href*='/show-'][title], a[href*='/movie-'][title]"
             )
-            .mapNotNull { parseShowResult(it) }
+            .mapNotNull { parseListingItem(it) }
             .distinctBy { it.url }
     }
 
-    private fun parseShowResult(element: Element): SearchResponse? {
-        val href = element.attr("href")
+    private fun parseListingItem(
+        element: Element
+    ): SearchResponse? {
+
+        val rawHref = element
+            .attr("href")
             .trim()
-            .takeIf { it.isNotBlank() }
-            ?: return null
 
-        val title = element.attr("title")
+        if (rawHref.isBlank()) {
+            return null
+        }
+
+        val url = fixUrl(rawHref)
+
+        val rawTitle = element
+            .attr("title")
             .trim()
-            .takeIf { it.isNotBlank() }
-            ?: element.selectFirst("img")
-                ?.attr("alt")
-                ?.trim()
-                ?.takeIf { it.isNotBlank() }
-            ?: return null
-
-        val originalUrl = fixUrl(href)
-
-        val generatedUrl = buildUrlFromSearchResult(
-            href = href,
-            title = title
-        )
-
-        val url = generatedUrl ?: originalUrl
-
-        val poster = element.selectFirst("img")
-            ?.attr("src")
-            ?.trim()
-            ?.takeIf { it.isNotBlank() }
-            ?.let { fixUrl(it) }
-
-        val isMovie =
-            url.contains("/movie-", ignoreCase = true) ||
-                url.contains("/film-", ignoreCase = true) ||
-                title.contains("فيلم", ignoreCase = true)
-
-        return if (isMovie) {
-            newMovieSearchResponse(
-                name = title,
-                url = url,
-                type = TvType.Movie,
-                fix = false
-            ) {
-                posterUrl = poster
+            .ifBlank {
+                element.text().trim()
             }
+
+        val title = cleanTitle(rawTitle)
+
+        if (title.isBlank()) {
+            return null
+        }
+
+        return if (
+            url.contains("/movie-", ignoreCase = true)
+        ) {
+            newMovieSearchResponse(
+                title,
+                url,
+                TvType.Movie,
+                false
+            )
         } else {
             newTvSeriesSearchResponse(
                 title,
                 url,
                 TvType.TvSeries,
                 false
-            ) {
-                posterUrl = poster
-            }
+            )
         }
     }
 
-    private fun buildUrlFromSearchResult(
-        href: String,
-        title: String
-    ): String? {
-
-        val match = Regex(
-            """(?:/|^)(show|movie|film)-(\d+)"""
-        ).find(href)
-            ?: return null
-
-        val type = match.groupValues[1]
-        val id = match.groupValues[2]
-
-        val slug = createSlug(title)
-            .takeIf { it.isNotBlank() }
-            ?: return null
-
-        return "$mainUrl/$type-$id/$slug"
-    }
-
-    private fun createSlug(title: String): String {
-        var value = title.trim()
-
-        if (value.isBlank()) {
-            return ""
-        }
-
-        value = Normalizer.normalize(
-            value,
-            Normalizer.Form.NFD
-        )
-
-        value = value
-            .replace("\\p{InCombiningDiacriticalMarks}+".toRegex(), "")
-            .lowercase()
-
-        value = value
-            .replace("&", " and ")
-            .replace("@", " at ")
-
-        value = value
-            .replace("[^a-z0-9]+".toRegex(), "-")
-            .trim('-')
-
+    private fun cleanTitle(value: String): String {
         return value
+            .replace("\n", " ")
+            .replace("\r", " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
     }
 
-    override suspend fun load(url: String): LoadResponse? {
-        val document = try {
+    override suspend fun load(url: String): com.lagradost.cloudstream3.LoadResponse? {
+
+        val document = runCatching {
             app.get(
-                url,
+                fixUrl(url),
                 referer = mainUrl
             ).document
-        } catch (_: Exception) {
-            return null
-        }
+        }.getOrNull() ?: return null
 
-        val data = getDatawatch(document) ?: return null
+        val data = getArabdramaData(document)
+            ?: return null
+
         val show = data.showInfo.firstOrNull()
+            ?: return null
 
         val title =
-            show?.dramaName
+            show.dramaName
                 ?.trim()
                 ?.takeIf { it.isNotBlank() }
-                ?: document.selectFirst("meta[property=og:title]")
+                ?: document
+                    .selectFirst("meta[property=og:title]")
                     ?.attr("content")
                     ?.trim()
                     ?.takeIf { it.isNotBlank() }
-                ?: document.selectFirst(".entry-title")
+                ?: document
+                    .selectFirst("h1")
                     ?.text()
                     ?.trim()
                     ?.takeIf { it.isNotBlank() }
                 ?: return null
 
-        val poster = show?.coverImage
+        val poster = show.coverImage
             ?.trim()
             ?.takeIf { it.isNotBlank() }
             ?.let { fixUrl(it) }
 
-        val description = show?.description
+        val description = show.description
             ?.trim()
             ?.takeIf { it.isNotBlank() }
+
+        val tags = show.genres
+            ?.split(",", "،")
+            ?.map { it.trim() }
+            ?.filter { it.isNotBlank() }
+
+        val isMovie = show.dramaType
+            ?.equals("Movie", ignoreCase = true) == true
 
         val episodes = data.epsUrls
             .mapNotNull { episodeData ->
@@ -192,31 +199,49 @@ class ArabdramaProvider : MainAPI() {
                     ?.takeIf { it.isNotBlank() }
                     ?: return@mapNotNull null
 
-                val episodeNumber = episodeData.episodeNumber
-                    ?.trim()
+                val number = episodeData.episodeNumber
                     ?.toIntOrNull()
                     ?: return@mapNotNull null
 
-                newEpisode(fixUrl(episodeUrl)) {
+                newEpisode(
+                    fixUrl(episodeUrl)
+                ) {
                     name = episodeData.episodeName
                         ?.trim()
                         ?.takeIf { it.isNotBlank() }
-                        ?: "الحلقة $episodeNumber"
+                        ?: "الحلقة $number"
 
                     season = 1
-                    episode = episodeNumber
+                    episode = number
                 }
             }
             .sortedBy { it.episode }
 
-        return newTvSeriesLoadResponse(
-            title,
-            url,
-            TvType.TvSeries,
-            episodes
-        ) {
-            posterUrl = poster
-            plot = description
+        return if (isMovie && episodes.size <= 1) {
+
+            newMovieLoadResponse(
+                title,
+                url,
+                TvType.Movie,
+                episodes.firstOrNull()?.data ?: url
+            ) {
+                posterUrl = poster
+                plot = description
+                this.tags = tags
+            }
+
+        } else {
+
+            newTvSeriesLoadResponse(
+                title,
+                url,
+                TvType.TvSeries,
+                episodes
+            ) {
+                posterUrl = poster
+                plot = description
+                this.tags = tags
+            }
         }
     }
 
@@ -229,90 +254,104 @@ class ArabdramaProvider : MainAPI() {
 
         val document = try {
             app.get(
-                data,
+                fixUrl(data),
                 referer = mainUrl
             ).document
         } catch (_: Exception) {
             return false
         }
 
-        val episodeData = getDatawatch(document) ?: return false
-        val episode = episodeData.epInfo.firstOrNull() ?: return false
+        val episodeData = getArabdramaData(document)
+            ?: return false
 
-        if (episode.streamServers.isEmpty()) {
+        val episode = episodeData.epInfo.firstOrNull()
+            ?: return false
+
+        val servers = episode.streamServers
+
+        if (servers.isEmpty()) {
             return false
         }
 
         var foundLinks = false
 
-        episode.streamServers.forEachIndexed { index, rawServer ->
+        servers.forEachIndexed { index, encodedServer ->
 
-            val serverUrl = decodeServerUrl(rawServer)
+            val serverUrl = decodeServerUrl(encodedServer)
                 ?: return@forEachIndexed
 
+            if (
+                !serverUrl.startsWith("http://") &&
+                !serverUrl.startsWith("https://")
+            ) {
+                return@forEachIndexed
+            }
+
+            val lowerUrl = serverUrl.lowercase()
+
             when {
-                serverUrl.contains(".m3u8", ignoreCase = true) -> {
-                    runCatching {
-                        callback(
-                            newExtractorLink(
-                                source = name,
-                                name = "Server ${index + 1}",
-                                url = serverUrl,
-                                type = ExtractorLinkType.M3U8
-                            ) {
-                                referer = data
-                            }
-                        )
-                        foundLinks = true
-                    }
+
+                lowerUrl.contains(".m3u8") -> {
+                    callback(
+                        newExtractorLink(
+                            source = name,
+                            name = "Server ${index + 1}",
+                            url = serverUrl,
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            referer = data
+                        }
+                    )
+
+                    foundLinks = true
                 }
 
-                serverUrl.contains(".mpd", ignoreCase = true) -> {
-                    runCatching {
-                        callback(
-                            newExtractorLink(
-                                source = name,
-                                name = "Server ${index + 1}",
-                                url = serverUrl,
-                                type = ExtractorLinkType.DASH
-                            ) {
-                                referer = data
-                            }
-                        )
-                        foundLinks = true
-                    }
+                lowerUrl.contains(".mpd") -> {
+                    callback(
+                        newExtractorLink(
+                            source = name,
+                            name = "Server ${index + 1}",
+                            url = serverUrl,
+                            type = ExtractorLinkType.DASH
+                        ) {
+                            referer = data
+                        }
+                    )
+
+                    foundLinks = true
                 }
 
-                serverUrl.contains(".mp4", ignoreCase = true) -> {
-                    runCatching {
-                        callback(
-                            newExtractorLink(
-                                source = name,
-                                name = "Server ${index + 1}",
-                                url = serverUrl,
-                                type = ExtractorLinkType.VIDEO
-                            ) {
-                                referer = data
-                            }
-                        )
-                        foundLinks = true
-                    }
+                lowerUrl.contains(".mp4") -> {
+                    callback(
+                        newExtractorLink(
+                            source = name,
+                            name = "Server ${index + 1}",
+                            url = serverUrl,
+                            type = ExtractorLinkType.VIDEO
+                        ) {
+                            referer = data
+                        }
+                    )
+
+                    foundLinks = true
                 }
 
                 else -> {
-                    runCatching {
-                        if (
-                            loadExtractor(
-                                url = serverUrl,
-                                referer = data,
-                                subtitleCallback = subtitleCallback
-                            ) { link ->
-                                foundLinks = true
-                                callback(link)
-                            }
-                        ) {
+                    try {
+                        val extracted = loadExtractor(
+                            url = serverUrl,
+                            referer = data,
+                            subtitleCallback = subtitleCallback
+                        ) { link ->
+                            foundLinks = true
+                            callback(link)
+                        }
+
+                        if (extracted) {
                             foundLinks = true
                         }
+
+                    } catch (_: Exception) {
                     }
                 }
             }
@@ -321,36 +360,138 @@ class ArabdramaProvider : MainAPI() {
         return foundLinks
     }
 
-    private fun getDatawatch(document: Document): ArabdramaData? {
-        val encoded = document
-            .selectFirst("#datawatch")
+    /*
+     * ArabDrama has two different JSON schemas.
+     *
+     * Show page:
+     * {
+     *   "show": [...],
+     *   "EPS": [...]
+     * }
+     *
+     * Watch page:
+     * {
+     *   "show_info": [...],
+     *   "ep_info": [...],
+     *   "eps_urls": [...]
+     * }
+     *
+     * Both are converted into ArabdramaData so the rest of the
+     * provider can use the same load/loadLinks logic.
+     */
+
+    private val watchDataRegex =
+        Regex("""eyJzaG93X2luZm8i[\w+/=]+""")
+
+    private val showDataRegex =
+        Regex("""eyJzaG93Ijpb[\w+/=]+""")
+
+    private fun getArabdramaData(
+        document: Document
+    ): ArabdramaData? {
+
+        val text = document.body()
             ?.text()
-            ?.trim()
             ?: return null
 
-        if (encoded.isBlank()) {
+        /*
+         * First try the watch-page schema.
+         */
+        val watchEncoded = watchDataRegex
+            .find(text)
+            ?.value
+
+        if (!watchEncoded.isNullOrBlank()) {
+
+            val watchDecoded = runCatching {
+                base64Decode(watchEncoded)
+            }.getOrNull()
+
+            if (!watchDecoded.isNullOrBlank()) {
+
+                val watchData = runCatching {
+                    parseJson<ArabdramaData>(watchDecoded)
+                }.getOrNull()
+
+                if (watchData != null) {
+                    return watchData
+                }
+            }
+        }
+
+        /*
+         * Then try the show-page schema:
+         *
+         * "show" + "EPS"
+         */
+        val showEncoded = showDataRegex
+            .find(text)
+            ?.value
+            ?: return null
+
+        val showDecoded = runCatching {
+            base64Decode(showEncoded)
+        }.getOrNull()
+            ?: return null
+
+        val showPageData = runCatching {
+            parseJson<ArabdramaShowPageData>(showDecoded)
+        }.getOrNull()
+            ?: return null
+
+        val convertedShowInfo = showPageData.show
+            .map {
+                ShowInfo(
+                    drama_id = it.drama_id?.toString(),
+                    drama_name = it.drama_name,
+                    drama_synonyms = it.drama_synonyms,
+                    drama_score = it.drama_score,
+                    drama_type = it.drama_type,
+                    drama_description = it.drama_description,
+                    drama_genres = it.drama_genres,
+                    drama_cover_image_url = it.drama_cover_image_url,
+                    drama_slug = it.drama_slug,
+                    info_url = null
+                )
+            }
+
+        val convertedEpisodes = showPageData.EPS
+            .mapNotNull { episode ->
+
+                val number = episode.episode_number
+                    ?.toString()
+                    ?: return@mapNotNull null
+
+                val watchUrl = episode.infoSrc
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?: return@mapNotNull null
+
+                EpisodeUrl(
+                    episode_number = number,
+                    episode_name = episode.episode_name,
+                    watch_url = watchUrl
+                )
+            }
+
+        return ArabdramaData(
+            show_info = convertedShowInfo,
+            ep_info = emptyList(),
+            eps_urls = convertedEpisodes
+        )
+    }
+
+    private fun decodeServerUrl(
+        value: String
+    ): String? {
+
+        var current = value.trim()
+
+        if (current.isBlank()) {
             return null
         }
 
-        val decoded = decodeBase64Flexible(encoded)
-            ?: return null
-
-        return runCatching {
-            parseJson<ArabdramaData>(decoded)
-        }.getOrNull()
-    }
-
-    private fun decodeServerUrl(value: String): String? {
-        var current = value
-            .trim()
-            .removePrefix("\"")
-            .removeSuffix("\"")
-
-        repeat(8) {
-            current = current
-                .trim()
-                .removePrefix("\"")
-                .removeSuffix("\"")
+        repeat(3) {
 
             if (
                 current.startsWith("http://") ||
@@ -359,69 +500,61 @@ class ArabdramaProvider : MainAPI() {
                 return current
             }
 
-            val urlDecoded = runCatching {
-                URLDecoder.decode(current, "UTF-8")
+            val decoded = runCatching {
+                base64Decode(
+                    current
+                        .replace("-", "+")
+                        .replace("_", "/")
+                        .let { input ->
+                            input + "=".repeat(
+                                (4 - input.length % 4) % 4
+                            )
+                        }
+                )
             }.getOrNull()
 
-            if (!urlDecoded.isNullOrBlank() && urlDecoded != current) {
-                current = urlDecoded
+            if (!decoded.isNullOrBlank() && decoded != current) {
+                current = decoded.trim()
                 return@repeat
             }
 
-            val decoded = decodeBase64Flexible(current)
-                ?: return null
-
-            if (decoded.isBlank() || decoded == current) {
-                return null
-            }
-
-            current = decoded
-        }
-
-        return current.takeIf {
-            it.startsWith("http://") ||
-                it.startsWith("https://")
-        }
-    }
-
-    private fun decodeBase64Flexible(value: String): String? {
-        val cleaned = value
-            .trim()
-            .removePrefix("\"")
-            .removeSuffix("\"")
-
-        if (cleaned.isBlank()) {
-            return null
-        }
-
-        return runCatching {
-            base64Decode(cleaned)
-        }.getOrNull()
-            ?.trim()
-            ?.takeIf { it.isNotBlank() }
-            ?: runCatching {
-                base64Decode(
-                    cleaned
-                        .replace('-', '+')
-                        .replace('_', '/')
+            val urlDecoded = runCatching {
+                URLDecoder.decode(
+                    current,
+                    StandardCharsets.UTF_8.name()
                 )
             }.getOrNull()
-                ?.trim()
-                ?.takeIf { it.isNotBlank() }
+
+            if (!urlDecoded.isNullOrBlank() && urlDecoded != current) {
+                current = urlDecoded.trim()
+                return@repeat
+            }
+
+            return@repeat
+        }
+
+        return current
+            .takeIf {
+                it.startsWith("http://") ||
+                    it.startsWith("https://")
+            }
     }
 
-    private fun fixUrl(url: String): String {
-        val value = url.trim()
+    private fun fixUrl(
+        url: String
+    ): String {
+
+        val trimmed = url.trim()
 
         return when {
-            value.startsWith("http://") ||
-                value.startsWith("https://") -> value
+            trimmed.startsWith("http://") ||
+                trimmed.startsWith("https://") -> trimmed
 
-            value.startsWith("//") -> "https:$value"
+            trimmed.startsWith("//") ->
+                "https:$trimmed"
 
-            value.startsWith("/") -> "$mainUrl$value"
-
-            else -> "$mainUrl/${value.trimStart('/')}"
+            else ->
+                "$mainUrl/${trimmed.trimStart('/')}"
         }
     }
 
@@ -430,26 +563,53 @@ class ArabdramaProvider : MainAPI() {
         val ep_info: List<EpisodeInfo> = emptyList(),
         val eps_urls: List<EpisodeUrl> = emptyList()
     ) {
-        val showInfo get() = show_info
-        val epInfo get() = ep_info
-        val epsUrls get() = eps_urls
+        val showInfo: List<ShowInfo>
+            get() = show_info
+
+        val epInfo: List<EpisodeInfo>
+            get() = ep_info
+
+        val epsUrls: List<EpisodeUrl>
+            get() = eps_urls
     }
 
     data class ShowInfo(
+        val drama_id: String? = null,
         val drama_name: String? = null,
+        val drama_synonyms: String? = null,
+        val drama_score: String? = null,
+        val drama_type: String? = null,
         val drama_description: String? = null,
-        val drama_cover_image_url: String? = null
+        val drama_genres: String? = null,
+        val drama_cover_image_url: String? = null,
+        val drama_slug: String? = null,
+        val info_url: String? = null
     ) {
-        val dramaName get() = drama_name
-        val description get() = drama_description
-        val coverImage get() = drama_cover_image_url
+        val dramaName: String?
+            get() = drama_name
+
+        val description: String?
+            get() = drama_description
+
+        val coverImage: String?
+            get() = drama_cover_image_url
+
+        val genres: String?
+            get() = drama_genres
+
+        val dramaType: String?
+            get() = drama_type
+
+        val infoUrl: String?
+            get() = info_url
     }
 
     data class EpisodeInfo(
         val episode_number: Int? = null,
         val stream_servers: List<String> = emptyList()
     ) {
-        val streamServers get() = stream_servers
+        val streamServers: List<String>
+            get() = stream_servers
     }
 
     data class EpisodeUrl(
@@ -457,8 +617,48 @@ class ArabdramaProvider : MainAPI() {
         val episode_name: String? = null,
         val watch_url: String? = null
     ) {
-        val episodeNumber get() = episode_number
-        val episodeName get() = episode_name
-        val watchUrl get() = watch_url
+        val episodeNumber: String?
+            get() = episode_number
+
+        val episodeName: String?
+            get() = episode_name
+
+        val watchUrl: String?
+            get() = watch_url
     }
+
+    /*
+     * Exact schema of the /show-... page.
+     */
+    data class ArabdramaShowPageData(
+        val show: List<ShowPageInfo> = emptyList(),
+
+        @JsonProperty("EPS")
+        val EPS: List<ShowPageEpisode> = emptyList()
+    )
+
+    data class ShowPageInfo(
+        val drama_id: Int? = null,
+        val drama_name: String? = null,
+        val drama_synonyms: String? = null,
+        val drama_score: String? = null,
+        val drama_country: String? = null,
+        val drama_status: String? = null,
+        val drama_type: String? = null,
+        val drama_release_date: String? = null,
+        val drama_description: String? = null,
+        val drama_genres: String? = null,
+        val drama_cover_image_url: String? = null,
+        val wallpapaer: String? = null,
+        val drama_slug: String? = null,
+        val show_episode_count: Int? = null
+    )
+
+    data class ShowPageEpisode(
+        val episode_name: String? = null,
+        val episode_number: Int? = null,
+
+        @JsonProperty("info-src")
+        val infoSrc: String? = null
+    )
 }
