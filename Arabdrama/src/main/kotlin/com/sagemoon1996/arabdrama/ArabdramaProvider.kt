@@ -68,7 +68,9 @@ class ArabdramaProvider : MainAPI() {
     ): List<SearchResponse> {
 
         return document
-            .select(".show .cover > a")
+            .select(
+                "a[href*='/show-'][title], a[href*='/movie-'][title]"
+            )
             .mapNotNull { parseListingItem(it) }
             .distinctBy { it.url }
     }
@@ -203,6 +205,7 @@ class ArabdramaProvider : MainAPI() {
         return if (
             isMovie && episodes.size <= 1
         ) {
+
             newMovieLoadResponse(
                 title,
                 url,
@@ -213,7 +216,9 @@ class ArabdramaProvider : MainAPI() {
                 plot = description
                 this.tags = tags
             }
+
         } else {
+
             newTvSeriesLoadResponse(
                 title,
                 url,
@@ -247,13 +252,15 @@ class ArabdramaProvider : MainAPI() {
         val episode = episodeData.epInfo.firstOrNull()
             ?: return false
 
-        if (episode.streamServers.isEmpty()) {
+        val servers = episode.streamServers
+
+        if (servers.isEmpty()) {
             return false
         }
 
         var foundLinks = false
 
-        episode.streamServers.forEachIndexed { index, encodedServer ->
+        servers.forEachIndexed { index, encodedServer ->
 
             val embedUrl = decodeServerUrl(encodedServer)
                 ?: return@forEachIndexed
@@ -305,6 +312,23 @@ class ArabdramaProvider : MainAPI() {
         return foundLinks
     }
 
+    /*
+     * ArabDrama uses two different JSON schemas.
+     *
+     * Show page:
+     * {
+     *   "show": [...],
+     *   "EPS": [...]
+     * }
+     *
+     * Watch page:
+     * {
+     *   "show_info": [...],
+     *   "ep_info": [...],
+     *   "eps_urls": [...]
+     * }
+     */
+
     private val watchDataRegex =
         Regex("""eyJzaG93X2luZm8i[\w+/=]+""")
 
@@ -316,9 +340,12 @@ class ArabdramaProvider : MainAPI() {
     ): ArabdramaData? {
 
         val text = document.body()
-            ?.html()
+            ?.text()
             ?: return null
 
+        /*
+         * Watch page.
+         */
         val watchEncoded = watchDataRegex
             .find(text)
             ?.value
@@ -343,6 +370,9 @@ class ArabdramaProvider : MainAPI() {
             }
         }
 
+        /*
+         * Show page.
+         */
         val showEncoded = showDataRegex
             .find(text)
             ?.value
@@ -362,6 +392,7 @@ class ArabdramaProvider : MainAPI() {
 
         val convertedShowInfo =
             showPageData.show.map {
+
                 ShowInfo(
                     drama_id = it.drama_id?.toString(),
                     drama_name = it.drama_name,
@@ -370,7 +401,8 @@ class ArabdramaProvider : MainAPI() {
                     drama_type = it.drama_type,
                     drama_description = it.drama_description,
                     drama_genres = it.drama_genres,
-                    drama_cover_image_url = it.drama_cover_image_url,
+                    drama_cover_image_url =
+                        it.drama_cover_image_url,
                     drama_slug = it.drama_slug,
                     info_url = null
                 )
@@ -378,15 +410,15 @@ class ArabdramaProvider : MainAPI() {
 
         val convertedEpisodes =
             showPageData.EPS.mapNotNull { episode ->
-                val number =
-                    episode.episode_number?.toString()
-                        ?: return@mapNotNull null
 
-                val watchUrl =
-                    episode.infoSrc
-                        ?.trim()
-                        ?.takeIf { it.isNotBlank() }
-                        ?: return@mapNotNull null
+                val number = episode.episode_number
+                    ?.toString()
+                    ?: return@mapNotNull null
+
+                val watchUrl = episode.infoSrc
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?: return@mapNotNull null
 
                 EpisodeUrl(
                     episode_number = number,
@@ -402,6 +434,12 @@ class ArabdramaProvider : MainAPI() {
         )
     }
 
+    /*
+     * Local Base64 decoder.
+     *
+     * We do not depend on CloudStream's base64Decode helper,
+     * because it is not available in the project's current API.
+     */
     private fun decodeBase64(
         value: String
     ): String {
@@ -434,7 +472,7 @@ class ArabdramaProvider : MainAPI() {
             return null
         }
 
-        repeat(5) {
+        repeat(3) {
 
             if (
                 current.startsWith("http://") ||
@@ -443,15 +481,15 @@ class ArabdramaProvider : MainAPI() {
                 return current
             }
 
-            val base64Decoded = runCatching {
-                decodeBase64(current).trim()
+            val decoded = runCatching {
+                decodeBase64(current)
             }.getOrNull()
 
             if (
-                !base64Decoded.isNullOrBlank() &&
-                base64Decoded != current
+                !decoded.isNullOrBlank() &&
+                decoded != current
             ) {
-                current = base64Decoded
+                current = decoded.trim()
                 return@repeat
             }
 
@@ -459,14 +497,14 @@ class ArabdramaProvider : MainAPI() {
                 URLDecoder.decode(
                     current,
                     StandardCharsets.UTF_8.name()
-                ).trim()
+                )
             }.getOrNull()
 
             if (
                 !urlDecoded.isNullOrBlank() &&
                 urlDecoded != current
             ) {
-                current = urlDecoded
+                current = urlDecoded.trim()
                 return@repeat
             }
 
@@ -475,7 +513,7 @@ class ArabdramaProvider : MainAPI() {
 
         return current.takeIf {
             it.startsWith("http://") ||
-            it.startsWith("https://")
+                it.startsWith("https://")
         }
     }
 
@@ -486,8 +524,9 @@ class ArabdramaProvider : MainAPI() {
         val trimmed = url.trim()
 
         return when {
+
             trimmed.startsWith("http://") ||
-            trimmed.startsWith("https://") ->
+                trimmed.startsWith("https://") ->
                 trimmed
 
             trimmed.startsWith("//") ->
@@ -546,7 +585,6 @@ class ArabdramaProvider : MainAPI() {
 
     data class EpisodeInfo(
         val episode_number: Int? = null,
-        val episode_name: String? = null,
         val stream_servers: List<String> = emptyList()
     ) {
         val streamServers: List<String>
@@ -580,9 +618,9 @@ class ArabdramaProvider : MainAPI() {
         val drama_name: String? = null,
         val drama_synonyms: String? = null,
         val drama_score: String? = null,
-        val drama_type: String? = null,
         val drama_country: String? = null,
         val drama_status: String? = null,
+        val drama_type: String? = null,
         val drama_release_date: String? = null,
         val drama_description: String? = null,
         val drama_genres: String? = null,
