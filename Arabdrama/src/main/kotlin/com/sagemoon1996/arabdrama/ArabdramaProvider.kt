@@ -1,9 +1,9 @@
 package com.sagemoon1996.arabdrama
 
+import android.util.Base64
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.utils.AppUtils.base64Decode
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -36,11 +36,9 @@ class ArabdramaProvider : MainAPI() {
             referer = mainUrl
         ).document
 
-        val items = parseListingDocument(document)
-
         return newHomePageResponse(
             request.name,
-            items
+            parseListingDocument(document)
         )
     }
 
@@ -57,9 +55,7 @@ class ArabdramaProvider : MainAPI() {
         val document = runCatching {
             app.post(
                 "$mainUrl/searchq",
-                data = mapOf(
-                    "searchq" to trimmed
-                ),
+                data = mapOf("searchq" to trimmed),
                 referer = mainUrl
             ).document
         }.getOrNull() ?: return emptyList()
@@ -83,9 +79,7 @@ class ArabdramaProvider : MainAPI() {
         element: Element
     ): SearchResponse? {
 
-        val rawHref = element
-            .attr("href")
-            .trim()
+        val rawHref = element.attr("href").trim()
 
         if (rawHref.isBlank()) {
             return null
@@ -93,14 +87,11 @@ class ArabdramaProvider : MainAPI() {
 
         val url = fixUrl(rawHref)
 
-        val rawTitle = element
-            .attr("title")
-            .trim()
-            .ifBlank {
-                element.text().trim()
-            }
-
-        val title = cleanTitle(rawTitle)
+        val title = cleanTitle(
+            element.attr("title")
+                .trim()
+                .ifBlank { element.text().trim() }
+        )
 
         if (title.isBlank()) {
             return null
@@ -363,7 +354,7 @@ class ArabdramaProvider : MainAPI() {
     }
 
     /*
-     * ArabDrama has two JSON schemas.
+     * ArabDrama uses two different JSON schemas.
      *
      * Show page:
      * {
@@ -394,7 +385,7 @@ class ArabdramaProvider : MainAPI() {
             ?: return null
 
         /*
-         * Watch page schema.
+         * Watch page.
          */
         val watchEncoded = watchDataRegex
             .find(text)
@@ -403,7 +394,7 @@ class ArabdramaProvider : MainAPI() {
         if (!watchEncoded.isNullOrBlank()) {
 
             val watchDecoded = runCatching {
-                base64Decode(watchEncoded)
+                decodeBase64(watchEncoded)
             }.getOrNull()
 
             if (!watchDecoded.isNullOrBlank()) {
@@ -421,7 +412,7 @@ class ArabdramaProvider : MainAPI() {
         }
 
         /*
-         * Show page schema.
+         * Show page.
          */
         val showEncoded = showDataRegex
             .find(text)
@@ -429,7 +420,7 @@ class ArabdramaProvider : MainAPI() {
             ?: return null
 
         val showDecoded = runCatching {
-            base64Decode(showEncoded)
+            decodeBase64(showEncoded)
         }.getOrNull()
             ?: return null
 
@@ -484,6 +475,34 @@ class ArabdramaProvider : MainAPI() {
         )
     }
 
+    /*
+     * Local Base64 decoder.
+     *
+     * We do not depend on CloudStream's base64Decode helper,
+     * because it is not available in the project's current API.
+     */
+    private fun decodeBase64(
+        value: String
+    ): String {
+
+        val normalized = value
+            .replace("-", "+")
+            .replace("_", "/")
+            .let { input ->
+                input + "=".repeat(
+                    (4 - input.length % 4) % 4
+                )
+            }
+
+        return String(
+            Base64.decode(
+                normalized,
+                Base64.DEFAULT
+            ),
+            StandardCharsets.UTF_8
+        )
+    }
+
     private fun decodeServerUrl(
         value: String
     ): String? {
@@ -504,18 +523,7 @@ class ArabdramaProvider : MainAPI() {
             }
 
             val decoded = runCatching {
-
-                base64Decode(
-                    current
-                        .replace("-", "+")
-                        .replace("_", "/")
-                        .let { input ->
-                            input + "=".repeat(
-                                (4 - input.length % 4) % 4
-                            )
-                        }
-                )
-
+                decodeBase64(current)
             }.getOrNull()
 
             if (
@@ -527,12 +535,10 @@ class ArabdramaProvider : MainAPI() {
             }
 
             val urlDecoded = runCatching {
-
                 URLDecoder.decode(
                     current,
                     StandardCharsets.UTF_8.name()
                 )
-
             }.getOrNull()
 
             if (
