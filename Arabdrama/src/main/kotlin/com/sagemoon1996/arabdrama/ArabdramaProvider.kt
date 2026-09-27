@@ -48,7 +48,7 @@ class ArabdramaProvider : MainAPI() {
     ): List<SearchResponse> {
 
         return document
-            .select("a[href*='/watch-']")
+            .select("a[href*='/watch-']:has(img)")
             .mapNotNull { element ->
 
                 val rawHref = element.attr("href").trim()
@@ -79,12 +79,21 @@ class ArabdramaProvider : MainAPI() {
                         rawTitle
                     }
 
+                val posterUrl = element
+                    .selectFirst("img")
+                    ?.attr("src")
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let(::fixUrl)
+
                 newTvSeriesSearchResponse(
                     title,
                     url,
                     TvType.TvSeries,
                     false
-                )
+                ) {
+                    this.posterUrl = posterUrl
+                }
             }
             .distinctBy { it.url }
     }
