@@ -1,24 +1,10 @@
 package com.sagemoon1996.arabdrama
 
 import com.fasterxml.jackson.annotation.JsonProperty
-import com.lagradost.cloudstream3.Episode
-import com.lagradost.cloudstream3.ExtractorLink
-import com.lagradost.cloudstream3.MainAPI
-import com.lagradost.cloudstream3.MainPageRequest
-import com.lagradost.cloudstream3.SearchResponse
-import com.lagradost.cloudstream3.SubtitleFile
-import com.lagradost.cloudstream3.TvType
-import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.newEpisode
-import com.lagradost.cloudstream3.newExtractorLink
-import com.lagradost.cloudstream3.newHomePageResponse
-import com.lagradost.cloudstream3.newMovieLoadResponse
-import com.lagradost.cloudstream3.newMovieSearchResponse
-import com.lagradost.cloudstream3.newTvSeriesLoadResponse
-import com.lagradost.cloudstream3.newTvSeriesSearchResponse
+import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.base64Decode
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
@@ -44,7 +30,7 @@ class ArabdramaProvider : MainAPI() {
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
-    ) : com.lagradost.cloudstream3.HomePageResponse {
+    ): HomePageResponse {
         val document = app.get(
             request.data,
             referer = mainUrl
@@ -58,7 +44,10 @@ class ArabdramaProvider : MainAPI() {
         )
     }
 
-    override suspend fun search(query: String): List<SearchResponse> {
+    override suspend fun search(
+        query: String
+    ): List<SearchResponse> {
+
         val trimmed = query.trim()
 
         if (trimmed.isBlank()) {
@@ -81,6 +70,7 @@ class ArabdramaProvider : MainAPI() {
     private fun parseListingDocument(
         document: Document
     ): List<SearchResponse> {
+
         return document
             .select(
                 "a[href*='/show-'][title], a[href*='/movie-'][title]"
@@ -135,7 +125,9 @@ class ArabdramaProvider : MainAPI() {
         }
     }
 
-    private fun cleanTitle(value: String): String {
+    private fun cleanTitle(
+        value: String
+    ): String {
         return value
             .replace("\n", " ")
             .replace("\r", " ")
@@ -143,7 +135,9 @@ class ArabdramaProvider : MainAPI() {
             .trim()
     }
 
-    override suspend fun load(url: String): com.lagradost.cloudstream3.LoadResponse? {
+    override suspend fun load(
+        url: String
+    ): LoadResponse? {
 
         val document = runCatching {
             app.get(
@@ -217,7 +211,9 @@ class ArabdramaProvider : MainAPI() {
             }
             .sortedBy { it.episode }
 
-        return if (isMovie && episodes.size <= 1) {
+        return if (
+            isMovie && episodes.size <= 1
+        ) {
 
             newMovieLoadResponse(
                 title,
@@ -292,6 +288,7 @@ class ArabdramaProvider : MainAPI() {
             when {
 
                 lowerUrl.contains(".m3u8") -> {
+
                     callback(
                         newExtractorLink(
                             source = name,
@@ -307,6 +304,7 @@ class ArabdramaProvider : MainAPI() {
                 }
 
                 lowerUrl.contains(".mpd") -> {
+
                     callback(
                         newExtractorLink(
                             source = name,
@@ -322,6 +320,7 @@ class ArabdramaProvider : MainAPI() {
                 }
 
                 lowerUrl.contains(".mp4") -> {
+
                     callback(
                         newExtractorLink(
                             source = name,
@@ -337,12 +336,15 @@ class ArabdramaProvider : MainAPI() {
                 }
 
                 else -> {
+
                     try {
+
                         val extracted = loadExtractor(
                             url = serverUrl,
                             referer = data,
                             subtitleCallback = subtitleCallback
                         ) { link ->
+
                             foundLinks = true
                             callback(link)
                         }
@@ -361,7 +363,7 @@ class ArabdramaProvider : MainAPI() {
     }
 
     /*
-     * ArabDrama has two different JSON schemas.
+     * ArabDrama has two JSON schemas.
      *
      * Show page:
      * {
@@ -375,9 +377,6 @@ class ArabdramaProvider : MainAPI() {
      *   "ep_info": [...],
      *   "eps_urls": [...]
      * }
-     *
-     * Both are converted into ArabdramaData so the rest of the
-     * provider can use the same load/loadLinks logic.
      */
 
     private val watchDataRegex =
@@ -395,7 +394,7 @@ class ArabdramaProvider : MainAPI() {
             ?: return null
 
         /*
-         * First try the watch-page schema.
+         * Watch page schema.
          */
         val watchEncoded = watchDataRegex
             .find(text)
@@ -410,7 +409,9 @@ class ArabdramaProvider : MainAPI() {
             if (!watchDecoded.isNullOrBlank()) {
 
                 val watchData = runCatching {
-                    parseJson<ArabdramaData>(watchDecoded)
+                    parseJson<ArabdramaData>(
+                        watchDecoded
+                    )
                 }.getOrNull()
 
                 if (watchData != null) {
@@ -420,9 +421,7 @@ class ArabdramaProvider : MainAPI() {
         }
 
         /*
-         * Then try the show-page schema:
-         *
-         * "show" + "EPS"
+         * Show page schema.
          */
         val showEncoded = showDataRegex
             .find(text)
@@ -435,12 +434,15 @@ class ArabdramaProvider : MainAPI() {
             ?: return null
 
         val showPageData = runCatching {
-            parseJson<ArabdramaShowPageData>(showDecoded)
+            parseJson<ArabdramaShowPageData>(
+                showDecoded
+            )
         }.getOrNull()
             ?: return null
 
-        val convertedShowInfo = showPageData.show
-            .map {
+        val convertedShowInfo =
+            showPageData.show.map {
+
                 ShowInfo(
                     drama_id = it.drama_id?.toString(),
                     drama_name = it.drama_name,
@@ -449,14 +451,15 @@ class ArabdramaProvider : MainAPI() {
                     drama_type = it.drama_type,
                     drama_description = it.drama_description,
                     drama_genres = it.drama_genres,
-                    drama_cover_image_url = it.drama_cover_image_url,
+                    drama_cover_image_url =
+                        it.drama_cover_image_url,
                     drama_slug = it.drama_slug,
                     info_url = null
                 )
             }
 
-        val convertedEpisodes = showPageData.EPS
-            .mapNotNull { episode ->
+        val convertedEpisodes =
+            showPageData.EPS.mapNotNull { episode ->
 
                 val number = episode.episode_number
                     ?.toString()
@@ -501,6 +504,7 @@ class ArabdramaProvider : MainAPI() {
             }
 
             val decoded = runCatching {
+
                 base64Decode(
                     current
                         .replace("-", "+")
@@ -511,21 +515,30 @@ class ArabdramaProvider : MainAPI() {
                             )
                         }
                 )
+
             }.getOrNull()
 
-            if (!decoded.isNullOrBlank() && decoded != current) {
+            if (
+                !decoded.isNullOrBlank() &&
+                decoded != current
+            ) {
                 current = decoded.trim()
                 return@repeat
             }
 
             val urlDecoded = runCatching {
+
                 URLDecoder.decode(
                     current,
                     StandardCharsets.UTF_8.name()
                 )
+
             }.getOrNull()
 
-            if (!urlDecoded.isNullOrBlank() && urlDecoded != current) {
+            if (
+                !urlDecoded.isNullOrBlank() &&
+                urlDecoded != current
+            ) {
                 current = urlDecoded.trim()
                 return@repeat
             }
@@ -533,11 +546,10 @@ class ArabdramaProvider : MainAPI() {
             return@repeat
         }
 
-        return current
-            .takeIf {
-                it.startsWith("http://") ||
-                    it.startsWith("https://")
-            }
+        return current.takeIf {
+            it.startsWith("http://") ||
+                it.startsWith("https://")
+        }
     }
 
     private fun fixUrl(
@@ -547,8 +559,10 @@ class ArabdramaProvider : MainAPI() {
         val trimmed = url.trim()
 
         return when {
+
             trimmed.startsWith("http://") ||
-                trimmed.startsWith("https://") -> trimmed
+                trimmed.startsWith("https://") ->
+                trimmed
 
             trimmed.startsWith("//") ->
                 "https:$trimmed"
@@ -627,9 +641,6 @@ class ArabdramaProvider : MainAPI() {
             get() = watch_url
     }
 
-    /*
-     * Exact schema of the /show-... page.
-     */
     data class ArabdramaShowPageData(
         val show: List<ShowPageInfo> = emptyList(),
 
