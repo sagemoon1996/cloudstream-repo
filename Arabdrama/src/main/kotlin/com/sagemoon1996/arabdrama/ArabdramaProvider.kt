@@ -37,7 +37,7 @@ class ArabdramaProvider : MainAPI() {
 
         return newHomePageResponse(
             request.name,
-            parseListingDocument(document)
+            parseMainPageDocument(document)
         )
     }
 
@@ -59,15 +59,27 @@ class ArabdramaProvider : MainAPI() {
             ).document
         }.getOrNull() ?: return emptyList()
 
-        return parseListingDocument(document)
+        return parseSearchDocument(document)
     }
 
-    private fun parseListingDocument(
+    private fun parseSearchDocument(
         document: Document
     ): List<SearchResponse> {
 
         return document
             .select(".show .cover > a")
+            .mapNotNull { parseListingItem(it) }
+            .distinctBy { it.url }
+    }
+
+    private fun parseMainPageDocument(
+        document: Document
+    ): List<SearchResponse> {
+
+        return document
+            .select(
+                "a[href*='/show-'][title], a[href*='/movie-'][title]"
+            )
             .mapNotNull { parseListingItem(it) }
             .distinctBy { it.url }
     }
@@ -202,7 +214,6 @@ class ArabdramaProvider : MainAPI() {
         return if (
             isMovie && episodes.size <= 1
         ) {
-
             newMovieLoadResponse(
                 title,
                 url,
@@ -213,9 +224,7 @@ class ArabdramaProvider : MainAPI() {
                 plot = description
                 this.tags = tags
             }
-
         } else {
-
             newTvSeriesLoadResponse(
                 title,
                 url,
@@ -315,7 +324,6 @@ class ArabdramaProvider : MainAPI() {
             ?.text()
             ?.trim()
             ?.takeIf { it.isNotBlank() }
-
             ?: return null
 
         val decodedData = runCatching {
