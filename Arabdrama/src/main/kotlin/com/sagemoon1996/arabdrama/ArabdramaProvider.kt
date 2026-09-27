@@ -91,7 +91,7 @@ class ArabdramaProvider : MainAPI() {
                     url,
                     TvType.TvSeries,
                     false
-                ) {
+                ).apply {
                     this.posterUrl = posterUrl
                 }
             }
@@ -368,23 +368,6 @@ class ArabdramaProvider : MainAPI() {
         return foundLinks
     }
 
-    /*
-     * ArabDrama uses two different JSON schemas.
-     *
-     * Show page:
-     * {
-     *   "show": [...],
-     *   "EPS": [...]
-     * }
-     *
-     * Watch page:
-     * {
-     *   "show_info": [...],
-     *   "ep_info": [...],
-     *   "eps_urls": [...]
-     * }
-     */
-
     private val watchDataRegex =
         Regex("""eyJzaG93X2luZm8i[\w+/=]+""")
 
@@ -399,9 +382,6 @@ class ArabdramaProvider : MainAPI() {
             ?.text()
             ?: return null
 
-        /*
-         * Watch page.
-         */
         val watchEncoded = watchDataRegex
             .find(text)
             ?.value
@@ -426,9 +406,6 @@ class ArabdramaProvider : MainAPI() {
             }
         }
 
-        /*
-         * Show page.
-         */
         val showEncoded = showDataRegex
             .find(text)
             ?.value
@@ -490,12 +467,6 @@ class ArabdramaProvider : MainAPI() {
         )
     }
 
-    /*
-     * Local Base64 decoder.
-     *
-     * We do not depend on CloudStream's base64Decode helper,
-     * because it is not available in the project's current API.
-     */
     private fun decodeBase64(
         value: String
     ): String {
