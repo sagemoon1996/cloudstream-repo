@@ -19,6 +19,10 @@ class OurDramaProvider : MainAPI() {
         TvType.Movie
     )
 
+    private val browserHeaders = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/141.0.0.0 Mobile Safari/537.36"
+    )
+
     override val mainPage = mainPageOf(
         "$mainUrl/serie/cate/%D9%85%D8%B3%D9%84%D8%B3%D9%84%D8%A7%D8%AA-%D8%A3%D8%B3%D9%8A%D9%88%D9%8A%D8%A9" to "المسلسلات الآسيوية",
         "$mainUrl/serie/cate/%D9%85%D8%B3%D9%84%D8%B3%D9%84%D8%A7%D8%AA-%D9%83%D9%88%D8%B1%D9%8A%D8%A9" to "المسلسلات الكورية",
@@ -106,6 +110,7 @@ class OurDramaProvider : MainAPI() {
 
         val document = app.get(
             url,
+            headers = browserHeaders,
             referer = mainUrl
         ).document
 
@@ -129,6 +134,7 @@ class OurDramaProvider : MainAPI() {
 
         val document = app.get(
             "$mainUrl/?s=$encodedQuery",
+            headers = browserHeaders,
             referer = mainUrl
         ).document
 
@@ -197,6 +203,7 @@ class OurDramaProvider : MainAPI() {
 
         val document = app.get(
             url,
+            headers = browserHeaders,
             referer = mainUrl
         ).document
 
@@ -264,6 +271,7 @@ class OurDramaProvider : MainAPI() {
 
         val document = app.get(
             data,
+            headers = browserHeaders,
             referer = mainUrl
         ).document
 
@@ -307,7 +315,7 @@ class OurDramaProvider : MainAPI() {
                 "action" to "iframe_server",
                 "code" to code
             ),
-            headers = mapOf(
+            headers = browserHeaders + mapOf(
                 "X-CSRF-TOKEN" to csrfToken,
                 "X-Requested-With" to "XMLHttpRequest",
                 "Referer" to data
