@@ -30,9 +30,27 @@ class OurDramaProvider : MainAPI() {
             timeout = 15
         )
 
-        println(
-            "OURDRAMA TEST: status=${response.code}, length=${response.text.length}"
-        )
+        val html = response.text
+
+        val cardCount = Regex(
+            """<article[^>]*class=["'][^"']*post-movie"""
+        ).findAll(html).count()
+
+        val titleMatches = Regex(
+            """<h4[^>]*>\s*<a[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>"""
+        ).findAll(html)
+            .take(5)
+            .map { match ->
+                match.groupValues[2]
+                    .replace(Regex("<[^>]+>"), "")
+                    .trim()
+            }
+            .toList()
+
+        println("OURDRAMA TEST: HTTP=${response.code}")
+        println("OURDRAMA TEST: HTML_LENGTH=${html.length}")
+        println("OURDRAMA TEST: CARDS=$cardCount")
+        println("OURDRAMA TEST: TITLES=$titleMatches")
 
         return newHomePageResponse(
             request.name,
