@@ -342,22 +342,42 @@ class OurDramaProvider : MainAPI() {
             return false
         }
 
-        val finalUrl = when {
-            iframeUrl.startsWith("http://") ||
-                iframeUrl.startsWith("https://") -> iframeUrl
+        /*
+         * OurDrama returns Vidmoly mirrors such as:
+         * https://vidmoly.net/embed-XXXXXXXX.html
+         *
+         * The actual player redirects/uses:
+         * https://vidmoly.biz/embed-XXXXXXXX.html
+         *
+         * Force the iframe onto Vidmoly.biz so CloudStream's
+         * Vidmolybiz extractor handles it.
+         */
 
-            iframeUrl.startsWith("//") -> {
-                "https:$iframeUrl"
-            }
+        val embedPath = when {
+            iframeUrl.startsWith("https://vidmoly.net/") ->
+                iframeUrl.removePrefix("https://vidmoly.net/")
 
-            iframeUrl.startsWith("/") -> {
-                "https://vidmoly.net$iframeUrl"
-            }
+            iframeUrl.startsWith("http://vidmoly.net/") ->
+                iframeUrl.removePrefix("http://vidmoly.net/")
 
-            else -> {
-                return false
-            }
+            iframeUrl.startsWith("https://vidmoly.biz/") ->
+                iframeUrl.removePrefix("https://vidmoly.biz/")
+
+            iframeUrl.startsWith("http://vidmoly.biz/") ->
+                iframeUrl.removePrefix("http://vidmoly.biz/")
+
+            iframeUrl.startsWith("/") ->
+                iframeUrl.trimStart('/')
+
+            else ->
+                iframeUrl.substringAfterLast("/")
         }
+
+        if (embedPath.isBlank()) {
+            return false
+        }
+
+        val finalUrl = "https://vidmoly.biz/$embedPath"
 
         return loadExtractor(
             finalUrl,
