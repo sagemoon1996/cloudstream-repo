@@ -2,10 +2,10 @@ package com.sagemoon1996.ourdrama
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import okhttp3.FormBody
+import org.json.JSONObject
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import org.json.JSONObject
 import java.net.URLEncoder
 
 class OurDramaProvider : MainAPI() {
@@ -31,7 +31,9 @@ class OurDramaProvider : MainAPI() {
     )
 
     private fun extractPoster(element: Element): String? {
-        val image = element.selectFirst("img[data-src], img[data-lazy-src], img[src]")
+        val image = element.selectFirst(
+            "img[data-src], img[data-lazy-src], img[src]"
+        )
 
         if (image != null) {
             val dataSrc = image.attr("data-src").trim()
@@ -45,7 +47,10 @@ class OurDramaProvider : MainAPI() {
             }
 
             val src = image.attr("src").trim()
-            if (src.startsWith("http") && !src.contains("/images/pixel.gif")) {
+            if (
+                src.startsWith("http") &&
+                !src.contains("/images/pixel.gif")
+            ) {
                 return src
             }
         }
@@ -53,32 +58,37 @@ class OurDramaProvider : MainAPI() {
         return null
     }
 
-    private fun parseResults(document: Document): List<SearchResponse> {
-        return document.select("article.post-movie").mapNotNull { article ->
+    private fun parseResults(
+        document: Document
+    ): List<SearchResponse> {
 
-            val link = article.selectFirst("h4 a[href]")
-                ?: return@mapNotNull null
+        return document.select("article.post-movie")
+            .mapNotNull { article ->
 
-            val title = link.text()
-                .trim()
-                .takeIf { it.isNotBlank() }
-                ?: return@mapNotNull null
+                val link = article.selectFirst("h4 a[href]")
+                    ?: return@mapNotNull null
 
-            val href = link.attr("href")
-                .trim()
-                .takeIf { it.isNotBlank() }
-                ?: return@mapNotNull null
+                val title = link.text()
+                    .trim()
+                    .takeIf { it.isNotBlank() }
+                    ?: return@mapNotNull null
 
-            val poster = extractPoster(article)
+                val href = link.attr("href")
+                    .trim()
+                    .takeIf { it.isNotBlank() }
+                    ?: return@mapNotNull null
 
-            newTvSeriesSearchResponse(
-                title,
-                href,
-                TvType.TvSeries
-            ) {
-                posterUrl = poster
+                val poster = extractPoster(article)
+
+                newTvSeriesSearchResponse(
+                    title,
+                    href,
+                    TvType.TvSeries
+                ) {
+                    posterUrl = poster
+                }
             }
-        }.distinctBy { it.url }
+            .distinctBy { it.url }
     }
 
     override suspend fun getMainPage(
@@ -108,32 +118,26 @@ class OurDramaProvider : MainAPI() {
 
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
 
-        val body = FormBody.Builder()
-            .add("searchq", query)
-            .build()
-
-        val response = app.post(
+        val document = app.post(
             "$mainUrl/searchq",
-            requestBody = body,
+            data = mapOf(
+                "searchq" to query
+            ),
             headers = mapOf(
                 "Content-Type" to "application/x-www-form-urlencoded"
             ),
             referer = "$mainUrl/"
-        )
-
-        val document = response.document
+        ).document
 
         return parseResults(document)
             .ifEmpty {
-                /*
-                 * The search endpoint is the site's real POST search endpoint.
-                 * The encoded query is intentionally kept above because the
-                 * website may change its search implementation in the future.
-                 */
-                val fallbackUrl = "$mainUrl/searchq?searchq=$encodedQuery"
-
                 runCatching {
-                    parseResults(app.get(fallbackUrl).document)
+                    parseResults(
+                        app.get(
+                            "$mainUrl/searchq?searchq=$encodedQuery",
+                            referer = "$mainUrl/"
+                        ).document
+                    )
                 }.getOrDefault(emptyList())
             }
     }
@@ -164,6 +168,7 @@ class OurDramaProvider : MainAPI() {
             ?: document.selectFirst(
                 "img[data-src], img[data-lazy-src], img[src]"
             )?.let {
+
                 val dataSrc = it.attr("data-src").trim()
 
                 when {
@@ -197,70 +202,70 @@ class OurDramaProvider : MainAPI() {
 
         val episodes = document.select(
             "a[href*='/episode/']"
-        ).mapNotNull { link ->
+        )
+            .mapNotNull { link ->
 
-            val episodeUrl = link.attr("href")
-                .trim()
-                .takeIf { it.isNotBlank() }
-                ?: return@mapNotNull null
+                val episodeUrl = link.attr("href")
+                    .trim()
+                    .takeIf { it.isNotBlank() }
+                    ?: return@mapNotNull null
 
-            val episodeText = link.text()
-                .trim()
+                val episodeText = link.text().trim()
 
-            val episodeNumber =
-                Regex(
-                    """(?:الحلقة|episode)[^\d]*(\d+)""",
-                    RegexOption.IGNORE_CASE
-                )
-                    .find(episodeText)
-                    ?.groupValues
-                    ?.getOrNull(1)
-                    ?.toIntOrNull()
-                    ?: Regex(
+                val episodeNumber =
+                    Regex(
                         """(?:الحلقة|episode)[^\d]*(\d+)""",
                         RegexOption.IGNORE_CASE
                     )
-                        .find(episodeUrl)
+                        .find(episodeText)
                         ?.groupValues
                         ?.getOrNull(1)
                         ?.toIntOrNull()
-                    ?: Regex(
-                        """-(\d+)(?:/)?$"""
-                    )
-                        .find(episodeUrl)
-                        ?.groupValues
-                        ?.getOrNull(1)
-                        ?.toIntOrNull()
-                    ?: return@mapNotNull null
+                        ?: Regex(
+                            """(?:الحلقة|episode)[^\d]*(\d+)""",
+                            RegexOption.IGNORE_CASE
+                        )
+                            .find(episodeUrl)
+                            ?.groupValues
+                            ?.getOrNull(1)
+                            ?.toIntOrNull()
+                        ?: Regex(
+                            """-(\d+)(?:/)?$"""
+                        )
+                            .find(episodeUrl)
+                            ?.groupValues
+                            ?.getOrNull(1)
+                            ?.toIntOrNull()
+                        ?: return@mapNotNull null
 
-            val season =
-                Regex(
-                    """(?:الموسم|season)[^\d]*(\d+)""",
-                    RegexOption.IGNORE_CASE
-                )
-                    .find(episodeText)
-                    ?.groupValues
-                    ?.getOrNull(1)
-                    ?.toIntOrNull()
-                    ?: Regex(
-                        """/season-(\d+)/""",
+                val season =
+                    Regex(
+                        """(?:الموسم|season)[^\d]*(\d+)""",
                         RegexOption.IGNORE_CASE
                     )
-                        .find(episodeUrl)
+                        .find(episodeText)
                         ?.groupValues
                         ?.getOrNull(1)
                         ?.toIntOrNull()
-                    ?: 1
+                        ?: Regex(
+                            """/season-(\d+)/""",
+                            RegexOption.IGNORE_CASE
+                        )
+                            .find(episodeUrl)
+                            ?.groupValues
+                            ?.getOrNull(1)
+                            ?.toIntOrNull()
+                        ?: 1
 
-            newEpisode(episodeUrl) {
-                name = episodeText.ifBlank {
-                    "Episode $episodeNumber"
+                newEpisode(episodeUrl) {
+                    name = episodeText.ifBlank {
+                        "Episode $episodeNumber"
+                    }
+
+                    this.season = season
+                    this.episode = episodeNumber
                 }
-
-                this.season = season
-                this.episode = episodeNumber
             }
-        }
             .distinctBy { it.data }
             .sortedWith(
                 compareBy<Episode> { it.season ?: 1 }
@@ -279,71 +284,65 @@ class OurDramaProvider : MainAPI() {
         }
     }
 
-    private fun extractCsrfToken(document: Document): String? {
+    private fun extractCsrfToken(
+        document: Document
+    ): String? {
 
-        val metaToken = document.selectFirst(
+        document.selectFirst(
             "meta[name='csrf-token']"
         )?.attr("content")
             ?.trim()
             ?.takeIf { it.isNotBlank() }
-
-        if (metaToken != null) {
-            return metaToken
-        }
+            ?.let { return it }
 
         val html = document.html()
 
-        val tokenRegex = Regex(
-            """['"]X-CSRF-TOKEN['"]\s*:\s*['"]([^'"]+)['"]"""
+        val patterns = listOf(
+            Regex(
+                """['"]X-CSRF-TOKEN['"]\s*:\s*['"]([^'"]+)['"]"""
+            ),
+            Regex(
+                """X-CSRF-TOKEN\s*['"]?\s*[:=]\s*['"]([^'"]+)['"]"""
+            )
         )
 
-        tokenRegex.find(html)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.takeIf { it.isNotBlank() }
-            ?.let { return it }
-
-        val ajaxSetupRegex = Regex(
-            """X-CSRF-TOKEN\s*['"]?\s*[:=]\s*['"]([^'"]+)['"]"""
-        )
-
-        ajaxSetupRegex.find(html)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.takeIf { it.isNotBlank() }
-            ?.let { return it }
+        for (pattern in patterns) {
+            pattern.find(html)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?.let { return it }
+        }
 
         return null
     }
 
-    private fun extractIframeUrls(codePlay: String): List<String> {
+    private fun extractIframeUrls(
+        codePlay: String
+    ): List<String> {
 
-        val document = org.jsoup.Jsoup.parseBodyFragment(codePlay)
+        val document = Jsoup.parseBodyFragment(codePlay)
 
         return document.select(
             "iframe[src], iframe[data-src]"
-        ).mapNotNull { iframe ->
+        )
+            .mapNotNull { iframe ->
 
-            val src = iframe.attr("src")
-                .ifBlank {
-                    iframe.attr("data-src")
+                val src = iframe.attr("src")
+                    .ifBlank {
+                        iframe.attr("data-src")
+                    }
+                    .trim()
+
+                when {
+                    src.startsWith("http://") -> src
+                    src.startsWith("https://") -> src
+                    src.startsWith("//") -> "https:$src"
+                    else -> null
                 }
-                .trim()
-
-            when {
-                src.startsWith("http://") ->
-                    src
-
-                src.startsWith("https://") ->
-                    src
-
-                src.startsWith("//") ->
-                    "https:$src"
-
-                else ->
-                    null
             }
-        }.distinct()
+            .distinct()
     }
 
     override suspend fun loadLinks(
@@ -353,24 +352,35 @@ class OurDramaProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
+        /*
+         * Verified OurDrama flow:
+         *
+         * 1. GET episode page
+         * 2. Read dynamic CSRF token
+         * 3. Read dynamic server data-code values
+         * 4. POST /ajax-request
+         * 5. action=iframe_server
+         * 6. Read JSON codeplay
+         * 7. Extract iframe
+         * 8. Pass iframe to CloudStream extractor
+         */
+
         val episodeUrl = data
 
-        val episodeResponse = app.get(
+        val episodeDocument = app.get(
             episodeUrl,
             referer = "$mainUrl/"
-        )
+        ).document
 
-        val document = episodeResponse.document
+        val csrfToken = extractCsrfToken(
+            episodeDocument
+        ) ?: return false
 
-        /*
-         * The server list is dynamic for every episode.
-         * We intentionally read every data-code from the page instead
-         * of hardcoding server names or codes.
-         */
-        val serverCodes = document.select(
+        val serverCodes = episodeDocument.select(
             ".server-list-menu .getplay a[data-code]"
         )
             .mapNotNull { server ->
+
                 val code = server.attr("data-code")
                     .trim()
                     .takeIf { it.isNotBlank() }
@@ -390,36 +400,26 @@ class OurDramaProvider : MainAPI() {
             return false
         }
 
-        val csrfToken = extractCsrfToken(document)
-            ?: return false
-
-        val ajaxHeaders = mapOf(
-            "X-CSRF-TOKEN" to csrfToken,
-            "X-Requested-With" to "XMLHttpRequest",
-            "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8"
-        )
-
         var loaded = false
 
         for ((_, serverCode) in serverCodes) {
 
             try {
 
-                val requestBody = FormBody.Builder()
-                    .add("action", "iframe_server")
-                    .add("code", serverCode)
-                    .build()
-
                 val response = app.post(
                     "$mainUrl/ajax-request",
-                    requestBody = requestBody,
-                    headers = ajaxHeaders,
+                    data = mapOf(
+                        "action" to "iframe_server",
+                        "code" to serverCode
+                    ),
+                    headers = mapOf(
+                        "X-CSRF-TOKEN" to csrfToken,
+                        "X-Requested-With" to "XMLHttpRequest",
+                        "Content-Type" to
+                            "application/x-www-form-urlencoded; charset=UTF-8"
+                    ),
                     referer = episodeUrl
                 )
-
-                if (!response.okhttpResponse.isSuccessful) {
-                    continue
-                }
 
                 val responseText = response.text
 
@@ -433,16 +433,19 @@ class OurDramaProvider : MainAPI() {
                 }
 
                 val codePlay = json.optString(
-                    "codeplay",
-                    ""
-                ).takeIf { it.isNotBlank() }
-                    ?: continue
+                    "codeplay"
+                ).takeIf {
+                    it.isNotBlank()
+                } ?: continue
 
-                val iframeUrls = extractIframeUrls(codePlay)
+                val iframeUrls = extractIframeUrls(
+                    codePlay
+                )
 
                 for (iframeUrl in iframeUrls) {
 
                     try {
+
                         val extractorLoaded = loadExtractor(
                             iframeUrl,
                             episodeUrl,
@@ -453,11 +456,22 @@ class OurDramaProvider : MainAPI() {
                         if (extractorLoaded) {
                             loaded = true
                         }
+
                     } catch (_: Exception) {
                     }
                 }
 
+                /*
+                 * Once one server successfully produces links,
+                 * there is no reason to keep requesting the remaining
+                 * servers.
+                 */
+                if (loaded) {
+                    break
+                }
+
             } catch (_: Exception) {
+                continue
             }
         }
 
