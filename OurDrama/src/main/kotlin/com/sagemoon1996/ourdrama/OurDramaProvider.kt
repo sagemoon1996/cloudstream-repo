@@ -28,9 +28,7 @@ class OurDramaProvider : MainAPI() {
         "$mainUrl/serie/cate/%D9%85%D8%B3%D9%84%D8%B3%D9%84%D8%A7%D8%AA-%D8%AA%D8%A7%D9%8A%D9%84%D8%A7%D9%86%D8%AF%D9%8A%D8%A9" to "المسلسلات التايلاندية"
     )
 
-    private fun absoluteUrl(
-        element: Element
-    ): String {
+    private fun absoluteUrl(element: Element): String {
         val absolute = element.attr("abs:href").trim()
 
         if (absolute.startsWith("http")) {
@@ -47,9 +45,7 @@ class OurDramaProvider : MainAPI() {
         }
     }
 
-    private fun posterUrl(
-        element: Element
-    ): String? {
+    private fun posterUrl(element: Element): String? {
         val image = element.selectFirst(
             "img[data-src], img[data-lazy-src], img[src]"
         ) ?: return null
@@ -64,13 +60,8 @@ class OurDramaProvider : MainAPI() {
             }
     }
 
-    private fun parseSearchResult(
-        element: Element
-    ): SearchResponse? {
-
-        val titleLink = element.selectFirst(
-            "h4 a[href]"
-        ) ?: return null
+    private fun parseSearchResult(element: Element): SearchResponse? {
+        val titleLink = element.selectFirst("h4 a[href]") ?: return null
 
         val url = absoluteUrl(titleLink)
 
@@ -78,28 +69,22 @@ class OurDramaProvider : MainAPI() {
             return null
         }
 
-        val title = titleLink
-            .text()
-            .trim()
+        val title = titleLink.text().trim()
 
         if (title.isBlank()) {
             return null
         }
-
-        val poster = posterUrl(element)
 
         return newTvSeriesSearchResponse(
             title,
             url,
             TvType.TvSeries
         ) {
-            posterUrl = poster
+            posterUrl = posterUrl(element)
         }
     }
 
-    private fun parseResults(
-        document: Document
-    ): List<SearchResponse> {
+    private fun parseResults(document: Document): List<SearchResponse> {
         return document
             .select("article.post-movie")
             .mapNotNull { parseSearchResult(it) }
@@ -111,10 +96,12 @@ class OurDramaProvider : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse {
 
+        val baseUrl = request.data.trimEnd('/')
+
         val url = if (page == 1) {
-            request.data
+            baseUrl
         } else {
-            "${request.data.trimEnd('/')}/?page=$page"
+            "$baseUrl?page=$page"
         }
 
         val document = app.get(
@@ -222,6 +209,7 @@ class OurDramaProvider : MainAPI() {
                 .selectFirst("meta[property='og:title']")
                 ?.attr("content")
                 ?.trim()
+                ?.takeIf { it.isNotBlank() }
             ?: return null
 
         val poster = document
@@ -280,16 +268,12 @@ class OurDramaProvider : MainAPI() {
         ).document
 
         val vidmo = document
-            .selectFirst(
-                ".server-list-menu .getplay a"
-            ) { element ->
+            .select(".server-list-menu .getplay a")
+            .firstOrNull { element ->
                 element.text()
                     .contains("Vidmo", ignoreCase = true)
             }
-
-        if (vidmo == null) {
-            return false
-        }
+            ?: return false
 
         val code = vidmo
             .attr("data-code")
@@ -301,9 +285,7 @@ class OurDramaProvider : MainAPI() {
 
         val csrfToken =
             document
-                .selectFirst(
-                    "meta[name='csrf-token']"
-                )
+                .selectFirst("meta[name='csrf-token']")
                 ?.attr("content")
                 ?.trim()
                 ?.takeIf { it.isNotBlank() }
@@ -319,10 +301,8 @@ class OurDramaProvider : MainAPI() {
             return false
         }
 
-        val ajaxUrl = "$mainUrl/ajax-request"
-
         val response = app.post(
-            ajaxUrl,
+            "$mainUrl/ajax-request",
             data = mapOf(
                 "action" to "iframe_server",
                 "code" to code
@@ -379,13 +359,11 @@ class OurDramaProvider : MainAPI() {
             }
         }
 
-        loadExtractor(
+        return loadExtractor(
             finalUrl,
             data,
             subtitleCallback,
             callback
         )
-
-        return true
     }
 }
