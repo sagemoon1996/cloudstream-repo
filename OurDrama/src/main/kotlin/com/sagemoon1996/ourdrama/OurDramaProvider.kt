@@ -2,7 +2,9 @@ package com.sagemoon1996.ourdrama
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
+import com.lagradost.cloudstream3.utils.loadExtractor
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
@@ -36,7 +38,6 @@ class OurDramaProvider : MainAPI() {
     )
 
     private fun absoluteUrl(element: Element): String {
-
         val absolute = element.attr("abs:href").trim()
 
         if (absolute.startsWith("http")) {
@@ -54,7 +55,6 @@ class OurDramaProvider : MainAPI() {
     }
 
     private fun posterUrl(element: Element): String? {
-
         val image = element.selectFirst(
             "img[data-src], img[data-lazy-src], img[src]"
         ) ?: return null
@@ -101,7 +101,6 @@ class OurDramaProvider : MainAPI() {
     private fun parseResults(
         document: Document
     ): List<SearchResponse> {
-
         return document
             .select("article.post-movie")
             .mapNotNull { parseSearchResult(it) }
@@ -331,7 +330,7 @@ class OurDramaProvider : MainAPI() {
         }
 
         val orderedServers = servers.sortedBy {
-            if (it.first.contains("Vidmo", true)) {
+            if (it.first.contains("Vidmo", ignoreCase = true)) {
                 0
             } else {
                 1
