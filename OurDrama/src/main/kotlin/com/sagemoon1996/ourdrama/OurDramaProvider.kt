@@ -352,19 +352,6 @@ class OurDramaProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
-        /*
-         * Verified OurDrama flow:
-         *
-         * 1. GET episode page
-         * 2. Read dynamic CSRF token
-         * 3. Read dynamic server data-code values
-         * 4. POST /ajax-request
-         * 5. action=iframe_server
-         * 6. Read JSON codeplay
-         * 7. Extract iframe
-         * 8. Pass iframe to CloudStream extractor
-         */
-
         val episodeUrl = data
 
         val episodeDocument = app.get(
@@ -423,6 +410,10 @@ class OurDramaProvider : MainAPI() {
 
                 val responseText = response.text
 
+                println(
+                    "OURDRAMA AJAX RESPONSE: $responseText"
+                )
+
                 val json = runCatching {
                     JSONObject(responseText)
                 }.getOrNull()
@@ -461,11 +452,6 @@ class OurDramaProvider : MainAPI() {
                     }
                 }
 
-                /*
-                 * Once one server successfully produces links,
-                 * there is no reason to keep requesting the remaining
-                 * servers.
-                 */
                 if (loaded) {
                     break
                 }
