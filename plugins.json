@@ -79,5 +79,25 @@
         "description": "FiveTV Arabic streaming provider",
         "url": "https://raw.githubusercontent.com/sagemoon1996/cloudstream-repo/builds/FiveTV.cs3",
         "name": "FiveTV"
+    },
+    {
+        "fileHash": "sha256-07e7612e1861a9c4297fc5a56d3cbf131b40388fecfd46abc0141ed644fd2605",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
+        "fileSize": 14796,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "sagemoon1996"
+        ],
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "version": 1,
+        "internalName": "OurDrama",
+        "description": "Asian drama and movies",
+        "url": "https://raw.githubusercontent.com/sagemoon1996/cloudstream-repo/builds/OurDrama.cs3",
+        "name": "OurDrama"
     }
 ]
