@@ -416,8 +416,11 @@ class OurDramaProvider : MainAPI() {
 
                 val json = runCatching {
                     JSONObject(responseText)
-                }.getOrNull()
-                    ?: continue
+                }.getOrElse {
+                    throw ErrorLoadingException(
+                        "OurDrama: AJAX response is not JSON"
+                    )
+                }
 
                 if (!json.optBoolean("status", false)) {
                     continue
@@ -427,35 +430,36 @@ class OurDramaProvider : MainAPI() {
                     "codeplay"
                 ).takeIf {
                     it.isNotBlank()
-                } ?: continue
+                } ?: throw ErrorLoadingException(
+                    "OurDrama: AJAX has no codeplay"
+                )
 
                 val iframeUrls = extractIframeUrls(
                     codePlay
                 )
 
+                if (iframeUrls.isEmpty()) {
+                    throw ErrorLoadingException(
+                        "OurDrama: codeplay has no iframe"
+                    )
+                }
+
                 for (iframeUrl in iframeUrls) {
 
-                    try {
+                    val extractorLoaded = loadExtractor(
+                        iframeUrl,
+                        episodeUrl,
+                        subtitleCallback,
+                        callback
+                    )
 
-                        val extractorLoaded = loadExtractor(
-                            iframeUrl,
-                            episodeUrl,
-                            subtitleCallback,
-                            callback
+                    if (!extractorLoaded) {
+                        throw ErrorLoadingException(
+                            "OurDrama: no extractor for $iframeUrl"
                         )
-
-                        if (!extractorLoaded) {
-                            throw ErrorLoadingException(
-                                "OURDRAMA: No extractor for iframe: $iframeUrl"
-                            )
-                        }
-
-                        loaded = true
-
-                    } catch (e: ErrorLoadingException) {
-                        throw e
-                    } catch (_: Exception) {
                     }
+
+                    loaded = true
                 }
 
                 if (loaded) {
