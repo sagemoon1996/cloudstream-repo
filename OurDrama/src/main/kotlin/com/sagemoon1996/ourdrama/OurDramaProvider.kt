@@ -3,7 +3,6 @@ package com.sagemoon1996.ourdrama
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.json.JSONObject
-import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
@@ -124,7 +123,8 @@ class OurDramaProvider : MainAPI() {
                 "searchq" to query
             ),
             headers = mapOf(
-                "Content-Type" to "application/x-www-form-urlencoded"
+                "Content-Type" to
+                    "application/x-www-form-urlencoded"
             ),
             referer = "$mainUrl/"
         ).document
@@ -322,7 +322,8 @@ class OurDramaProvider : MainAPI() {
         codePlay: String
     ): List<String> {
 
-        val document = Jsoup.parseBodyFragment(codePlay)
+        val document = org.jsoup.Jsoup
+            .parseBodyFragment(codePlay)
 
         return document.select(
             "iframe[src], iframe[data-src]"
@@ -343,6 +344,31 @@ class OurDramaProvider : MainAPI() {
                 }
             }
             .distinct()
+    }
+
+    /*
+     * Extract a directly exposed HLS master URL from the player HTML.
+     *
+     * The browser evidence proves that the actual player ultimately uses:
+     *
+     * https://.../hls3/.../master.txt
+     *
+     * The complete host/path is dynamic, so nothing is hardcoded here.
+     */
+    private fun extractHlsUrl(
+        html: String
+    ): String? {
+
+        val normalized = html
+            .replace("\\/", "/")
+            .replace("\\u002F", "/")
+
+        return Regex(
+            """https?://[^"'\\\s<>]+/hls3/[^"'\\\s<>]+/master\.txt"""
+        )
+            .find(normalized)
+            ?.value
+            ?.trim()
     }
 
     override suspend fun loadLinks(
@@ -388,7 +414,6 @@ class OurDramaProvider : MainAPI() {
         }
 
         var loaded = false
-        var callbackCount = 0
 
         for ((_, serverCode) in serverCodes) {
 
@@ -409,19 +434,7 @@ class OurDramaProvider : MainAPI() {
                     referer = episodeUrl
                 )
 
-                val responseText = response.text
-
-                println(
-                    "OURDRAMA AJAX RESPONSE: $responseText"
-                )
-
-                val json = runCatching {
-                    JSONObject(responseText)
-                }.getOrElse {
-                    throw ErrorLoadingException(
-                        "OurDrama: AJAX response is not JSON"
-                    )
-                }
+                val json = JSONObject(response.text)
 
                 if (!json.optBoolean("status", false)) {
                     continue
@@ -429,61 +442,48 @@ class OurDramaProvider : MainAPI() {
 
                 val codePlay = json.optString(
                     "codeplay"
-                ).takeIf {
-                    it.isNotBlank()
-                } ?: throw ErrorLoadingException(
-                    "OurDrama: AJAX has no codeplay"
                 )
+                    .takeIf { it.isNotBlank() }
+                    ?: continue
 
-                val iframeUrls = extractIframeUrls(
+                val iframeUrl = extractIframeUrls(
                     codePlay
                 )
-
-                if (iframeUrls.isEmpty()) {
-                    throw ErrorLoadingException(
-                        "OurDrama: codeplay has no iframe"
-                    )
-                }
-
-                for (iframeUrl in iframeUrls) {
-
-                    val extractorLoaded = loadExtractor(
-                        iframeUrl,
-                        episodeUrl,
-                        subtitleCallback
-                    ) { link ->
-                        callbackCount++
-                        callback(link)
+                    .firstOrNull {
+                        it.contains("ourdrama.cc/v/")
                     }
+                    ?: continue
 
-                    if (!extractorLoaded) {
-                        continue
+                val playerResponse = app.get(
+                    iframeUrl,
+                    referer = episodeUrl
+                )
+
+                val hlsUrl = extractHlsUrl(
+                    playerResponse.text
+                )
+                    ?: continue
+
+                callback(
+                    newExtractorLink(
+                        source = name,
+                        name = "OurDrama",
+                        url = hlsUrl,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        referer = iframeUrl
+                        quality = Qualities.P720.value
                     }
+                )
 
-                    loaded = true
-                }
+                loaded = true
+                break
 
-                if (loaded) {
-                    break
-                }
-
-            } catch (e: ErrorLoadingException) {
-                throw e
             } catch (_: Exception) {
                 continue
             }
         }
 
-        println(
-            "OURDRAMA CALLBACK COUNT: $callbackCount"
-        )
-
-        if (loaded && callbackCount == 0) {
-            throw ErrorLoadingException(
-                "OurDrama: extractor matched but callback received 0 links"
-            )
-        }
-
-        return callbackCount > 0
+        return loaded
     }
 }
