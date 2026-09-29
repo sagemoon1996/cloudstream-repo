@@ -64,15 +64,21 @@ class OurDramaProvider : MainAPI() {
                 val link = article.selectFirst("h4 a[href]")
                     ?: return@mapNotNull null
 
-                val title = link.text().trim().takeIf { it.isNotBlank() }
+                val title = link.text().trim()
+                    .takeIf { it.isNotBlank() }
                     ?: return@mapNotNull null
 
-                val href = link.attr("href").trim().takeIf { it.isNotBlank() }
+                val href = link.attr("href").trim()
+                    .takeIf { it.isNotBlank() }
                     ?: return@mapNotNull null
 
                 val poster = extractPoster(article)
 
-                newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
+                newTvSeriesSearchResponse(
+                    title,
+                    href,
+                    TvType.TvSeries
+                ) {
                     posterUrl = poster
                 }
             }
@@ -84,12 +90,13 @@ class OurDramaProvider : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse {
         val baseUrl = request.data.trimEnd('/')
-        val url = if (page == 1) baseUrl else "$baseUrl?page=$page"
+        val url = if (page == 1) {
+            baseUrl
+        } else {
+            "$baseUrl?page=$page"
+        }
 
-        val document = app.get(
-            url,
-            referer = "$mainUrl/"
-        ).document
+        val document = app.get(url).document
 
         return newHomePageResponse(
             request.name,
@@ -102,9 +109,12 @@ class OurDramaProvider : MainAPI() {
 
         val document = app.post(
             "$mainUrl/searchq",
-            data = mapOf("searchq" to query),
+            data = mapOf(
+                "searchq" to query
+            ),
             headers = mapOf(
-                "Content-Type" to "application/x-www-form-urlencoded"
+                "Content-Type" to
+                    "application/x-www-form-urlencoded"
             ),
             referer = "$mainUrl/"
         ).document
@@ -420,12 +430,16 @@ class OurDramaProvider : MainAPI() {
                         callback(link)
                     }
 
-                    if (!extractorLoaded) continue
+                    if (!extractorLoaded) {
+                        continue
+                    }
 
                     loaded = true
                 }
 
-                if (loaded) break
+                if (loaded) {
+                    break
+                }
 
             } catch (e: ErrorLoadingException) {
                 throw e
