@@ -81,10 +81,10 @@
         "name": "FiveTV"
     },
     {
-        "fileHash": "sha256-54f6a4267ce8429391f9c2b23feeb3a0e1bfb5d8f343c6022c6a70333dac5cab",
+        "fileHash": "sha256-d2cc002bbf6020cbe89a24ff880468e5efcb6a69729cec3918d4a0dac061009c",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
-        "fileSize": 19348,
+        "fileSize": 18958,
         "status": 1,
         "language": "ar",
         "authors": [
