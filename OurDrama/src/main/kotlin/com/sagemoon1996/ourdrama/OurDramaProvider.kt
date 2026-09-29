@@ -162,6 +162,8 @@ class OurDramaProvider : MainAPI() {
         url: String
     ): LoadResponse? {
 
+        println("OURDRAMA LOAD START: $url")
+
         val document = app.get(url).document
 
         val title = document.selectFirst(
@@ -254,6 +256,12 @@ class OurDramaProvider : MainAPI() {
                     this.episode = episodeNumber
                 }
             }
+
+        println("OURDRAMA LOAD EPISODES: ${episodes.size}")
+
+        episodes.forEach {
+            println("OURDRAMA EPISODE URL: ${it.data}")
+        }
 
         return newTvSeriesLoadResponse(
             title,
