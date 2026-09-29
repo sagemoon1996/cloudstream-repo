@@ -2,7 +2,7 @@ package com.sagemoon1996.ourdrama
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import org.jsoup.Jsoup
+import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
@@ -45,21 +45,56 @@ class OurDramaProvider : MainAPI() {
         ) ?: return null
 
         val dataSrc = image.attr("data-src").trim()
-        if (dataSrc.startsWith("http") &&
+        if (
+            dataSrc.startsWith("http") &&
             !dataSrc.contains("/images/pixel.gif")
         ) {
             return dataSrc
         }
 
         val lazySrc = image.attr("data-lazy-src").trim()
-        if (lazySrc.startsWith("http") &&
+        if (
+            lazySrc.startsWith("http") &&
             !lazySrc.contains("/images/pixel.gif")
         ) {
             return lazySrc
         }
 
         val src = image.attr("src").trim()
-        if (src.startsWith("http") &&
+        if (
+            src.startsWith("http") &&
+            !src.contains("/images/pixel.gif")
+        ) {
+            return src
+        }
+
+        return null
+    }
+
+    private fun extractPosterFromDocument(document: Document): String? {
+        val image = document.selectFirst(
+            "img[data-src], img[data-lazy-src], img[src]"
+        ) ?: return null
+
+        val dataSrc = image.attr("data-src").trim()
+        if (
+            dataSrc.startsWith("http") &&
+            !dataSrc.contains("/images/pixel.gif")
+        ) {
+            return dataSrc
+        }
+
+        val lazySrc = image.attr("data-lazy-src").trim()
+        if (
+            lazySrc.startsWith("http") &&
+            !lazySrc.contains("/images/pixel.gif")
+        ) {
+            return lazySrc
+        }
+
+        val src = image.attr("src").trim()
+        if (
+            src.startsWith("http") &&
             !src.contains("/images/pixel.gif")
         ) {
             return src
@@ -69,7 +104,8 @@ class OurDramaProvider : MainAPI() {
     }
 
     private fun parseResults(document: Document): List<SearchResponse> {
-        return document.select("article.post-movie")
+        return document
+            .select("article.post-movie")
             .mapNotNull { article ->
 
                 val link = article.selectFirst("h4 a[href]")
@@ -127,8 +163,7 @@ class OurDramaProvider : MainAPI() {
                 "searchq" to query
             ),
             headers = mapOf(
-                "Content-Type" to
-                    "application/x-www-form-urlencoded; charset=UTF-8",
+                "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8",
                 "X-Requested-With" to "XMLHttpRequest"
             ),
             referer = "$mainUrl/"
@@ -162,44 +197,50 @@ class OurDramaProvider : MainAPI() {
         url: String
     ): LoadResponse? {
 
-        println("OURDRAMA LOAD START: $url")
+        val document = app.get(
+            url,
+            referer = "$mainUrl/"
+        ).document
 
-        val document = app.get(url).document
-
-        val title = document.selectFirst(
-            "h1, h2.entry-title, h1.entry-title"
-        )?.text()
-            ?.trim()
-            ?.takeIf { it.isNotBlank() }
-            ?: document.selectFirst(
-                "meta[property='og:title']"
-            )?.attr("content")
+        val title =
+            document.selectFirst(
+                "h1, h2.entry-title, h1.entry-title"
+            )
+                ?.text()
                 ?.trim()
                 ?.takeIf { it.isNotBlank() }
-            ?: return null
+                ?: document.selectFirst(
+                    "meta[property='og:title']"
+                )
+                    ?.attr("content")
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                ?: return null
 
         val poster =
             document.selectFirst(
                 "meta[property='og:image']"
-            )?.attr("content")
+            )
+                ?.attr("content")
                 ?.trim()
                 ?.takeIf { it.startsWith("http") }
                 ?: extractPosterFromDocument(document)
 
-        val plot = document.selectFirst(
-            "meta[name='description'], meta[property='og:description']"
-        )?.attr("content")
-            ?.trim()
+        val plot =
+            document.selectFirst(
+                "meta[name='description'], meta[property='og:description']"
+            )
+                ?.attr("content")
+                ?.trim()
 
-        val year = document.selectFirst(
-            ".post-date"
-        )?.text()
-            ?.trim()
-            ?.toIntOrNull()
+        val year =
+            document.selectFirst(".post-date")
+                ?.text()
+                ?.trim()
+                ?.toIntOrNull()
 
-        val episodes = document.select(
-            "a[href*='/episode/']"
-        )
+        val episodes = document
+            .select("a[href*='/episode/']")
             .mapNotNull { link ->
 
                 val href = link.attr("href")
@@ -209,59 +250,64 @@ class OurDramaProvider : MainAPI() {
 
                 val episodeUrl = absoluteUrl(href)
 
-                val text = link.text().trim()
+                val episodeText = link.text()
+                    .trim()
 
-                val episodeNumber =
+                val episode =
                     Regex(
                         """(?:الحلقة|episode)[^\d]*(\d+)""",
                         RegexOption.IGNORE_CASE
                     )
-                        .find(text)
+                        .find(episodeText)
                         ?.groupValues
                         ?.getOrNull(1)
                         ?.toIntOrNull()
-                    ?: Regex(
-                        """(?:الحلقة|episode)[^\d]*(\d+)""",
-                        RegexOption.IGNORE_CASE
-                    )
-                        .find(episodeUrl)
-                        ?.groupValues
-                        ?.getOrNull(1)
-                        ?.toIntOrNull()
-                    ?: return@mapNotNull null
+                        ?: Regex(
+                            """(?:الحلقة|episode)[^\d]*(\d+)""",
+                            RegexOption.IGNORE_CASE
+                        )
+                            .find(episodeUrl)
+                            ?.groupValues
+                            ?.getOrNull(1)
+                            ?.toIntOrNull()
+                        ?: return@mapNotNull null
 
                 val season =
                     Regex(
                         """(?:الموسم|season)[^\d]*(\d+)""",
                         RegexOption.IGNORE_CASE
                     )
-                        .find(text)
+                        .find(episodeText)
                         ?.groupValues
                         ?.getOrNull(1)
                         ?.toIntOrNull()
-                    ?: 1
-
-                Triple(
-                    episodeUrl,
-                    season,
-                    episodeNumber
-                )
-            }
-            .distinctBy { it.first }
-            .map { (episodeUrl, season, episodeNumber) ->
+                        ?: Regex(
+                            """/season-(\d+)/""",
+                            RegexOption.IGNORE_CASE
+                        )
+                            .find(episodeUrl)
+                            ?.groupValues
+                            ?.getOrNull(1)
+                            ?.toIntOrNull()
+                        ?: 1
 
                 newEpisode(episodeUrl) {
-                    name = "Episode $episodeNumber"
+                    name = episodeText.ifBlank {
+                        "Episode $episode"
+                    }
+
                     this.season = season
-                    this.episode = episodeNumber
+                    this.episode = episode
                 }
             }
-
-        println("OURDRAMA LOAD EPISODES: ${episodes.size}")
-
-        episodes.forEach {
-            println("OURDRAMA EPISODE URL: ${it.data}")
-        }
+            .distinctBy { it.data }
+            .sortedWith(
+                compareBy<Episode> {
+                    it.season ?: 1
+                }.thenBy {
+                    it.episode ?: 0
+                }
+            )
 
         return newTvSeriesLoadResponse(
             title,
@@ -275,38 +321,6 @@ class OurDramaProvider : MainAPI() {
         }
     }
 
-    private fun extractPosterFromDocument(
-        document: Document
-    ): String? {
-
-        val image = document.selectFirst(
-            "img[data-src], img[data-lazy-src], img[src]"
-        ) ?: return null
-
-        val dataSrc = image.attr("data-src").trim()
-        if (dataSrc.startsWith("http") &&
-            !dataSrc.contains("/images/pixel.gif")
-        ) {
-            return dataSrc
-        }
-
-        val lazySrc = image.attr("data-lazy-src").trim()
-        if (lazySrc.startsWith("http") &&
-            !lazySrc.contains("/images/pixel.gif")
-        ) {
-            return lazySrc
-        }
-
-        val src = image.attr("src").trim()
-        if (src.startsWith("http") &&
-            !src.contains("/images/pixel.gif")
-        ) {
-            return src
-        }
-
-        return null
-    }
-
     private fun extractCsrfToken(
         document: Document
     ): String? {
@@ -314,23 +328,20 @@ class OurDramaProvider : MainAPI() {
         val html = document.html()
 
         val patterns = listOf(
-
             Regex(
-                """['"]X-CSRF-TOKEN['"]\s*:\s*['"]([^'"]+)['"]"""
+                """['"]X-CSRF-TOKEN['"]?\s*[:=]\s*['"]([^'"]+)['"]"""
             ),
-
             Regex(
                 """X-CSRF-TOKEN\s*:\s*['"]([^'"]+)['"]"""
             ),
-
             Regex(
                 """X-CSRF-TOKEN\s*=\s*['"]([^'"]+)['"]"""
             )
         )
 
         for (pattern in patterns) {
-
-            val token = pattern.find(html)
+            val token = pattern
+                .find(html)
                 ?.groupValues
                 ?.getOrNull(1)
                 ?.trim()
@@ -347,11 +358,12 @@ class OurDramaProvider : MainAPI() {
         codePlay: String
     ): List<String> {
 
-        val document = Jsoup.parseBodyFragment(codePlay)
-
-        return document.select(
-            ".watch-embed-player iframe[src], iframe[src], iframe[data-src]"
+        val document = org.jsoup.Jsoup.parseBodyFragment(
+            codePlay
         )
+
+        return document
+            .select("iframe[src], iframe[data-src]")
             .mapNotNull { iframe ->
 
                 val src = iframe.attr("src")
@@ -379,21 +391,23 @@ class OurDramaProvider : MainAPI() {
 
         val episodeUrl = data
 
-        val episodeDocument = app.get(
+        val document = app.get(
             episodeUrl,
             referer = "$mainUrl/"
         ).document
 
-        val csrfToken = extractCsrfToken(
-            episodeDocument
-        ) ?: return false
+        val csrfToken =
+            extractCsrfToken(document)
+                ?: return false
 
-        val serverCodes = episodeDocument.select(
-            ".server-list-menu .getplay a[data-code]"
-        )
+        val serverCodes = document
+            .select(
+                ".server-list-menu .getplay a[data-code]"
+            )
             .mapNotNull { server ->
 
-                server.attr("data-code")
+                server
+                    .attr("data-code")
                     .trim()
                     .takeIf { it.isNotBlank() }
             }
@@ -403,11 +417,12 @@ class OurDramaProvider : MainAPI() {
             return false
         }
 
+        var loaded = false
+
         for (serverCode in serverCodes) {
 
-            try {
-
-                val response = app.post(
+            val response = runCatching {
+                app.post(
                     "$mainUrl/ajax-request",
                     data = mapOf(
                         "action" to "iframe_server",
@@ -416,58 +431,53 @@ class OurDramaProvider : MainAPI() {
                     headers = mapOf(
                         "X-CSRF-TOKEN" to csrfToken,
                         "X-Requested-With" to "XMLHttpRequest",
-                        "Content-Type" to
-                            "application/x-www-form-urlencoded; charset=UTF-8"
+                        "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8"
                     ),
                     referer = episodeUrl
                 )
+            }.getOrNull() ?: continue
 
-                val json = runCatching {
-                    org.json.JSONObject(response.text)
-                }.getOrNull() ?: continue
+            val json = runCatching {
+                JSONObject(response.text)
+            }.getOrNull() ?: continue
 
-                if (!json.optBoolean("status", false)) {
-                    continue
-                }
-
-                val codePlay = json.optString(
-                    "codeplay"
-                )
-                    .trim()
-
-                if (codePlay.isBlank()) {
-                    continue
-                }
-
-                val iframeUrls = extractIframeUrls(
-                    codePlay
-                )
-
-                if (iframeUrls.isEmpty()) {
-                    continue
-                }
-
-                for (iframeUrl in iframeUrls) {
-
-                    val result = runCatching {
-                        loadExtractor(
-                            iframeUrl,
-                            episodeUrl,
-                            subtitleCallback
-                        ) { link ->
-                            println("OURDRAMA EXTRACTOR LINK: $link")
-                            callback(link)
-                        }
-                    }.getOrDefault(false)
-
-                    println("OURDRAMA EXTRACTOR RESULT: $result")
-                }
-
-            } catch (_: Exception) {
+            if (!json.optBoolean("status", false)) {
                 continue
+            }
+
+            val codePlay = json
+                .optString("codeplay")
+                .trim()
+
+            if (codePlay.isBlank()) {
+                continue
+            }
+
+            val iframeUrls = extractIframeUrls(
+                codePlay
+            )
+
+            if (iframeUrls.isEmpty()) {
+                continue
+            }
+
+            for (iframeUrl in iframeUrls) {
+
+                val result = runCatching {
+                    loadExtractor(
+                        iframeUrl,
+                        episodeUrl,
+                        subtitleCallback,
+                        callback
+                    )
+                }.getOrDefault(false)
+
+                if (result) {
+                    loaded = true
+                }
             }
         }
 
-        return false
+        return loaded
     }
 }
