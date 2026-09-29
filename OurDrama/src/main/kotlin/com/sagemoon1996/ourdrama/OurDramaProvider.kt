@@ -11,9 +11,7 @@ import java.net.URLEncoder
 class OurDramaProvider : MainAPI() {
 
     override var mainUrl = "https://s.ourdrama.pro"
-
     override var name = "OurDrama"
-
     override var lang = "ar"
 
     override val hasMainPage = true
@@ -302,7 +300,7 @@ class OurDramaProvider : MainAPI() {
 
                 val episode =
                     Regex(
-                        """(?:الحلقة|episode)[^\d]*(\d+)""",
+                        """(?:الحلقة|episode|ep)[^\d]*(\d+)""",
                         RegexOption.IGNORE_CASE
                     )
                         .find(episodeText)
@@ -404,7 +402,7 @@ class OurDramaProvider : MainAPI() {
             ),
 
             Regex(
-                """csrf-token["']?\s*[:=]\s*["']([^"']+)["']""",
+                """csrf-token['"]?\s*[:=]\s*['"]([^'"]+)['"]""",
                 RegexOption.IGNORE_CASE
             )
         )
@@ -503,19 +501,16 @@ class OurDramaProvider : MainAPI() {
 
                 app.post(
                     "$mainUrl/ajax-request",
-
                     data = mapOf(
                         "action" to "iframe_server",
                         "code" to serverCode
                     ),
-
                     headers = mapOf(
                         "X-CSRF-TOKEN" to csrfToken,
                         "X-Requested-With" to "XMLHttpRequest",
                         "Content-Type" to
                             "application/x-www-form-urlencoded; charset=UTF-8"
                     ),
-
                     referer = episodeUrl
                 )
 
@@ -575,7 +570,8 @@ class OurDramaProvider : MainAPI() {
 
                 val hlsUrl = runCatching {
                     extractHlsFromEmbed(
-                        iframeUrl
+                        iframeUrl,
+                        episodeUrl
                     )
                 }.getOrNull()
 
@@ -603,118 +599,108 @@ class OurDramaProvider : MainAPI() {
     }
 
     private suspend fun extractHlsFromEmbed(
-        iframeUrl: String
+        iframeUrl: String,
+        episodeUrl: String
     ): String? {
 
         val response = app.get(
             iframeUrl,
-            referer = "$mainUrl/"
+            referer = episodeUrl
         )
 
-        val iframeHtml = response.text
+        val html = response.text
 
-        if (iframeHtml.isBlank()) {
+        if (html.isBlank()) {
             return null
         }
 
-        val iframeDocument = Jsoup.parse(
-            iframeHtml
-        )
-
         /*
-         * أولاً نحاول CloudStream decoder.
-         *
-         * إذا كان P.A.C.K.E.R. مطابقاً للـregex
-         * الرسمي، هذا يكفي.
+         * المحاولة الأولى:
+         * decoder الرسمي الموجود في CloudStream.
          */
-        val cloudStreamUnpacked = runCatching {
-            getAndUnpack(iframeHtml)
-        }.getOrDefault(iframeHtml)
+        val officialUnpacked = runCatching {
+            getAndUnpack(html)
+        }.getOrDefault(html)
 
-        val cloudStreamHls3 = extractHlsUrl(
-            cloudStreamUnpacked,
+        extractHlsUrl(
+            officialUnpacked,
             "hls3"
-        )
-
-        if (cloudStreamHls3 != null) {
-            return cloudStreamHls3
+        )?.let {
+            return it
         }
 
-        val cloudStreamHls2 = extractHlsUrl(
-            cloudStreamUnpacked,
+        extractHlsUrl(
+            officialUnpacked,
             "hls2"
-        )
-
-        if (cloudStreamHls2 != null) {
-            return cloudStreamHls2
+        )?.let {
+            return it
         }
 
         /*
-         * Fallback للـP.A.C.K.E.R. الخاص بـOurDrama.
-         *
-         * لا نعتمد على وجود riverstonelearninghub فقط،
-         * لأن وجود العلامة قد يتغير بينما بنية Packer تبقى.
+         * المحاولة الثانية:
+         * manual P.A.C.K.E.R.
          */
-        val scripts = iframeDocument
+        val document = Jsoup.parse(html)
+
+        val scripts = document
             .select("script")
             .map {
                 it.data()
             }
             .filter {
-                it.contains(
-                    "eval(function(p,a,c,k,e,d)"
-                ) ||
-                    it.contains(
-                        "eval(function(p,a,c,k,e,d)"
-                    ) ||
-                    it.contains(
-                        "riverstonelearninghub"
-                    )
+                it.isNotBlank()
             }
 
         for (script in scripts) {
+
+            if (
+                !script.contains(
+                    "eval",
+                    ignoreCase = true
+                )
+            ) {
+                continue
+            }
 
             val unpacked = unpackPacker(
                 script
             ) ?: continue
 
-            val hls3 = extractHlsUrl(
+            extractHlsUrl(
                 unpacked,
                 "hls3"
-            )
-
-            if (hls3 != null) {
-                return hls3
+            )?.let {
+                return it
             }
 
-            val hls2 = extractHlsUrl(
+            extractHlsUrl(
                 unpacked,
                 "hls2"
-            )
-
-            if (hls2 != null) {
-                return hls2
+            )?.let {
+                return it
             }
         }
 
         /*
-         * Fallback أخير:
-         * بعض الصفحات قد تحتوي النص المفكوك داخل HTML
-         * حتى إذا لم نلقاو script بالشكل المتوقع.
+         * المحاولة الثالثة:
+         * أحياناً يكون الرابط موجوداً أصلاً
+         * في HTML بدون packing.
          */
-        val directHls3 = extractHlsUrl(
-            iframeHtml,
+        extractHlsUrl(
+            html,
             "hls3"
-        )
-
-        if (directHls3 != null) {
-            return directHls3
+        )?.let {
+            return it
         }
 
-        return extractHlsUrl(
-            iframeHtml,
+        extractHlsUrl(
+            html,
             "hls2"
-        )
+        )?.let {
+            return it
+        }
+
+        return null
     }
 
     private fun extractHlsUrl(
@@ -722,22 +708,34 @@ class OurDramaProvider : MainAPI() {
         key: String
     ): String? {
 
+        val escapedKey = Regex.escape(key)
+
         val patterns = listOf(
 
             Regex(
-                """["']${Regex.escape(key)}["']\s*:\s*["']([^"']+)["']""",
+                """["']$escapedKey["']\s*:\s*["']((?:\\.|[^"'\\])*)["']""",
                 RegexOption.IGNORE_CASE
             ),
 
             Regex(
-                """\b${Regex.escape(key)}\b\s*:\s*["']([^"']+)["']""",
+                """\b$escapedKey\b\s*:\s*["']((?:\\.|[^"'\\])*)["']""",
+                RegexOption.IGNORE_CASE
+            ),
+
+            Regex(
+                """\b$escapedKey\b\s*=\s*["']((?:\\.|[^"'\\])*)["']""",
+                RegexOption.IGNORE_CASE
+            ),
+
+            Regex(
+                """\b(?:links|sources|video|player)\s*\.\s*$escapedKey\s*=\s*["']((?:\\.|[^"'\\])*)["']""",
                 RegexOption.IGNORE_CASE
             )
         )
 
         for (pattern in patterns) {
 
-            val value = pattern
+            val raw = pattern
                 .find(content)
                 ?.groupValues
                 ?.getOrNull(1)
@@ -745,12 +743,14 @@ class OurDramaProvider : MainAPI() {
                 ?: continue
 
             val decoded = decodeJsString(
-                value
-            ).trim()
+                raw
+            )
+                .trim()
+                .trim('"', '\'')
 
             if (
-                decoded.startsWith("http://") ||
-                decoded.startsWith("https://")
+                decoded.startsWith("https://") ||
+                decoded.startsWith("http://")
             ) {
                 return decoded
             }
@@ -764,131 +764,141 @@ class OurDramaProvider : MainAPI() {
     ): String? {
 
         /*
-         * الشكل القياسي لـ Dean Edwards P.A.C.K.E.R.:
+         * Dean Edwards P.A.C.K.E.R.
          *
-         * eval(function(p,a,c,k,e,d){...}(
-         *   'packed',
-         *   base,
-         *   count,
-         *   'dictionary'.split('|'),
-         *   0,
-         *   {}
-         * ))
-         *
-         * نستخرج فقط الـ4 قيم التي نحتاجها.
+         * نحاول أكثر من شكل لأن المسافات والتنسيق
+         * ينجموا يتبدلوا بدون ما تتبدل البنية.
          */
 
-        val match = Regex(
-            """eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*d\s*\)\s*\{[\s\S]*?\}\s*\(\s*(['"])([\s\S]*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])([\s\S]*?)\5\s*\.\s*split\s*\(\s*['"]\|['"]\s*\)""",
-            setOf(
+        val patterns = listOf(
+
+            Regex(
+                """eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*d\s*\)\s*\{[\s\S]*?\}\s*\(\s*(['"])([\s\S]*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])([\s\S]*?)\5\s*\.\s*split\s*\(\s*['"]\|['"]\s*\)""",
+                RegexOption.IGNORE_CASE
+            ),
+
+            Regex(
+                """eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*d\s*\)[\s\S]*?\(\s*(['"])([\s\S]*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])([\s\S]*?)\5\s*\.\s*split\s*\(\s*['"]\|['"]\s*\)""",
                 RegexOption.IGNORE_CASE
             )
         )
-            .find(script)
-            ?: return null
 
-        val packed = match
-            .groupValues
-            .getOrNull(2)
-            ?: return null
+        for (pattern in patterns) {
 
-        val base = match
-            .groupValues
-            .getOrNull(3)
-            ?.toIntOrNull()
-            ?: return null
+            val match = pattern
+                .find(script)
+                ?: continue
 
-        val count = match
-            .groupValues
-            .getOrNull(4)
-            ?.toIntOrNull()
-            ?: return null
+            val packed = match
+                .groupValues
+                .getOrNull(2)
+                ?: continue
 
-        val dictionaryRaw = match
-            .groupValues
-            .getOrNull(6)
-            ?: return null
+            val base = match
+                .groupValues
+                .getOrNull(3)
+                ?.toIntOrNull()
+                ?: continue
 
-        if (
-            base <= 1 ||
-            count <= 0
-        ) {
-            return null
-        }
+            val count = match
+                .groupValues
+                .getOrNull(4)
+                ?.toIntOrNull()
+                ?: continue
 
-        val dictionary = decodeJsString(
-            dictionaryRaw
-        ).split("|")
+            val dictionaryRaw = match
+                .groupValues
+                .getOrNull(6)
+                ?: continue
 
-        var unpacked = decodeJsString(
-            packed
-        )
-
-        /*
-         * P.A.C.K.E.R. يستعمل:
-         *
-         * while(c--)
-         *     if(k[c])
-         *         p = p.replace(
-         *             new RegExp("\\b" + e(c) + "\\b","g"),
-         *             k[c]
-         *         );
-         */
-
-        for (index in count - 1 downTo 0) {
-
-            if (index >= dictionary.size) {
+            if (
+                base < 2 ||
+                count <= 0
+            ) {
                 continue
             }
 
-            val word = dictionary[index]
+            val dictionary = decodeJsString(
+                dictionaryRaw
+            ).split("|")
 
-            if (word.isEmpty()) {
-                continue
+            var unpacked = decodeJsString(
+                packed
+            )
+
+            for (index in count - 1 downTo 0) {
+
+                if (
+                    index >= dictionary.size
+                ) {
+                    continue
+                }
+
+                val word = dictionary[index]
+
+                if (word.isEmpty()) {
+                    continue
+                }
+
+                val token = encodeBase(
+                    index,
+                    base
+                )
+
+                unpacked = unpacked.replace(
+                    Regex(
+                        """\b${Regex.escape(token)}\b"""
+                    ),
+                    word
+                )
             }
 
-            val token = toBase(
-                index,
-                base
-            )
-
-            unpacked = unpacked.replace(
-                Regex(
-                    """\b${Regex.escape(token)}\b"""
-                ),
-                word
-            )
+            if (
+                unpacked.contains(
+                    "hls3",
+                    ignoreCase = true
+                ) ||
+                unpacked.contains(
+                    "hls2",
+                    ignoreCase = true
+                )
+            ) {
+                return unpacked
+            }
         }
 
-        return unpacked
+        return null
     }
 
-    private fun toBase(
+    private fun encodeBase(
         value: Int,
         base: Int
     ): String {
 
-        if (value == 0) {
-            return "0"
-        }
-
-        val chars =
+        val alphabet =
             "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
         if (
+            value == 0
+        ) {
+            return "0"
+        }
+
+        if (
             base < 2 ||
-            base > chars.length
+            base > alphabet.length
         ) {
             return value.toString()
         }
 
         var number = value
+
         val result = StringBuilder()
 
         while (number > 0) {
 
             result.append(
-                chars[number % base]
+                alphabet[number % base]
             )
 
             number /= base
@@ -908,7 +918,6 @@ class OurDramaProvider : MainAPI() {
         result = result
             .replace("\\'", "'")
             .replace("\\\"", "\"")
-            .replace("\\\\", "\\")
             .replace("\\/", "/")
             .replace("\\n", "\n")
             .replace("\\r", "\r")
@@ -918,9 +927,12 @@ class OurDramaProvider : MainAPI() {
             """\\u([0-9a-fA-F]{4})"""
         ).replace(result) { match ->
 
-            match
-                .groupValues[1]
-                .toIntOrNull(16)
+            val number = match
+                .groupValues
+                .getOrNull(1)
+                ?.toIntOrNull(16)
+
+            number
                 ?.toChar()
                 ?.toString()
                 ?: match.value
@@ -930,13 +942,19 @@ class OurDramaProvider : MainAPI() {
             """\\x([0-9a-fA-F]{2})"""
         ).replace(result) { match ->
 
-            match
-                .groupValues[1]
-                .toIntOrNull(16)
+            val number = match
+                .groupValues
+                .getOrNull(1)
+                ?.toIntOrNull(16)
+
+            number
                 ?.toChar()
                 ?.toString()
                 ?: match.value
         }
+
+        result = result
+            .replace("\\\\", "\\")
 
         return result
     }
