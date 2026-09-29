@@ -299,13 +299,6 @@ class OurDramaProvider : MainAPI() {
         return null
     }
 
-    /*
-     * OurDrama puts the CSRF token in the page JavaScript:
-     *
-     * X-CSRF-TOKEN: 'TOKEN'
-     *
-     * It is not necessary to depend on a meta tag.
-     */
     private fun extractCsrfToken(
         document: Document
     ): String? {
@@ -406,13 +399,6 @@ class OurDramaProvider : MainAPI() {
 
             try {
 
-                /*
-                 * This is the exact request used by OurDrama:
-                 *
-                 * POST /ajax-request
-                 * action=iframe_server
-                 * code=<data-code>
-                 */
                 val response = app.post(
                     "$mainUrl/ajax-request",
                     data = mapOf(
@@ -455,30 +441,21 @@ class OurDramaProvider : MainAPI() {
 
                 for (iframeUrl in iframeUrls) {
 
-                    val loaded = runCatching {
+                    val result = runCatching {
                         loadExtractor(
                             iframeUrl,
                             episodeUrl,
                             subtitleCallback
                         ) { link ->
+                            println("OURDRAMA EXTRACTOR LINK: $link")
                             callback(link)
                         }
                     }.getOrDefault(false)
 
-                    /*
-                     * loadExtractor() found an extractor.
-                     * We stop here; the extractor itself is
-                     * responsible for obtaining the real stream.
-                     */
-                    if (loaded) {
-                        return true
-                    }
+                    println("OURDRAMA EXTRACTOR RESULT: $result")
                 }
 
             } catch (_: Exception) {
-                /*
-                 * If one server fails, try the next server.
-                 */
                 continue
             }
         }
