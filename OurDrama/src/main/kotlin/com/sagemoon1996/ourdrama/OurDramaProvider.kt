@@ -335,6 +335,18 @@ class OurDramaProvider : MainAPI() {
         document: Document
     ): String? {
 
+        val metaToken = document
+            .selectFirst(
+                "meta[name='csrf-token'], meta[name='csrf_token']"
+            )
+            ?.attr("content")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+
+        if (metaToken != null) {
+            return metaToken
+        }
+
         val html = document.html()
 
         val patterns = listOf(
@@ -346,6 +358,10 @@ class OurDramaProvider : MainAPI() {
             ),
             Regex(
                 """X-CSRF-TOKEN\s*=\s*['"]([^'"]+)['"]"""
+            ),
+            Regex(
+                """csrfToken\s*[:=]\s*['"]([^'"]+)['"]""",
+                RegexOption.IGNORE_CASE
             )
         )
 
@@ -475,7 +491,8 @@ class OurDramaProvider : MainAPI() {
 
                 val hlsUrl = runCatching {
                     extractHlsFromEmbed(
-                        iframeUrl
+                        iframeUrl,
+                        episodeUrl
                     )
                 }.getOrNull()
 
@@ -503,162 +520,104 @@ class OurDramaProvider : MainAPI() {
     }
 
     private suspend fun extractHlsFromEmbed(
-        iframeUrl: String
+        iframeUrl: String,
+        episodeUrl: String
     ): String? {
 
-        val iframeDocument = app.get(
+        val iframeResponse = app.get(
             iframeUrl,
-            referer = "$mainUrl/"
-        ).document
-
-        val packedScript = iframeDocument
-            .select("script")
-            .map { it.data() }
-            .firstOrNull { script ->
-
-                script.contains(
-                    "riverstonelearninghub"
-                ) &&
-                    script.contains(
-                        "eval(function(p,a,c,k,e,d)"
-                    )
-            }
-            ?: return null
-
-        val unpacked = unpackPacker(
-            packedScript
+            referer = episodeUrl
         )
-            ?: return null
+
+        val iframeHtml = iframeResponse.text
+
+        if (iframeHtml.isBlank()) {
+            return null
+        }
 
         /*
-         * The player uses:
+         * CloudStream's own P.A.C.K.E.R. decoder.
          *
-         * links.hls4 || links.hls3 || links.hls2
-         *
-         * hls4 is currently absent, so hls3 is preferred,
-         * with hls2 as fallback.
+         * If the iframe contains packed JavaScript,
+         * getAndUnpack() returns the unpacked JavaScript.
+         * If it is not packed, it safely returns the
+         * original content.
          */
-        val hls3 = Regex(
-            """["']hls3["']\s*:\s*["']([^"']+)["']"""
+        val unpacked = getAndUnpack(
+            iframeHtml
         )
-            .find(unpacked)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.trim()
-            ?.takeIf { it.isNotBlank() }
+
+        val hls3 = extractHlsUrl(
+            unpacked,
+            "hls3"
+        )
 
         if (hls3 != null) {
             return hls3
         }
 
-        return Regex(
-            """["']hls2["']\s*:\s*["']([^"']+)["']"""
+        return extractHlsUrl(
+            unpacked,
+            "hls2"
         )
-            .find(unpacked)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.trim()
-            ?.takeIf { it.isNotBlank() }
     }
 
-    private fun unpackPacker(
-        script: String
+    private fun extractHlsUrl(
+        content: String,
+        key: String
     ): String? {
 
-        /*
-         * Expected structure:
-         *
-         * eval(function(p,a,c,k,e,d){...}(
-         *     'PACKED',
-         *     36,
-         *     483,
-         *     'DICTIONARY'.split('|')
-         * ))
-         *
-         * The actual OurDrama player uses base 36.
-         */
-
-        val match = Regex(
-            """eval\(function\(p,a,c,k,e,d\)\{[\s\S]*?\}\(\s*(['"])([\s\S]*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])([\s\S]*?)\5\.split\(\s*['"]\|['"]\s*\)"""
-        ).find(script)
-            ?: return null
-
-        val packed = match
-            .groupValues
-            .getOrNull(2)
-            ?: return null
-
-        val base = match
-            .groupValues
-            .getOrNull(3)
-            ?.toIntOrNull()
-            ?: return null
-
-        val count = match
-            .groupValues
-            .getOrNull(4)
-            ?.toIntOrNull()
-            ?: return null
-
-        val dictionaryRaw = match
-            .groupValues
-            .getOrNull(6)
-            ?: return null
-
-        if (base <= 1 || count <= 0) {
-            return null
-        }
-
-        val dictionary = decodeJsString(
-            dictionaryRaw
-        ).split("|")
-
-        var unpacked = decodeJsString(
-            packed
+        val patterns = listOf(
+            Regex(
+                """["']${Regex.escape(key)}["']\s*:\s*["']([^"']+)["']""",
+                RegexOption.IGNORE_CASE
+            ),
+            Regex(
+                """\b${Regex.escape(key)}\b\s*:\s*["']([^"']+)["']""",
+                RegexOption.IGNORE_CASE
+            )
         )
 
-        /*
-         * P.A.C.K.E.R. replaces dictionary indexes in
-         * descending order. This is important because the
-         * dictionary itself can contain tokens which would
-         * otherwise be replaced too early.
-         */
-        for (index in count - 1 downTo 0) {
+        for (pattern in patterns) {
 
-            if (index >= dictionary.size) {
-                continue
-            }
+            val value = pattern
+                .find(content)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.trim()
+                ?: continue
 
-            val word = dictionary[index]
-
-            if (word.isEmpty()) {
-                continue
-            }
-
-            val token = index.toString(base)
-
-            unpacked = unpacked.replace(
-                Regex(
-                    """\b${Regex.escape(token)}\b"""
-                ),
-                word
+            val decoded = decodeJsUrl(
+                value
             )
+
+            if (
+                decoded.startsWith("http://") ||
+                decoded.startsWith("https://")
+            ) {
+                return decoded
+            }
         }
 
-        return unpacked
+        return null
     }
 
-    private fun decodeJsString(
+    private fun decodeJsUrl(
         value: String
     ): String {
 
         return value
-            .replace("\\'", "'")
-            .replace("\\\"", "\"")
             .replace("\\/", "/")
-            .replace("\\n", "\n")
-            .replace("\\r", "\r")
-            .replace("\\t", "\t")
-            .replace("\\\\", "\\")
+            .replace("\\u002F", "/")
+            .replace("\\u002f", "/")
+            .replace("\\u003A", ":")
+            .replace("\\u003a", ":")
+            .replace("\\u003F", "?")
+            .replace("\\u003f", "?")
+            .replace("\\u003D", "=")
+            .replace("\\u003d", "=")
+            .replace("\\u0026", "&")
+            .replace("\\u0026", "&")
+            .trim()
     }
 }
