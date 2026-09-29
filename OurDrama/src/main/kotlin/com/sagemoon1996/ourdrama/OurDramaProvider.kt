@@ -3,6 +3,7 @@ package com.sagemoon1996.ourdrama
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.json.JSONObject
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
@@ -57,33 +58,21 @@ class OurDramaProvider : MainAPI() {
         return null
     }
 
-    private fun parseResults(
-        document: Document
-    ): List<SearchResponse> {
-
+    private fun parseResults(document: Document): List<SearchResponse> {
         return document.select("article.post-movie")
             .mapNotNull { article ->
-
                 val link = article.selectFirst("h4 a[href]")
                     ?: return@mapNotNull null
 
-                val title = link.text()
-                    .trim()
-                    .takeIf { it.isNotBlank() }
+                val title = link.text().trim().takeIf { it.isNotBlank() }
                     ?: return@mapNotNull null
 
-                val href = link.attr("href")
-                    .trim()
-                    .takeIf { it.isNotBlank() }
+                val href = link.attr("href").trim().takeIf { it.isNotBlank() }
                     ?: return@mapNotNull null
 
                 val poster = extractPoster(article)
 
-                newTvSeriesSearchResponse(
-                    title,
-                    href,
-                    TvType.TvSeries
-                ) {
+                newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
                     posterUrl = poster
                 }
             }
@@ -94,16 +83,13 @@ class OurDramaProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-
         val baseUrl = request.data.trimEnd('/')
+        val url = if (page == 1) baseUrl else "$baseUrl?page=$page"
 
-        val url = if (page == 1) {
-            baseUrl
-        } else {
-            "$baseUrl?page=$page"
-        }
-
-        val document = app.get(url).document
+        val document = app.get(
+            url,
+            referer = "$mainUrl/"
+        ).document
 
         return newHomePageResponse(
             request.name,
@@ -111,41 +97,31 @@ class OurDramaProvider : MainAPI() {
         )
     }
 
-    override suspend fun search(
-        query: String
-    ): List<SearchResponse> {
-
+    override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
 
         val document = app.post(
             "$mainUrl/searchq",
-            data = mapOf(
-                "searchq" to query
-            ),
+            data = mapOf("searchq" to query),
             headers = mapOf(
-                "Content-Type" to
-                    "application/x-www-form-urlencoded"
+                "Content-Type" to "application/x-www-form-urlencoded"
             ),
             referer = "$mainUrl/"
         ).document
 
-        return parseResults(document)
-            .ifEmpty {
-                runCatching {
-                    parseResults(
-                        app.get(
-                            "$mainUrl/searchq?searchq=$encodedQuery",
-                            referer = "$mainUrl/"
-                        ).document
-                    )
-                }.getOrDefault(emptyList())
-            }
+        return parseResults(document).ifEmpty {
+            runCatching {
+                parseResults(
+                    app.get(
+                        "$mainUrl/searchq?searchq=$encodedQuery",
+                        referer = "$mainUrl/"
+                    ).document
+                )
+            }.getOrDefault(emptyList())
+        }
     }
 
-    override suspend fun load(
-        url: String
-    ): LoadResponse? {
-
+    override suspend fun load(url: String): LoadResponse? {
         val document = app.get(url).document
 
         val title = document.selectFirst(
@@ -168,7 +144,6 @@ class OurDramaProvider : MainAPI() {
             ?: document.selectFirst(
                 "img[data-src], img[data-lazy-src], img[src]"
             )?.let {
-
                 val dataSrc = it.attr("data-src").trim()
 
                 when {
@@ -182,7 +157,8 @@ class OurDramaProvider : MainAPI() {
                     it.attr("src")
                         .trim()
                         .startsWith("http") &&
-                        !it.attr("src").contains("/images/pixel.gif") ->
+                        !it.attr("src")
+                            .contains("/images/pixel.gif") ->
                         it.attr("src").trim()
 
                     else -> null
@@ -191,20 +167,16 @@ class OurDramaProvider : MainAPI() {
 
         val plot = document.selectFirst(
             "meta[name='description'], meta[property='og:description']"
-        )?.attr("content")
-            ?.trim()
+        )?.attr("content")?.trim()
 
         val year = document.selectFirst(
             ".post-date"
-        )?.text()
-            ?.trim()
-            ?.toIntOrNull()
+        )?.text()?.trim()?.toIntOrNull()
 
         val episodes = document.select(
             "a[href*='/episode/']"
         )
             .mapNotNull { link ->
-
                 val episodeUrl = link.attr("href")
                     .trim()
                     .takeIf { it.isNotBlank() }
@@ -221,22 +193,22 @@ class OurDramaProvider : MainAPI() {
                         ?.groupValues
                         ?.getOrNull(1)
                         ?.toIntOrNull()
-                        ?: Regex(
-                            """(?:الحلقة|episode)[^\d]*(\d+)""",
-                            RegexOption.IGNORE_CASE
-                        )
-                            .find(episodeUrl)
-                            ?.groupValues
-                            ?.getOrNull(1)
-                            ?.toIntOrNull()
-                        ?: Regex(
-                            """-(\d+)(?:/)?$"""
-                        )
-                            .find(episodeUrl)
-                            ?.groupValues
-                            ?.getOrNull(1)
-                            ?.toIntOrNull()
-                        ?: return@mapNotNull null
+                    ?: Regex(
+                        """(?:الحلقة|episode)[^\d]*(\d+)""",
+                        RegexOption.IGNORE_CASE
+                    )
+                        .find(episodeUrl)
+                        ?.groupValues
+                        ?.getOrNull(1)
+                        ?.toIntOrNull()
+                    ?: Regex(
+                        """-(\d+)(?:/)?$"""
+                    )
+                        .find(episodeUrl)
+                        ?.groupValues
+                        ?.getOrNull(1)
+                        ?.toIntOrNull()
+                    ?: return@mapNotNull null
 
                 val season =
                     Regex(
@@ -247,29 +219,31 @@ class OurDramaProvider : MainAPI() {
                         ?.groupValues
                         ?.getOrNull(1)
                         ?.toIntOrNull()
-                        ?: Regex(
-                            """/season-(\d+)/""",
-                            RegexOption.IGNORE_CASE
-                        )
-                            .find(episodeUrl)
-                            ?.groupValues
-                            ?.getOrNull(1)
-                            ?.toIntOrNull()
-                        ?: 1
+                    ?: Regex(
+                        """/season-(\d+)/""",
+                        RegexOption.IGNORE_CASE
+                    )
+                        .find(episodeUrl)
+                        ?.groupValues
+                        ?.getOrNull(1)
+                        ?.toIntOrNull()
+                    ?: 1
 
                 newEpisode(episodeUrl) {
                     name = episodeText.ifBlank {
                         "Episode $episodeNumber"
                     }
-
                     this.season = season
                     this.episode = episodeNumber
                 }
             }
             .distinctBy { it.data }
             .sortedWith(
-                compareBy<Episode> { it.season ?: 1 }
-                    .thenBy { it.episode ?: 0 }
+                compareBy<Episode> {
+                    it.season ?: 1
+                }.thenBy {
+                    it.episode ?: 0
+                }
             )
 
         return newTvSeriesLoadResponse(
@@ -287,7 +261,6 @@ class OurDramaProvider : MainAPI() {
     private fun extractCsrfToken(
         document: Document
     ): String? {
-
         document.selectFirst(
             "meta[name='csrf-token']"
         )?.attr("content")
@@ -321,15 +294,12 @@ class OurDramaProvider : MainAPI() {
     private fun extractIframeUrls(
         codePlay: String
     ): List<String> {
-
-        val document = org.jsoup.Jsoup
-            .parseBodyFragment(codePlay)
+        val document = Jsoup.parseBodyFragment(codePlay)
 
         return document.select(
             "iframe[src], iframe[data-src]"
         )
             .mapNotNull { iframe ->
-
                 val src = iframe.attr("src")
                     .ifBlank {
                         iframe.attr("data-src")
@@ -346,38 +316,12 @@ class OurDramaProvider : MainAPI() {
             .distinct()
     }
 
-    /*
-     * Extract a directly exposed HLS master URL from the player HTML.
-     *
-     * The browser evidence proves that the actual player ultimately uses:
-     *
-     * https://.../hls3/.../master.txt
-     *
-     * The complete host/path is dynamic, so nothing is hardcoded here.
-     */
-    private fun extractHlsUrl(
-        html: String
-    ): String? {
-
-        val normalized = html
-            .replace("\\/", "/")
-            .replace("\\u002F", "/")
-
-        return Regex(
-            """https?://[^"'\\\s<>]+/hls3/[^"'\\\s<>]+/master\.txt"""
-        )
-            .find(normalized)
-            ?.value
-            ?.trim()
-    }
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-
         val episodeUrl = data
 
         val episodeDocument = app.get(
@@ -385,15 +329,14 @@ class OurDramaProvider : MainAPI() {
             referer = "$mainUrl/"
         ).document
 
-        val csrfToken = extractCsrfToken(
-            episodeDocument
-        ) ?: return false
+        val csrfToken =
+            extractCsrfToken(episodeDocument)
+                ?: return false
 
         val serverCodes = episodeDocument.select(
             ".server-list-menu .getplay a[data-code]"
         )
             .mapNotNull { server ->
-
                 val code = server.attr("data-code")
                     .trim()
                     .takeIf { it.isNotBlank() }
@@ -409,16 +352,13 @@ class OurDramaProvider : MainAPI() {
             .distinctBy { it.second }
             .sortedBy { it.first }
 
-        if (serverCodes.isEmpty()) {
-            return false
-        }
+        if (serverCodes.isEmpty()) return false
 
         var loaded = false
+        var callbackCount = 0
 
         for ((_, serverCode) in serverCodes) {
-
             try {
-
                 val response = app.post(
                     "$mainUrl/ajax-request",
                     data = mapOf(
@@ -434,7 +374,19 @@ class OurDramaProvider : MainAPI() {
                     referer = episodeUrl
                 )
 
-                val json = JSONObject(response.text)
+                val responseText = response.text
+
+                println(
+                    "OURDRAMA AJAX RESPONSE: $responseText"
+                )
+
+                val json = runCatching {
+                    JSONObject(responseText)
+                }.getOrElse {
+                    throw ErrorLoadingException(
+                        "OurDrama: AJAX response is not JSON"
+                    )
+                }
 
                 if (!json.optBoolean("status", false)) {
                     continue
@@ -442,48 +394,56 @@ class OurDramaProvider : MainAPI() {
 
                 val codePlay = json.optString(
                     "codeplay"
+                ).takeIf {
+                    it.isNotBlank()
+                } ?: throw ErrorLoadingException(
+                    "OurDrama: AJAX has no codeplay"
                 )
-                    .takeIf { it.isNotBlank() }
-                    ?: continue
 
-                val iframeUrl = extractIframeUrls(
+                val iframeUrls = extractIframeUrls(
                     codePlay
                 )
-                    .firstOrNull {
-                        it.contains("ourdrama.cc/v/")
+
+                if (iframeUrls.isEmpty()) {
+                    throw ErrorLoadingException(
+                        "OurDrama: codeplay has no iframe"
+                    )
+                }
+
+                for (iframeUrl in iframeUrls) {
+                    val extractorLoaded = loadExtractor(
+                        iframeUrl,
+                        episodeUrl,
+                        subtitleCallback
+                    ) { link ->
+                        callbackCount++
+                        callback(link)
                     }
-                    ?: continue
 
-                val playerResponse = app.get(
-                    iframeUrl,
-                    referer = episodeUrl
-                )
+                    if (!extractorLoaded) continue
 
-                val hlsUrl = extractHlsUrl(
-                    playerResponse.text
-                )
-                    ?: continue
+                    loaded = true
+                }
 
-                callback(
-                    newExtractorLink(
-                        source = name,
-                        name = "OurDrama",
-                        url = hlsUrl,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        referer = iframeUrl
-                        quality = Qualities.P720.value
-                    }
-                )
+                if (loaded) break
 
-                loaded = true
-                break
-
+            } catch (e: ErrorLoadingException) {
+                throw e
             } catch (_: Exception) {
                 continue
             }
         }
 
-        return loaded
+        println(
+            "OURDRAMA CALLBACK COUNT: $callbackCount"
+        )
+
+        if (loaded && callbackCount == 0) {
+            throw ErrorLoadingException(
+                "OurDrama: extractor matched but callback received 0 links"
+            )
+        }
+
+        return callbackCount > 0
     }
 }
