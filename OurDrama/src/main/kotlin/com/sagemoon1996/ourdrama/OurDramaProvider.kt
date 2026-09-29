@@ -352,6 +352,17 @@ class OurDramaProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
+        /*
+         * DIAGNOSTIC TEST ONLY
+         *
+         * This is intentionally the first executable line.
+         * We are testing whether CloudStream actually enters loadLinks().
+         */
+        throw ErrorLoadingException(
+            "OURDRAMA: loadLinks WAS CALLED"
+        )
+
+        /*
         val episodeUrl = data
 
         val episodeDocument = app.get(
@@ -387,6 +398,8 @@ class OurDramaProvider : MainAPI() {
             return false
         }
 
+        var loaded = false
+
         for ((_, serverCode) in serverCodes) {
 
             try {
@@ -408,9 +421,61 @@ class OurDramaProvider : MainAPI() {
 
                 val responseText = response.text
 
-                throw ErrorLoadingException(
-                    "OURDRAMA TEST:\n${responseText.take(1000)}"
+                println(
+                    "OURDRAMA AJAX RESPONSE: $responseText"
                 )
+
+                val json = runCatching {
+                    JSONObject(responseText)
+                }.getOrElse {
+                    throw ErrorLoadingException(
+                        "OurDrama: AJAX response is not JSON"
+                    )
+                }
+
+                if (!json.optBoolean("status", false)) {
+                    continue
+                }
+
+                val codePlay = json.optString(
+                    "codeplay"
+                ).takeIf {
+                    it.isNotBlank()
+                } ?: throw ErrorLoadingException(
+                    "OurDrama: AJAX has no codeplay"
+                )
+
+                val iframeUrls = extractIframeUrls(
+                    codePlay
+                )
+
+                if (iframeUrls.isEmpty()) {
+                    throw ErrorLoadingException(
+                        "OurDrama: codeplay has no iframe"
+                    )
+                }
+
+                for (iframeUrl in iframeUrls) {
+
+                    val extractorLoaded = loadExtractor(
+                        iframeUrl,
+                        episodeUrl,
+                        subtitleCallback,
+                        callback
+                    )
+
+                    if (!extractorLoaded) {
+                        throw ErrorLoadingException(
+                            "OurDrama: no extractor for $iframeUrl"
+                        )
+                    }
+
+                    loaded = true
+                }
+
+                if (loaded) {
+                    break
+                }
 
             } catch (e: ErrorLoadingException) {
                 throw e
@@ -419,6 +484,7 @@ class OurDramaProvider : MainAPI() {
             }
         }
 
-        return false
+        return loaded
+        */
     }
 }
