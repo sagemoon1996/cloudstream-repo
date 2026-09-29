@@ -387,8 +387,6 @@ class OurDramaProvider : MainAPI() {
             return false
         }
 
-        var loaded = false
-
         for ((_, serverCode) in serverCodes) {
 
             try {
@@ -410,61 +408,9 @@ class OurDramaProvider : MainAPI() {
 
                 val responseText = response.text
 
-                println(
-                    "OURDRAMA AJAX RESPONSE: $responseText"
+                throw ErrorLoadingException(
+                    "OURDRAMA TEST:\n${responseText.take(1000)}"
                 )
-
-                val json = runCatching {
-                    JSONObject(responseText)
-                }.getOrElse {
-                    throw ErrorLoadingException(
-                        "OurDrama: AJAX response is not JSON"
-                    )
-                }
-
-                if (!json.optBoolean("status", false)) {
-                    continue
-                }
-
-                val codePlay = json.optString(
-                    "codeplay"
-                ).takeIf {
-                    it.isNotBlank()
-                } ?: throw ErrorLoadingException(
-                    "OurDrama: AJAX has no codeplay"
-                )
-
-                val iframeUrls = extractIframeUrls(
-                    codePlay
-                )
-
-                if (iframeUrls.isEmpty()) {
-                    throw ErrorLoadingException(
-                        "OurDrama: codeplay has no iframe"
-                    )
-                }
-
-                for (iframeUrl in iframeUrls) {
-
-                    val extractorLoaded = loadExtractor(
-                        iframeUrl,
-                        episodeUrl,
-                        subtitleCallback,
-                        callback
-                    )
-
-                    if (!extractorLoaded) {
-                        throw ErrorLoadingException(
-                            "OurDrama: no extractor for $iframeUrl"
-                        )
-                    }
-
-                    loaded = true
-                }
-
-                if (loaded) {
-                    break
-                }
 
             } catch (e: ErrorLoadingException) {
                 throw e
@@ -473,6 +419,6 @@ class OurDramaProvider : MainAPI() {
             }
         }
 
-        return loaded
+        return false
     }
 }
