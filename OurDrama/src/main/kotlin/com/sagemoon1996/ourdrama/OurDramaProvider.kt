@@ -352,17 +352,6 @@ class OurDramaProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
-        /*
-         * DIAGNOSTIC TEST ONLY
-         *
-         * This is intentionally the first executable line.
-         * We are testing whether CloudStream actually enters loadLinks().
-         */
-        throw ErrorLoadingException(
-            "OURDRAMA: loadLinks WAS CALLED"
-        )
-
-        /*
         val episodeUrl = data
 
         val episodeDocument = app.get(
@@ -399,6 +388,7 @@ class OurDramaProvider : MainAPI() {
         }
 
         var loaded = false
+        var callbackCount = 0
 
         for ((_, serverCode) in serverCodes) {
 
@@ -460,14 +450,14 @@ class OurDramaProvider : MainAPI() {
                     val extractorLoaded = loadExtractor(
                         iframeUrl,
                         episodeUrl,
-                        subtitleCallback,
-                        callback
-                    )
+                        subtitleCallback
+                    ) { link ->
+                        callbackCount++
+                        callback(link)
+                    }
 
                     if (!extractorLoaded) {
-                        throw ErrorLoadingException(
-                            "OurDrama: no extractor for $iframeUrl"
-                        )
+                        continue
                     }
 
                     loaded = true
@@ -484,7 +474,16 @@ class OurDramaProvider : MainAPI() {
             }
         }
 
-        return loaded
-        */
+        println(
+            "OURDRAMA CALLBACK COUNT: $callbackCount"
+        )
+
+        if (loaded && callbackCount == 0) {
+            throw ErrorLoadingException(
+                "OurDrama: extractor matched but callback received 0 links"
+            )
+        }
+
+        return callbackCount > 0
     }
 }
