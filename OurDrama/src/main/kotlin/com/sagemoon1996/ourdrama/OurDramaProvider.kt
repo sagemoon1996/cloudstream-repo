@@ -124,8 +124,7 @@ class OurDramaProvider : MainAPI() {
                 "searchq" to query
             ),
             headers = mapOf(
-                "Content-Type" to
-                    "application/x-www-form-urlencoded"
+                "Content-Type" to "application/x-www-form-urlencoded"
             ),
             referer = "$mainUrl/"
         ).document
@@ -325,7 +324,7 @@ class OurDramaProvider : MainAPI() {
 
         val document = Jsoup.parseBodyFragment(codePlay)
 
-        val iframeUrls = document.select(
+        return document.select(
             "iframe[src], iframe[data-src]"
         )
             .mapNotNull { iframe ->
@@ -343,8 +342,7 @@ class OurDramaProvider : MainAPI() {
                     else -> null
                 }
             }
-
-        return iframeUrls.distinct()
+            .distinct()
     }
 
     override suspend fun loadLinks(
@@ -356,12 +354,10 @@ class OurDramaProvider : MainAPI() {
 
         val episodeUrl = data
 
-        val episodeResponse = app.get(
+        val episodeDocument = app.get(
             episodeUrl,
             referer = "$mainUrl/"
-        )
-
-        val episodeDocument = episodeResponse.document
+        ).document
 
         val csrfToken = extractCsrfToken(
             episodeDocument
@@ -395,8 +391,9 @@ class OurDramaProvider : MainAPI() {
 
         for ((_, serverCode) in serverCodes) {
 
-            val response = runCatching {
-                app.post(
+            try {
+
+                val response = app.post(
                     "$mainUrl/ajax-request",
                     data = mapOf(
                         "action" to "iframe_server",
@@ -406,73 +403,69 @@ class OurDramaProvider : MainAPI() {
                         "X-CSRF-TOKEN" to csrfToken,
                         "X-Requested-With" to "XMLHttpRequest",
                         "Content-Type" to
-                            "application/x-www-form-urlencoded; charset=UTF-8",
-                        "Accept" to
-                            "application/json, text/javascript, */*; q=0.01",
-                        "Origin" to mainUrl
+                            "application/x-www-form-urlencoded; charset=UTF-8"
                     ),
                     referer = episodeUrl
                 )
-            }.getOrNull() ?: continue
 
-            val responseText = response.text.trim()
+                val responseText = response.text
 
-            if (responseText.isBlank()) {
-                continue
-            }
+                println(
+                    "OURDRAMA AJAX RESPONSE: $responseText"
+                )
 
-            val json = runCatching {
-                JSONObject(responseText)
-            }.getOrNull() ?: continue
+                val json = runCatching {
+                    JSONObject(responseText)
+                }.getOrNull()
+                    ?: continue
 
-            val status = when (val value = json.opt("status")) {
-                is Boolean -> value
-                is String -> value.equals(
-                    "true",
-                    ignoreCase = true
-                ) || value == "1"
-
-                is Number -> value.toInt() == 1
-                else -> false
-            }
-
-            if (!status) {
-                continue
-            }
-
-            val codePlay = json.optString(
-                "codeplay"
-            )
-                .trim()
-                .takeIf { it.isNotBlank() }
-                ?: continue
-
-            val iframeUrls = extractIframeUrls(
-                codePlay
-            )
-
-            if (iframeUrls.isEmpty()) {
-                continue
-            }
-
-            for (iframeUrl in iframeUrls) {
-
-                val extractorLoaded = runCatching {
-                    loadExtractor(
-                        iframeUrl,
-                        episodeUrl,
-                        subtitleCallback,
-                        callback
-                    )
-                }.getOrDefault(false)
-
-                if (extractorLoaded) {
-                    loaded = true
+                if (!json.optBoolean("status", false)) {
+                    continue
                 }
-            }
 
-            if (loaded) {
-                break
+                val codePlay = json.optString(
+                    "codeplay"
+                ).takeIf {
+                    it.isNotBlank()
+                } ?: continue
+
+                val iframeUrls = extractIframeUrls(
+                    codePlay
+                )
+
+                for (iframeUrl in iframeUrls) {
+
+                    try {
+
+                        val extractorLoaded = loadExtractor(
+                            iframeUrl,
+                            episodeUrl,
+                            subtitleCallback,
+                            callback
+                        )
+
+                        if (!extractorLoaded) {
+                            throw ErrorLoadingException(
+                                "OURDRAMA: No extractor for iframe: $iframeUrl"
+                            )
+                        }
+
+                        loaded = true
+
+                    } catch (e: ErrorLoadingException) {
+                        throw e
+                    } catch (_: Exception) {
+                    }
+                }
+
+                if (loaded) {
+                    break
+                }
+
+            } catch (e: ErrorLoadingException) {
+                throw e
+            } catch (_: Exception) {
+                continue
             }
         }
 
