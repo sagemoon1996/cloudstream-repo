@@ -101,10 +101,10 @@
         "name": "OurDrama"
     },
     {
-        "fileHash": "sha256-f5b1a54f8d0e3bc162ccee0cf0ee6a792e09ddb48a33e74de9dca2e7b255ca01",
+        "fileHash": "sha256-07e8c8ae8642dff6d3859fbc0db429746703f0a2279490c5dd9a6843e565fc0f",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
-        "fileSize": 21677,
+        "fileSize": 23800,
         "status": 1,
         "language": "ar",
         "authors": [
