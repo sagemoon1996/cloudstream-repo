@@ -25,7 +25,7 @@ class TakkiadramaProvider : MainAPI() {
         "$mainUrl/episodes/" to "أحدث الحلقات",
         "$mainUrl/series/" to "المسلسلات",
         "$mainUrl/movies/" to "الأفلام",
-        "$mainUrl/category/البرامج-آسيوية/" to "البرامج الآسيوية"
+        "$mainUrl/category/البرامج-الآسيوية/" to "البرامج الآسيوية"
     )
 
     private fun getPageUrl(
@@ -208,13 +208,15 @@ class TakkiadramaProvider : MainAPI() {
             .get(url)
             .document
 
-        val items = if (
+        val items = when {
             request.data.contains("/newly/") ||
-            request.data.contains("/episodes/")
-        ) {
-            parseHomeEpisodeCards(document)
-        } else {
-            parseDramaCards(document)
+                request.data.contains("/episodes/") -> {
+                parseHomeEpisodeCards(document)
+            }
+
+            else -> {
+                parseDramaCards(document)
+            }
         }
 
         val hasNext = document
@@ -256,42 +258,6 @@ class TakkiadramaProvider : MainAPI() {
             .document
 
         return when {
-
-            url.contains("/episode-") -> {
-
-                val title = document
-                    .selectFirst("h1")
-                    ?.text()
-                    ?.trim()
-                    ?.takeIf { it.isNotBlank() }
-                    ?: document
-                        .selectFirst(".episode-card-title")
-                        ?.text()
-                        ?.trim()
-                        ?.takeIf { it.isNotBlank() }
-                    ?: "حلقة"
-
-                val poster = document
-                    .selectFirst("img[data-img]")
-                    ?.attr("data-img")
-                    ?.takeIf { it.isNotBlank() }
-                    ?: document
-                        .selectFirst("img")
-                        ?.attr("src")
-                        ?.takeIf {
-                            it.isNotBlank() &&
-                                !it.contains("load.gif")
-                        }
-
-                newMovieLoadResponse(
-                    title,
-                    url,
-                    TvType.Movie,
-                    url
-                ) {
-                    posterUrl = poster
-                }
-            }
 
             url.contains("/series/") -> {
 
@@ -376,9 +342,34 @@ class TakkiadramaProvider : MainAPI() {
             }
 
             else -> {
-                throw ErrorLoadingException(
-                    "Unsupported Takkiadrama URL"
-                )
+
+                val title = document
+                    .selectFirst("h1")
+                    ?.text()
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?: "حلقة"
+
+                val poster = document
+                    .selectFirst("img[data-img]")
+                    ?.attr("data-img")
+                    ?.takeIf { it.isNotBlank() }
+                    ?: document
+                        .selectFirst("img")
+                        ?.attr("src")
+                        ?.takeIf {
+                            it.isNotBlank() &&
+                                !it.contains("load.gif")
+                        }
+
+                newMovieLoadResponse(
+                    title,
+                    url,
+                    TvType.Movie,
+                    url
+                ) {
+                    posterUrl = poster
+                }
             }
         }
     }
