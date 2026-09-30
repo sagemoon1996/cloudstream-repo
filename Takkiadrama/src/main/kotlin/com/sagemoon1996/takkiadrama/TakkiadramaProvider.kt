@@ -2,6 +2,9 @@ package com.sagemoon1996.takkiadrama
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -24,7 +27,7 @@ class TakkiadramaProvider : MainAPI() {
         "$mainUrl/newly/" to "المضافة حديثًا",
         "$mainUrl/series/" to "المسلسلات",
         "$mainUrl/movies/" to "الأفلام",
-        "$mainUrl/category/%d8%a7%d9%84%d8%a8%d8%b1%d8%a7%d9%85%d8%ac-%d8%a7%d9%84%d8%b3%d9%8a%d9%88%d9%8a%d8%a9/" to "البرامج الآسيوية"
+        "$mainUrl/category/%d8%a7%d9%84%d8%a8%d8%b1%d8%a7%d9%85%d8%ac-%d8%a7%d9%84%d8%a3%d8%b3%d9%8a%d9%88%d9%8a%d8%a9/" to "البرامج الآسيوية"
     )
 
     private fun getPageUrl(
@@ -250,39 +253,63 @@ class TakkiadramaProvider : MainAPI() {
             .distinctBy { it.url }
     }
 
-    // /newly/: keep only series cards
-    private fun parseNewlySeries(
+    // /newly/ is a mix of episodes + series.
+    // Series cards are kept; episode cards are resolved to their series
+    // through the series link inside the episode page (in parallel).
+    private suspend fun parseNewlySeries(
         document: Document
-    ): List<SearchResponse> {
-        return document
+    ): List<SearchResponse> = coroutineScope {
+        document
             .select(".drama-card")
-            .mapNotNull { card ->
+            .map { card ->
+                async {
+                    val href = card.attr("href").trim()
+                    if (href.isBlank()) return@async null
 
-                val href = card.attr("href").trim()
+                    val poster = getPoster(card)
 
-                if (href.isBlank() || !href.contains("/series/")) {
-                    return@mapNotNull null
-                }
+                    when {
+                        href.contains("/series/") -> {
+                            val title = card
+                                .selectFirst(".drama-title")
+                                ?.text()?.trim()
+                                ?.takeIf { it.isNotBlank() }
+                                ?: card.text().trim()
+                            if (title.isBlank()) return@async null
 
-                val title = card
-                    .selectFirst(".drama-title")
-                    ?.text()
-                    ?.trim()
-                    ?.takeIf { it.isNotBlank() }
-                    ?: card.text().trim()
+                            newTvSeriesSearchResponse(
+                                title, href, TvType.TvSeries
+                            ) { posterUrl = poster }
+                        }
 
-                if (title.isBlank()) return@mapNotNull null
+                        href.contains("/movies/") -> null
 
-                val poster = getPoster(card)
+                        else -> try {
+                            val epDoc = app.get(href).document
+                            // skip the bare /series/ links (menu, breadcrumb)
+                            val link = epDoc
+                                .select("a[href*=\"/series/\"]")
+                                .firstOrNull {
+                                    it.attr("href")
+                                        .substringAfter("/series/")
+                                        .isNotBlank()
+                                } ?: return@async null
 
-                newTvSeriesSearchResponse(
-                    title,
-                    href,
-                    TvType.TvSeries
-                ) {
-                    posterUrl = poster
+                            val seriesUrl = link.attr("href").trim()
+                            val title = link.text().trim()
+                                .ifBlank { card.text().trim() }
+
+                            newTvSeriesSearchResponse(
+                                title, seriesUrl, TvType.TvSeries
+                            ) { posterUrl = poster }
+                        } catch (_: Exception) {
+                            null
+                        }
+                    }
                 }
             }
+            .awaitAll()
+            .filterNotNull()
             .distinctBy { it.url }
     }
 
@@ -291,36 +318,41 @@ class TakkiadramaProvider : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse {
 
-        // /newly/ is a mix of episodes + series, so we scan several
-        // site pages per app page and keep only the series.
         if (request.data.contains("/newly/", ignoreCase = true)) {
-            val perBatch = 4
-            val start = (page - 1) * perBatch + 1
-            val all = ArrayList<SearchResponse>()
-            var hasNext = false
-
-            for (p in start until start + perBatch) {
-                val doc = try {
-                    app.get(getPageUrl(request.data, p)).document
-                } catch (_: Exception) {
-                    hasNext = false
-                    break
-                }
-
-                all += parseNewlySeries(doc)
-
-                hasNext = doc.selectFirst(
-                    "a[href*=\"/page/${p + 1}/\"]"
-                ) != null
-
-                if (!hasNext) break
-            }
-
+            val doc = app.get(getPageUrl(request.data, page)).document
+            val hasNext = doc.selectFirst(
+                "a[href*=\"/page/${page + 1}/\"]"
+            ) != null
             return newHomePageResponse(
                 request.name,
-                all.distinctBy { it.url },
+                parseNewlySeries(doc),
                 hasNext = hasNext
             )
+        }
+
+        // Asian programs: try the known slug spellings until one has cards
+        if (request.data.contains("/category/%d8%a7%d9%84%d8%a8%d8%b1%d8%a7%d9%85%d8%ac-", ignoreCase = true)) {
+            val prefix = "$mainUrl/category/%d8%a7%d9%84%d8%a8%d8%b1%d8%a7%d9%85%d8%ac-"
+            val slugs = listOf(
+                "%d8%a7%d9%84%d8%a3%d8%b3%d9%8a%d9%88%d9%8a%d8%a9",
+                "%d8%a7%d9%84%d8%a7%d8%b3%d9%8a%d9%88%d9%8a%d8%a9",
+                "%d8%a7%d9%84%d8%b3%d9%8a%d9%88%d9%8a%d8%a9"
+            )
+            for (slug in slugs) {
+                val doc = try {
+                    app.get(getPageUrl("$prefix$slug/", page)).document
+                } catch (_: Exception) { continue }
+                val found = parseHomeEpisodeCards(doc)
+                if (found.isNotEmpty()) {
+                    val hasNext = doc.selectFirst(
+                        "a[href*=\"/page/${page + 1}/\"]"
+                    ) != null
+                    return newHomePageResponse(
+                        request.name, found, hasNext = hasNext
+                    )
+                }
+            }
+            return newHomePageResponse(request.name, emptyList(), hasNext = false)
         }
 
         val url = getPageUrl(request.data, page)
