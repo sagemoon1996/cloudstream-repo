@@ -112,11 +112,57 @@ class TakkiadramaProvider : MainAPI() {
             }
     }
 
+    private fun parseSeriesCards(
+        document: Document
+    ): List<SearchResponse> {
+        return document
+            .select(".series-card")
+            .mapNotNull { card ->
+
+                val href = card
+                    .attr("href")
+                    .trim()
+
+                if (href.isBlank()) {
+                    return@mapNotNull null
+                }
+
+                val title = card
+                    .selectFirst(".series-title")
+                    ?.text()
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?: card.text().trim()
+
+                if (title.isBlank()) {
+                    return@mapNotNull null
+                }
+
+                val poster = getPoster(card)
+
+                newTvSeriesSearchResponse(
+                    title,
+                    href,
+                    TvType.TvSeries
+                ) {
+                    posterUrl = poster
+                }
+            }
+            .distinctBy {
+                it.url
+            }
+    }
+
     private fun parseEpisodeCards(
         document: Document
     ): List<Episode> {
         return document
             .select(".episode-card-landscape")
+            .distinctBy { card ->
+                card
+                    .attr("href")
+                    .trim()
+            }
             .mapNotNull { card ->
 
                 val href = card
@@ -155,7 +201,7 @@ class TakkiadramaProvider : MainAPI() {
         document: Document
     ): List<SearchResponse> {
         return document
-            .select(".episode-card-landscape, .drama-card")
+            .select(".episode-card-landscape")
             .mapNotNull { card ->
 
                 val href = card
@@ -166,22 +212,12 @@ class TakkiadramaProvider : MainAPI() {
                     return@mapNotNull null
                 }
 
-                val title =
-                    card
-                        .selectFirst(".episode-card-title")
-                        ?.text()
-                        ?.trim()
-                        ?.takeIf { it.isNotBlank() }
-                        ?: card
-                            .selectFirst(".drama-title")
-                            ?.text()
-                            ?.trim()
-                            ?.takeIf { it.isNotBlank() }
-                        ?: card.text().trim()
-
-                if (title.isBlank()) {
-                    return@mapNotNull null
-                }
+                val title = card
+                    .selectFirst(".episode-card-title")
+                    ?.text()
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?: "حلقة"
 
                 val poster = getPoster(card)
 
@@ -193,6 +229,77 @@ class TakkiadramaProvider : MainAPI() {
                     posterUrl = poster
                 }
             }
+            .distinctBy {
+                it.url
+            }
+    }
+
+    private suspend fun parseNewlySeries(
+        document: Document
+    ): List<SearchResponse> {
+
+        val result = mutableListOf<SearchResponse>()
+
+        val episodeUrls = document
+            .select(".drama-card")
+            .mapNotNull { card ->
+                card
+                    .attr("href")
+                    .trim()
+                    .takeIf { it.isNotBlank() }
+            }
+            .distinct()
+
+        for (episodeUrl in episodeUrls) {
+
+            val episodeDocument = try {
+                app
+                    .get(episodeUrl)
+                    .document
+            } catch (_: Exception) {
+                continue
+            }
+
+            val seriesLink = episodeDocument
+                .selectFirst("a[href*=\"/series/\"]")
+                ?: continue
+
+            val seriesUrl = seriesLink
+                .attr("href")
+                .trim()
+                .takeIf { it.isNotBlank() }
+                ?: continue
+
+            val seriesTitle = seriesLink
+                .text()
+                .trim()
+                .takeIf { it.isNotBlank() }
+                ?: continue
+
+            val poster = episodeDocument
+                .selectFirst("img[data-img]")
+                ?.attr("data-img")
+                ?.takeIf { it.isNotBlank() }
+                ?: episodeDocument
+                    .selectFirst("img")
+                    ?.attr("src")
+                    ?.takeIf {
+                        it.isNotBlank() &&
+                            !it.contains("load.gif")
+                    }
+
+            result.add(
+                newTvSeriesSearchResponse(
+                    seriesTitle,
+                    seriesUrl,
+                    TvType.TvSeries
+                ) {
+                    posterUrl = poster
+                }
+            )
+        }
+
+        return result
             .distinctBy {
                 it.url
             }
@@ -213,14 +320,44 @@ class TakkiadramaProvider : MainAPI() {
             .document
 
         val items = when {
-            request.data.contains("/newly/") ||
-                request.data.contains("/episodes/") ||
-                request.data.contains("/category/%d8%a7%d9%84%d8%a8%d8%b1%d8%a7%d9%85%d8%ac-", ignoreCase = true) -> {
+
+            request.data.contains(
+                "/newly/",
+                ignoreCase = true
+            ) -> {
+                parseNewlySeries(document)
+            }
+
+            request.data.contains(
+                "/episodes/",
+                ignoreCase = true
+            ) -> {
+                parseHomeEpisodeCards(document)
+            }
+
+            request.data.contains(
+                "/series/",
+                ignoreCase = true
+            ) -> {
+                parseSeriesCards(document)
+            }
+
+            request.data.contains(
+                "/movies/",
+                ignoreCase = true
+            ) -> {
+                parseDramaCards(document)
+            }
+
+            request.data.contains(
+                "/category/%d8%a7%d9%84%d8%a8%d8%b1%d8%a7%d9%85%d8%ac-",
+                ignoreCase = true
+            ) -> {
                 parseHomeEpisodeCards(document)
             }
 
             else -> {
-                parseDramaCards(document)
+                emptyList()
             }
         }
 
