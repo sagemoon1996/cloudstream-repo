@@ -194,7 +194,7 @@ class TakkiadramaProvider : MainAPI() {
                 }
             }
             .distinctBy {
-                it.url
+                it.data
             }
             .sortedBy {
                 it.episode
