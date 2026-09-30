@@ -21,8 +21,11 @@ class TakkiadramaProvider : MainAPI() {
     )
 
     override val mainPage = mainPageOf(
-        "$mainUrl/series/" to "أحدث المسلسلات",
-        "$mainUrl/movies/" to "أحدث الأفلام"
+        "$mainUrl/newly/" to "المضافة حديثًا",
+        "$mainUrl/episodes/" to "أحدث الحلقات",
+        "$mainUrl/series/" to "المسلسلات",
+        "$mainUrl/movies/" to "الأفلام",
+        "$mainUrl/category/البرامج-الآسيوية/" to "البرامج الآسيوية"
     )
 
     private fun getPageUrl(
@@ -145,6 +148,52 @@ class TakkiadramaProvider : MainAPI() {
             }
     }
 
+    private fun parseHomeEpisodeCards(
+        document: Document
+    ): List<SearchResponse> {
+        return document
+            .select(".episode-card-landscape")
+            .mapNotNull { card ->
+
+                val href = card
+                    .attr("href")
+                    .trim()
+
+                if (href.isBlank()) {
+                    return@mapNotNull null
+                }
+
+                val episodeTitle = card
+                    .selectFirst(".episode-card-title")
+                    ?.text()
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?: "حلقة"
+
+                val seriesTitle = card
+                    .selectFirst(".episode-card-series")
+                    ?.text()
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+
+                val title = if (!seriesTitle.isNullOrBlank()) {
+                    "$seriesTitle - $episodeTitle"
+                } else {
+                    episodeTitle
+                }
+
+                val poster = getPoster(card)
+
+                newMovieSearchResponse(
+                    title,
+                    href,
+                    TvType.Movie
+                ) {
+                    posterUrl = poster
+                }
+            }
+    }
+
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
@@ -159,7 +208,14 @@ class TakkiadramaProvider : MainAPI() {
             .get(url)
             .document
 
-        val items = parseDramaCards(document)
+        val items = if (
+            request.data.contains("/newly/") ||
+            request.data.contains("/episodes/")
+        ) {
+            parseHomeEpisodeCards(document)
+        } else {
+            parseDramaCards(document)
+        }
 
         val hasNext = document
             .selectFirst(
