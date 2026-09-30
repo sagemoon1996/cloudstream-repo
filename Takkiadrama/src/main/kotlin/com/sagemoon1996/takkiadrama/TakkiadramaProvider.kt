@@ -257,6 +257,42 @@ class TakkiadramaProvider : MainAPI() {
 
         return when {
 
+            url.contains("/episode-") -> {
+
+                val title = document
+                    .selectFirst("h1")
+                    ?.text()
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?: document
+                        .selectFirst(".episode-card-title")
+                        ?.text()
+                        ?.trim()
+                        ?.takeIf { it.isNotBlank() }
+                    ?: "حلقة"
+
+                val poster = document
+                    .selectFirst("img[data-img]")
+                    ?.attr("data-img")
+                    ?.takeIf { it.isNotBlank() }
+                    ?: document
+                        .selectFirst("img")
+                        ?.attr("src")
+                        ?.takeIf {
+                            it.isNotBlank() &&
+                                !it.contains("load.gif")
+                        }
+
+                newMovieLoadResponse(
+                    title,
+                    url,
+                    TvType.Movie,
+                    url
+                ) {
+                    posterUrl = poster
+                }
+            }
+
             url.contains("/series/") -> {
 
                 val title = document
