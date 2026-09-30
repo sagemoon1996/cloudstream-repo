@@ -101,16 +101,22 @@
         "name": "OurDrama"
     },
     {
-        "fileHash": "sha256-75cc4fc87d0d5f10735ca74e131e1fbfa646a5415390f685a3658c0e856e026d",
+        "fileHash": "sha256-80238cd5c2544ed338d6671327a322e431c18d9cd62a2fbe37fac57f9f942075",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
-        "fileSize": 15688,
-        "status": 3,
+        "fileSize": 15687,
+        "status": 1,
+        "language": "ar",
         "authors": [
             "sagemoon1996"
         ],
-        "version": -1,
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "version": 1,
         "internalName": "Takkiadrama",
+        "description": "Takkiadrama Arabic streaming provider",
         "url": "https://raw.githubusercontent.com/sagemoon1996/cloudstream-repo/builds/Takkiadrama.cs3",
         "name": "Takkiadrama"
     }
