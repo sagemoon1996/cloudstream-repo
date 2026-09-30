@@ -22,10 +22,9 @@ class TakkiadramaProvider : MainAPI() {
 
     override val mainPage = mainPageOf(
         "$mainUrl/newly/" to "المضافة حديثًا",
-        "$mainUrl/episodes/" to "أحدث الحلقات",
         "$mainUrl/series/" to "المسلسلات",
         "$mainUrl/movies/" to "الأفلام",
-        "$mainUrl/category/%d8%a7%d9%84%d8%a8%d8%b1%d8%a7%d9%85%d8%ac-%d8%a7%d9%84%d8%a3%d8%b3%d9%8a%d9%88%d9%8a%d8%a9/" to "البرامج الآسيوية"
+        "$mainUrl/category/%d8%a7%d9%84%d8%a8%d8%b1%d8%a7%d9%85%d8%ac-%d8%a7%d9%84%d8%b3%d9%8a%d9%88%d9%8a%d8%a9/" to "البرامج الآسيوية"
     )
 
     private fun getPageUrl(
@@ -153,47 +152,52 @@ class TakkiadramaProvider : MainAPI() {
             }
     }
 
-    private fun parseEpisodeCards(
+    private fun parseSeriesEpisodes(
         document: Document
     ): List<Episode> {
+
         return document
-            .select(".episode-card-landscape")
-            .distinctBy { card ->
-                card
-                    .attr("href")
-                    .trim()
-            }
-            .mapNotNull { card ->
+            .select("a")
+            .mapNotNull { link ->
 
-                val href = card
+                val href = link
                     .attr("href")
                     .trim()
 
-                if (href.isBlank()) {
+                val episodeTitle = link
+                    .text()
+                    .trim()
+
+                if (
+                    href.isBlank() ||
+                    episodeTitle.isBlank()
+                ) {
                     return@mapNotNull null
                 }
 
-                val episodeTitle = card
-                    .selectFirst(".episode-card-title")
-                    ?.text()
-                    ?.trim()
-                    ?.takeIf { it.isNotBlank() }
-                    ?: "حلقة"
-
-                val episodeNumber = card
-                    .selectFirst(".episode-card-number span")
-                    ?.text()
-                    ?.trim()
+                val episodeNumber = Regex(
+                    """الحلقة\s+(\d+)"""
+                )
+                    .find(episodeTitle)
+                    ?.groupValues
+                    ?.getOrNull(1)
                     ?.toIntOrNull()
+                    ?: return@mapNotNull null
 
-                val poster = getPoster(card)
+                val poster = getPoster(link)
 
                 newEpisode(href) {
                     name = episodeTitle
                     season = 1
-                    episode = episodeNumber ?: 1
+                    episode = episodeNumber
                     posterUrl = poster
                 }
+            }
+            .distinctBy {
+                it.url
+            }
+            .sortedBy {
+                it.episode
             }
     }
 
@@ -234,72 +238,46 @@ class TakkiadramaProvider : MainAPI() {
             }
     }
 
-    private suspend fun parseNewlySeries(
+    private fun parseNewlySeries(
         document: Document
     ): List<SearchResponse> {
 
-        val result = mutableListOf<SearchResponse>()
-
-        val episodeUrls = document
+        return document
             .select(".drama-card")
             .mapNotNull { card ->
-                card
+
+                val href = card
                     .attr("href")
                     .trim()
-                    .takeIf { it.isNotBlank() }
-            }
-            .distinct()
 
-        for (episodeUrl in episodeUrls) {
+                if (
+                    href.isBlank() ||
+                    !href.contains("/series/")
+                ) {
+                    return@mapNotNull null
+                }
 
-            val episodeDocument = try {
-                app
-                    .get(episodeUrl)
-                    .document
-            } catch (_: Exception) {
-                continue
-            }
+                val title = card
+                    .selectFirst(".drama-title")
+                    ?.text()
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?: card.text().trim()
 
-            val seriesLink = episodeDocument
-                .selectFirst("a[href*=\"/series/\"]")
-                ?: continue
+                if (title.isBlank()) {
+                    return@mapNotNull null
+                }
 
-            val seriesUrl = seriesLink
-                .attr("href")
-                .trim()
-                .takeIf { it.isNotBlank() }
-                ?: continue
+                val poster = getPoster(card)
 
-            val seriesTitle = seriesLink
-                .text()
-                .trim()
-                .takeIf { it.isNotBlank() }
-                ?: continue
-
-            val poster = episodeDocument
-                .selectFirst("img[data-img]")
-                ?.attr("data-img")
-                ?.takeIf { it.isNotBlank() }
-                ?: episodeDocument
-                    .selectFirst("img")
-                    ?.attr("src")
-                    ?.takeIf {
-                        it.isNotBlank() &&
-                            !it.contains("load.gif")
-                    }
-
-            result.add(
                 newTvSeriesSearchResponse(
-                    seriesTitle,
-                    seriesUrl,
+                    title,
+                    href,
                     TvType.TvSeries
                 ) {
                     posterUrl = poster
                 }
-            )
-        }
-
-        return result
+            }
             .distinctBy {
                 it.url
             }
@@ -326,13 +304,6 @@ class TakkiadramaProvider : MainAPI() {
                 ignoreCase = true
             ) -> {
                 parseNewlySeries(document)
-            }
-
-            request.data.contains(
-                "/episodes/",
-                ignoreCase = true
-            ) -> {
-                parseHomeEpisodeCards(document)
             }
 
             request.data.contains(
@@ -424,20 +395,8 @@ class TakkiadramaProvider : MainAPI() {
                                 !it.contains("load.gif")
                         }
 
-                val listUrl = document
-                    .selectFirst("a[href*=\"/list/\"]")
-                    ?.attr("href")
-                    ?.takeIf { it.isNotBlank() }
-                    ?: throw ErrorLoadingException(
-                        "Episodes list not found"
-                    )
-
-                val listDocument = app
-                    .get(listUrl)
-                    .document
-
-                val episodes = parseEpisodeCards(
-                    listDocument
+                val episodes = parseSeriesEpisodes(
+                    document
                 )
 
                 newTvSeriesLoadResponse(
