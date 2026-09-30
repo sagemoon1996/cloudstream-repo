@@ -403,16 +403,26 @@ class OurDramaProvider : MainAPI() {
 
         val episodeUrl = data
 
-        val document = runCatching {
+        // رسائل التشخيص: تظهر على الشاشة كان ما لقاش حتى link
+        val dbg = mutableListOf<String>()
+
+        // (تعديل 1) نخزنو الـ cookies باش الـ CSRF token يخدم مع الـ POST
+        val page = try {
             app.get(
                 episodeUrl,
                 referer = "$mainUrl/"
-            ).document
-        }.getOrNull()
-            ?: return false
+            )
+        } catch (e: Exception) {
+            throw ErrorLoadingException(
+                "0: episode page failed: ${e.message}"
+            )
+        }
+
+        val document = page.document
+        val cookies = page.cookies
 
         val csrfToken = extractCsrfToken(document)
-            ?: return false
+            ?: throw ErrorLoadingException("1: csrf not found")
 
         val serverCodes = document
             .select(
@@ -427,7 +437,7 @@ class OurDramaProvider : MainAPI() {
             .distinct()
 
         if (serverCodes.isEmpty()) {
-            return false
+            throw ErrorLoadingException("2: no data-code found")
         }
 
         val loadedUrls = mutableSetOf<String>()
@@ -436,7 +446,7 @@ class OurDramaProvider : MainAPI() {
 
         for (serverCode in serverCodes) {
 
-            val response = runCatching {
+            val response = try {
 
                 app.post(
                     "$mainUrl/ajax-request",
@@ -446,26 +456,38 @@ class OurDramaProvider : MainAPI() {
                     ),
                     headers = mapOf(
                         "X-CSRF-TOKEN" to csrfToken,
-                        "X-Requested-With" to "XMLHttpRequest",
-                        "Content-Type" to
-                            "application/x-www-form-urlencoded; charset=UTF-8"
+                        "X-Requested-With" to "XMLHttpRequest"
                     ),
+                    cookies = cookies,
                     referer = episodeUrl
                 )
 
-            }.getOrNull()
-                ?: continue
+            } catch (e: Exception) {
+                dbg.add("3: post failed ${e.message}")
+                continue
+            }
 
             val json = runCatching {
                 JSONObject(response.text)
             }.getOrNull()
-                ?: continue
+
+            if (json == null) {
+                dbg.add(
+                    "4: not json [${response.code}] " +
+                        response.text.take(100)
+                )
+                continue
+            }
 
             val codePlay = json
                 .optString("codeplay")
                 .trim()
 
             if (codePlay.isBlank()) {
+                dbg.add(
+                    "5: codeplay empty " +
+                        response.text.take(100)
+                )
                 continue
             }
 
@@ -474,6 +496,7 @@ class OurDramaProvider : MainAPI() {
             )
 
             if (iframeUrls.isEmpty()) {
+                dbg.add("6: no iframe " + codePlay.take(100))
                 continue
             }
 
@@ -483,16 +506,26 @@ class OurDramaProvider : MainAPI() {
                     iframeUrl
                 )
 
+                dbg.add("p:$provider")
+
                 when (provider) {
 
                     "rpmshare" -> {
-                        val sources = runCatching {
+
+                        val sources = try {
                             extractRpmshareSources(
                                 iframeUrl
                             )
-                        }.getOrDefault(emptyList())
+                        } catch (e: Exception) {
+                            dbg.add("7: rpm ${e.message}")
+                            null
+                        }
 
-                        for (source in sources) {
+                        if (sources != null && sources.isEmpty()) {
+                            dbg.add("8: rpm 0 sources")
+                        }
+
+                        for (source in sources.orEmpty()) {
 
                             if (
                                 source.url.isBlank() ||
@@ -504,7 +537,7 @@ class OurDramaProvider : MainAPI() {
                             callback(
                                 newExtractorLink(
                                     source = "OurDrama - Rpmshare",
-                                    name = "Rpmshare",
+                                    name = "Rpmshare ${source.label}",
                                     url = source.url,
                                     type = ExtractorLinkType.M3U8
                                 ) {
@@ -671,10 +704,18 @@ class OurDramaProvider : MainAPI() {
 
                         if (extractorLoaded) {
                             loaded = true
+                        } else {
+                            dbg.add("9: no extractor for $iframeUrl")
                         }
                     }
                 }
             }
+        }
+
+        if (!loaded) {
+            throw ErrorLoadingException(
+                dbg.joinToString(" | ").take(500)
+            )
         }
 
         return loaded
@@ -717,12 +758,17 @@ class OurDramaProvider : MainAPI() {
 
     private data class RpmSource(
         val url: String,
-        val referer: String
+        val referer: String,
+        val label: String
     )
 
     private suspend fun extractRpmshareSources(
         iframeUrl: String
     ): List<RpmSource> {
+
+        // (تعديل 2) الـ host ياخذ من الـ iframe بروحو موش ثابت
+        val iframeUri = URI(iframeUrl)
+        val origin = "${iframeUri.scheme}://${iframeUri.host}"
 
         val videoId = iframeUrl
             .substringAfter("#", "")
@@ -730,50 +776,59 @@ class OurDramaProvider : MainAPI() {
             .trim()
 
         if (videoId.isBlank()) {
-            return emptyList()
+            throw ErrorLoadingException("rpm: no id in $iframeUrl")
         }
 
+        // r = host متاع الموقع اللي مضمّن الـ player (كيما يعمل الـ player)
+        val siteHost = URI(mainUrl).host
+            .orEmpty()
+            .removePrefix("www.")
+
         val apiUrl =
-            "https://7.rpmvid.site/api/v1/video" +
+            "$origin/api/v1/video" +
                 "?id=${URLEncoder.encode(videoId, "UTF-8")}" +
                 "&w=384" +
                 "&h=832" +
-                "&r="
+                "&r=$siteHost"
 
+        // الـ Referer كيما في المتصفح: صفحة الـ player
         val encrypted = app
             .get(
                 apiUrl,
-                referer = iframeUrl
+                referer = "$origin/"
             )
             .text
             .trim()
 
         if (encrypted.isBlank()) {
-            return emptyList()
+            throw ErrorLoadingException("rpm: empty response")
         }
 
         val jsonText = decryptRpmshare(
             encrypted
-        ) ?: return emptyList()
+        ) ?: throw ErrorLoadingException(
+            "rpm decrypt fail: ${encrypted.take(120)}"
+        )
 
         val json = runCatching {
             JSONObject(jsonText)
         }.getOrNull()
-            ?: return emptyList()
+            ?: throw ErrorLoadingException(
+                "rpm json fail: ${jsonText.take(120)}"
+            )
 
         val pk = json.optJSONObject("pk")
 
         val key = pk
             ?.optString("k")
             ?.trim()
-            ?.takeIf { it.isNotBlank() }
+            ?.takeIf { it.isNotBlank() && it != "null" }
 
+        // (تعديل) kx كـ String خاطر نوعو مجهول
         val keyExpire = pk
-            ?.optLong(
-                "kx",
-                0L
-            )
-            ?.takeIf { it > 0L }
+            ?.optString("kx")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() && it != "null" }
 
         val streamingConfig = runCatching {
             JSONObject(
@@ -790,12 +845,13 @@ class OurDramaProvider : MainAPI() {
 
         fun addSource(
             rawUrl: String?,
-            provider: String
+            provider: String,
+            label: String
         ) {
 
             var url = rawUrl
                 ?.trim()
-                ?.takeIf { it.isNotBlank() }
+                ?.takeIf { it.isNotBlank() && it != "null" }
                 ?: return
 
             val adjust = streamingConfig
@@ -819,23 +875,20 @@ class OurDramaProvider : MainAPI() {
             val params = adjust
                 ?.optJSONObject("params")
 
-            if (
-                provider.equals(
-                    "Tiktok",
-                    ignoreCase = true
-                ) &&
-                url.startsWith("/hls/") &&
-                domain.isNotBlank()
-            ) {
-                url =
-                    "https://7.rpmvid.site" +
-                        "/hlsmod/" +
-                        domain +
-                        url
-            } else {
-                url = resolveRpmUrl(
-                    url,
-                    "https://7.rpmvid.site/"
+            url = resolveRpmUrl(
+                url,
+                "$origin/"
+            )
+
+            // (تعديل 3) نفس منطق الـ player: "/hls/" يتبدّل بـ "/hlsmod/<domain>/"
+            val path = runCatching {
+                URI(url).path
+            }.getOrNull().orEmpty()
+
+            if (domain.isNotBlank() && path.contains("/hls/")) {
+                url = url.replaceFirst(
+                    "/hls/",
+                    "/hlsmod/$domain/"
                 )
             }
 
@@ -892,13 +945,13 @@ class OurDramaProvider : MainAPI() {
                     "k=",
                     ignoreCase = true
                 ) &&
-                !key.isNullOrBlank() &&
+                key != null &&
                 keyExpire != null
             ) {
                 url = appendQuery(
                     url,
                     "k=${URLEncoder.encode(key, "UTF-8")}" +
-                        "&kx=$keyExpire"
+                        "&kx=${URLEncoder.encode(keyExpire, "UTF-8")}"
                 )
             }
 
@@ -909,96 +962,68 @@ class OurDramaProvider : MainAPI() {
                 sources.add(
                     RpmSource(
                         url = url,
-                        referer = "https://7.rpmvid.site/"
+                        referer = "$origin/",
+                        label = label
                     )
                 )
             }
         }
 
+        fun addProvider(provider: String) {
+            when (provider.lowercase()) {
+                "tiktok" -> addSource(
+                    json.optString("hlsVideoTiktok"),
+                    "Tiktok",
+                    "Tiktok"
+                )
+
+                "google" -> addSource(
+                    json.optString("hlsVideoGoogle"),
+                    "Google",
+                    "Google"
+                )
+
+                "cloudflare" -> {
+                    // (تعديل) الاثنين كـ links مفرّقين، ما نعرفوش أنهو يخدم
+                    addSource(
+                        json.optString("cf"),
+                        "Cloudflare",
+                        "CF"
+                    )
+                    addSource(
+                        json.optString("cfNative"),
+                        "Cloudflare",
+                        "CF native"
+                    )
+                }
+
+                "in-house", "inhouse" -> addSource(
+                    json.optString("source"),
+                    "In-House",
+                    "In-House"
+                )
+            }
+        }
+
+        val done = mutableSetOf<String>()
+
         if (order != null) {
-
             for (i in 0 until order.length()) {
-
                 val provider = order
                     .optString(i)
                     .trim()
 
-                when {
-                    provider.equals(
-                        "Tiktok",
-                        ignoreCase = true
-                    ) -> {
-                        addSource(
-                            json.optString(
-                                "hlsVideoTiktok"
-                            ),
-                            "Tiktok"
-                        )
-                    }
-
-                    provider.equals(
-                        "Google",
-                        ignoreCase = true
-                    ) -> {
-                        addSource(
-                            json.optString(
-                                "hlsVideoGoogle"
-                            ),
-                            "Google"
-                        )
-                    }
-
-                    provider.equals(
-                        "Cloudflare",
-                        ignoreCase = true
-                    ) -> {
-                        addSource(
-                            json.optString(
-                                "cfNative"
-                            ).takeIf {
-                                it.isNotBlank()
-                            } ?: json.optString("cf"),
-                            "Cloudflare"
-                        )
-                    }
-
-                    provider.equals(
-                        "In-House",
-                        ignoreCase = true
-                    ) -> {
-                        addSource(
-                            json.optString(
-                                "source"
-                            ),
-                            "In-House"
-                        )
-                    }
+                if (provider.isNotBlank() && done.add(provider.lowercase())) {
+                    addProvider(provider)
                 }
             }
         }
 
-        if (sources.isEmpty()) {
-
-            addSource(
-                json.optString(
-                    "hlsVideoTiktok"
-                ),
-                "Tiktok"
-            )
-
-            addSource(
-                json.optString(
-                    "cfNative"
-                ),
-                "Cloudflare"
-            )
-
-            addSource(
-                json.optString(
-                    "source"
-                ),
-                "In-House"
-            )
+        // الباقي اللي ما جاش في الـ order
+        for (provider in listOf("Tiktok", "Google", "Cloudflare", "In-House")) {
+            if (done.add(provider.lowercase())) {
+                addProvider(provider)
+            }
         }
 
         return sources.distinctBy {
