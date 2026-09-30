@@ -54,6 +54,10 @@ class TakkiadramaProvider : MainAPI() {
                 }
     }
 
+    // ---------------------------------------------------------------
+    // Cards (search / movies)
+    // ---------------------------------------------------------------
+
     private fun parseDramaCards(
         document: Document
     ): List<SearchResponse> {
@@ -61,13 +65,8 @@ class TakkiadramaProvider : MainAPI() {
             .select(".drama-card")
             .mapNotNull { card ->
 
-                val href = card
-                    .attr("href")
-                    .trim()
-
-                if (href.isBlank()) {
-                    return@mapNotNull null
-                }
+                val href = card.attr("href").trim()
+                if (href.isBlank()) return@mapNotNull null
 
                 val title = card
                     .selectFirst(".drama-title")
@@ -76,9 +75,7 @@ class TakkiadramaProvider : MainAPI() {
                     ?.takeIf { it.isNotBlank() }
                     ?: card.text().trim()
 
-                if (title.isBlank()) {
-                    return@mapNotNull null
-                }
+                if (title.isBlank()) return@mapNotNull null
 
                 val poster = getPoster(card)
 
@@ -106,11 +103,10 @@ class TakkiadramaProvider : MainAPI() {
                     else -> null
                 }
             }
-            .distinctBy {
-                it.url
-            }
+            .distinctBy { it.url }
     }
 
+    // /series/ page
     private fun parseSeriesCards(
         document: Document
     ): List<SearchResponse> {
@@ -118,20 +114,11 @@ class TakkiadramaProvider : MainAPI() {
             .select(".series-card")
             .mapNotNull { card ->
 
-                val href = card
-                    .attr("href")
-                    .trim()
+                val href = card.attr("href").trim()
+                if (href.isBlank()) return@mapNotNull null
 
-                if (href.isBlank()) {
-                    return@mapNotNull null
-                }
-
-                val title = card.text()
-                    .trim()
-
-                if (title.isBlank()) {
-                    return@mapNotNull null
-                }
+                val title = card.text().trim()
+                if (title.isBlank()) return@mapNotNull null
 
                 val poster = getPoster(card)
 
@@ -143,30 +130,23 @@ class TakkiadramaProvider : MainAPI() {
                     posterUrl = poster
                 }
             }
-            .distinctBy {
-                it.url
-            }
+            .distinctBy { it.url }
     }
+
+    // ---------------------------------------------------------------
+    // Episodes (series /list/ page)
+    // ---------------------------------------------------------------
 
     private fun parseEpisodeCards(
         document: Document
     ): List<Episode> {
         return document
-            .select(".episode-card-landscape")
-            .distinctBy { card ->
-                card
-                    .attr("href")
-                    .trim()
-            }
+            .select(".episode-card-landscape, .episode-card")
+            .distinctBy { card -> card.attr("href").trim() }
             .mapNotNull { card ->
 
-                val href = card
-                    .attr("href")
-                    .trim()
-
-                if (href.isBlank()) {
-                    return@mapNotNull null
-                }
+                val href = card.attr("href").trim()
+                if (href.isBlank()) return@mapNotNull null
 
                 val episodeTitle = card
                     .selectFirst(".episode-card-title")
@@ -180,6 +160,10 @@ class TakkiadramaProvider : MainAPI() {
                     ?.text()
                     ?.trim()
                     ?.toIntOrNull()
+                    ?: Regex("""(\d+)""")
+                        .find(episodeTitle)
+                        ?.value
+                        ?.toIntOrNull()
 
                 val poster = getPoster(card)
 
@@ -192,27 +176,66 @@ class TakkiadramaProvider : MainAPI() {
             }
     }
 
+    // Follows /list/ pagination and merges with episodes found on the series page
+    private suspend fun fetchAllEpisodes(
+        listUrl: String,
+        seriesDoc: Document
+    ): List<Episode> {
+        val map = LinkedHashMap<String, Episode>()
+
+        parseEpisodeCards(seriesDoc).forEach {
+            map.putIfAbsent(it.data, it)
+        }
+
+        var pageUrl: String? = listUrl
+        var page = 1
+
+        while (pageUrl != null && page <= 40) {
+            val doc = try {
+                app.get(pageUrl).document
+            } catch (_: Exception) {
+                break
+            }
+
+            parseEpisodeCards(doc).forEach {
+                map.putIfAbsent(it.data, it)
+            }
+
+            pageUrl = doc
+                .selectFirst("a[href*=\"/page/${page + 1}/\"]")
+                ?.attr("href")
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+
+            page++
+        }
+
+        return map.values.sortedBy { it.episode ?: 0 }
+    }
+
+    // ---------------------------------------------------------------
+    // Home page helpers
+    // ---------------------------------------------------------------
+
+    // Asian programs: direct episode entries using .drama-card
     private fun parseHomeEpisodeCards(
         document: Document
     ): List<SearchResponse> {
         return document
-            .select(".episode-card-landscape")
+            .select(".drama-card")
             .mapNotNull { card ->
 
-                val href = card
-                    .attr("href")
-                    .trim()
-
-                if (href.isBlank()) {
-                    return@mapNotNull null
-                }
+                val href = card.attr("href").trim()
+                if (href.isBlank()) return@mapNotNull null
 
                 val title = card
-                    .selectFirst(".episode-card-title")
+                    .selectFirst(".drama-title")
                     ?.text()
                     ?.trim()
                     ?.takeIf { it.isNotBlank() }
-                    ?: "حلقة"
+                    ?: card.text().trim()
+
+                if (title.isBlank()) return@mapNotNull null
 
                 val poster = getPoster(card)
 
@@ -224,11 +247,10 @@ class TakkiadramaProvider : MainAPI() {
                     posterUrl = poster
                 }
             }
-            .distinctBy {
-                it.url
-            }
+            .distinctBy { it.url }
     }
 
+    // /newly/: keep only series cards
     private fun parseNewlySeries(
         document: Document
     ): List<SearchResponse> {
@@ -236,14 +258,9 @@ class TakkiadramaProvider : MainAPI() {
             .select(".drama-card")
             .mapNotNull { card ->
 
-                val href = card
-                    .attr("href")
-                    .trim()
+                val href = card.attr("href").trim()
 
-                if (
-                    href.isBlank() ||
-                    !href.contains("/series/")
-                ) {
+                if (href.isBlank() || !href.contains("/series/")) {
                     return@mapNotNull null
                 }
 
@@ -254,9 +271,7 @@ class TakkiadramaProvider : MainAPI() {
                     ?.takeIf { it.isNotBlank() }
                     ?: card.text().trim()
 
-                if (title.isBlank()) {
-                    return@mapNotNull null
-                }
+                if (title.isBlank()) return@mapNotNull null
 
                 val poster = getPoster(card)
 
@@ -268,9 +283,7 @@ class TakkiadramaProvider : MainAPI() {
                     posterUrl = poster
                 }
             }
-            .distinctBy {
-                it.url
-            }
+            .distinctBy { it.url }
     }
 
     override suspend fun getMainPage(
@@ -278,35 +291,48 @@ class TakkiadramaProvider : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse {
 
-        val url = getPageUrl(
-            request.data,
-            page
-        )
+        // /newly/ is a mix of episodes + series, so we scan several
+        // site pages per app page and keep only the series.
+        if (request.data.contains("/newly/", ignoreCase = true)) {
+            val perBatch = 4
+            val start = (page - 1) * perBatch + 1
+            val all = ArrayList<SearchResponse>()
+            var hasNext = false
 
-        val document = app
-            .get(url)
-            .document
+            for (p in start until start + perBatch) {
+                val doc = try {
+                    app.get(getPageUrl(request.data, p)).document
+                } catch (_: Exception) {
+                    hasNext = false
+                    break
+                }
+
+                all += parseNewlySeries(doc)
+
+                hasNext = doc.selectFirst(
+                    "a[href*=\"/page/${p + 1}/\"]"
+                ) != null
+
+                if (!hasNext) break
+            }
+
+            return newHomePageResponse(
+                request.name,
+                all.distinctBy { it.url },
+                hasNext = hasNext
+            )
+        }
+
+        val url = getPageUrl(request.data, page)
+        val document = app.get(url).document
 
         val items = when {
 
-            request.data.contains(
-                "/newly/",
-                ignoreCase = true
-            ) -> {
-                parseNewlySeries(document)
-            }
-
-            request.data.contains(
-                "/series/",
-                ignoreCase = true
-            ) -> {
+            request.data.contains("/series/", ignoreCase = true) -> {
                 parseSeriesCards(document)
             }
 
-            request.data.contains(
-                "/movies/",
-                ignoreCase = true
-            ) -> {
+            request.data.contains("/movies/", ignoreCase = true) -> {
                 parseDramaCards(document)
             }
 
@@ -317,15 +343,11 @@ class TakkiadramaProvider : MainAPI() {
                 parseHomeEpisodeCards(document)
             }
 
-            else -> {
-                emptyList()
-            }
+            else -> emptyList()
         }
 
         val hasNext = document
-            .selectFirst(
-                "a[href*=\"/page/${page + 1}/\"]"
-            ) != null
+            .selectFirst("a[href*=\"/page/${page + 1}/\"]") != null
 
         return newHomePageResponse(
             request.name,
@@ -333,6 +355,10 @@ class TakkiadramaProvider : MainAPI() {
             hasNext = hasNext
         )
     }
+
+    // ---------------------------------------------------------------
+    // Search (unchanged)
+    // ---------------------------------------------------------------
 
     override suspend fun search(
         query: String
@@ -351,6 +377,10 @@ class TakkiadramaProvider : MainAPI() {
 
         return parseDramaCards(document)
     }
+
+    // ---------------------------------------------------------------
+    // Load
+    // ---------------------------------------------------------------
 
     override suspend fun load(
         url: String
@@ -394,13 +424,7 @@ class TakkiadramaProvider : MainAPI() {
                         "Episodes list not found"
                     )
 
-                val listDocument = app
-                    .get(listUrl)
-                    .document
-
-                val episodes = parseEpisodeCards(
-                    listDocument
-                )
+                val episodes = fetchAllEpisodes(listUrl, document)
 
                 newTvSeriesLoadResponse(
                     title,
@@ -466,7 +490,7 @@ class TakkiadramaProvider : MainAPI() {
                                 !it.contains("load.gif")
                         }
 
-                val watchUrl = document
+                document
                     .selectFirst("a[href*=\"/watch/\"]")
                     ?.attr("href")
                     ?.takeIf { it.isNotBlank() }
@@ -501,6 +525,10 @@ class TakkiadramaProvider : MainAPI() {
             }
         }
     }
+
+    // ---------------------------------------------------------------
+    // loadLinks (unchanged)
+    // ---------------------------------------------------------------
 
     override suspend fun loadLinks(
         data: String,
