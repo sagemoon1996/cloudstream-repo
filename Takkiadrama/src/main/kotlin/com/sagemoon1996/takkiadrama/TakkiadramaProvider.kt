@@ -25,7 +25,7 @@ class TakkiadramaProvider : MainAPI() {
         "$mainUrl/episodes/" to "أحدث الحلقات",
         "$mainUrl/series/" to "المسلسلات",
         "$mainUrl/movies/" to "الأفلام",
-        "$mainUrl/category/البرامج-الآسيوية/" to "البرامج الآسيوية"
+        "$mainUrl/category/البرامج-آسيوية/" to "البرامج الآسيوية"
     )
 
     private fun getPageUrl(
