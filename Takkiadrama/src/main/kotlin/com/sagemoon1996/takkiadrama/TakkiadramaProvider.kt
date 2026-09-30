@@ -1,6 +1,7 @@
 package com.sagemoon1996.takkiadrama
 
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.utils.*
 import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -47,7 +48,7 @@ class TakkiadramaProvider : MainAPI() {
                 ?.attr("src")
                 ?.takeIf {
                     it.isNotBlank() &&
-                    !it.contains("load.gif")
+                        !it.contains("load.gif")
                 }
     }
 
@@ -220,7 +221,7 @@ class TakkiadramaProvider : MainAPI() {
                         ?.attr("src")
                         ?.takeIf {
                             it.isNotBlank() &&
-                            !it.contains("load.gif")
+                                !it.contains("load.gif")
                         }
 
                 val listUrl = document
@@ -269,7 +270,7 @@ class TakkiadramaProvider : MainAPI() {
                         ?.attr("src")
                         ?.takeIf {
                             it.isNotBlank() &&
-                            !it.contains("load.gif")
+                                !it.contains("load.gif")
                         }
 
                 newMovieLoadResponse(
