@@ -99,5 +99,19 @@
         "description": "Asian drama and movies",
         "url": "https://raw.githubusercontent.com/sagemoon1996/cloudstream-repo/builds/OurDrama.cs3",
         "name": "OurDrama"
+    },
+    {
+        "fileHash": "sha256-75cc4fc87d0d5f10735ca74e131e1fbfa646a5415390f685a3658c0e856e026d",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
+        "fileSize": 15688,
+        "status": 3,
+        "authors": [
+            "sagemoon1996"
+        ],
+        "version": -1,
+        "internalName": "Takkiadrama",
+        "url": "https://raw.githubusercontent.com/sagemoon1996/cloudstream-repo/builds/Takkiadrama.cs3",
+        "name": "Takkiadrama"
     }
 ]
