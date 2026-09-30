@@ -25,7 +25,7 @@ class TakkiadramaProvider : MainAPI() {
         "$mainUrl/episodes/" to "أحدث الحلقات",
         "$mainUrl/series/" to "المسلسلات",
         "$mainUrl/movies/" to "الأفلام",
-        "$mainUrl/category/البرامج-الآسيوية/" to "البرامج الآسيوية"
+        "$mainUrl/category/%d8%a7%d9%84%d8%a8%d8%b1%d8%a7%d9%85%d8%ac-%d8%a7%d9%84%d8%a3%d8%b3%d9%8a%d9%88%d9%8a%d8%a9/" to "البرامج الآسيوية"
     )
 
     private fun getPageUrl(
@@ -107,6 +107,9 @@ class TakkiadramaProvider : MainAPI() {
                     else -> null
                 }
             }
+            .distinctBy {
+                it.url
+            }
     }
 
     private fun parseEpisodeCards(
@@ -152,7 +155,7 @@ class TakkiadramaProvider : MainAPI() {
         document: Document
     ): List<SearchResponse> {
         return document
-            .select(".episode-card-landscape")
+            .select(".episode-card-landscape, .drama-card")
             .mapNotNull { card ->
 
                 val href = card
@@ -163,34 +166,35 @@ class TakkiadramaProvider : MainAPI() {
                     return@mapNotNull null
                 }
 
-                val episodeTitle = card
-                    .selectFirst(".episode-card-title")
-                    ?.text()
-                    ?.trim()
-                    ?.takeIf { it.isNotBlank() }
-                    ?: "حلقة"
+                val title =
+                    card
+                        .selectFirst(".episode-card-title")
+                        ?.text()
+                        ?.trim()
+                        ?.takeIf { it.isNotBlank() }
+                        ?: card
+                            .selectFirst(".drama-title")
+                            ?.text()
+                            ?.trim()
+                            ?.takeIf { it.isNotBlank() }
+                        ?: card.text().trim()
 
-                val seriesTitle = card
-                    .selectFirst(".episode-card-series")
-                    ?.text()
-                    ?.trim()
-                    ?.takeIf { it.isNotBlank() }
-
-                val title = if (!seriesTitle.isNullOrBlank()) {
-                    "$seriesTitle - $episodeTitle"
-                } else {
-                    episodeTitle
+                if (title.isBlank()) {
+                    return@mapNotNull null
                 }
 
                 val poster = getPoster(card)
 
-                newMovieSearchResponse(
+                newTvSeriesSearchResponse(
                     title,
                     href,
-                    TvType.Movie
+                    TvType.TvSeries
                 ) {
                     posterUrl = poster
                 }
+            }
+            .distinctBy {
+                it.url
             }
     }
 
@@ -210,7 +214,8 @@ class TakkiadramaProvider : MainAPI() {
 
         val items = when {
             request.data.contains("/newly/") ||
-                request.data.contains("/episodes/") -> {
+                request.data.contains("/episodes/") ||
+                request.data.contains("/category/%d8%a7%d9%84%d8%a8%d8%b1%d8%a7%d9%85%d8%ac-", ignoreCase = true) -> {
                 parseHomeEpisodeCards(document)
             }
 
@@ -362,11 +367,35 @@ class TakkiadramaProvider : MainAPI() {
                                 !it.contains("load.gif")
                         }
 
-                newMovieLoadResponse(
+                val watchUrl = document
+                    .selectFirst("a[href*=\"/watch/\"]")
+                    ?.attr("href")
+                    ?.takeIf { it.isNotBlank() }
+                    ?: throw ErrorLoadingException(
+                        "Watch link not found"
+                    )
+
+                val episodeNumber = Regex(
+                    """الحلقة\s+(\d+)"""
+                )
+                    .find(title)
+                    ?.groupValues
+                    ?.getOrNull(1)
+                    ?.toIntOrNull()
+                    ?: 1
+
+                val episode = newEpisode(url) {
+                    name = title
+                    season = 1
+                    episode = episodeNumber
+                    posterUrl = poster
+                }
+
+                newTvSeriesLoadResponse(
                     title,
                     url,
-                    TvType.Movie,
-                    url
+                    TvType.TvSeries,
+                    listOf(episode)
                 ) {
                     posterUrl = poster
                 }
