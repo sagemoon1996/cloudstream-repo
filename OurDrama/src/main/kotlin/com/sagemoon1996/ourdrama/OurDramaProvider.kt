@@ -3,15 +3,20 @@ package com.sagemoon1996.ourdrama
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.json.JSONObject
-import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.net.URI
 import java.net.URLEncoder
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 class OurDramaProvider : MainAPI() {
 
     override var mainUrl = "https://s.ourdrama.pro"
+
     override var name = "OurDrama"
+
     override var lang = "ar"
 
     override val hasMainPage = true
@@ -31,89 +36,65 @@ class OurDramaProvider : MainAPI() {
     )
 
     private fun absoluteUrl(url: String): String {
+        val value = url.trim()
+
         return when {
-            url.startsWith("http://") -> url
-            url.startsWith("https://") -> url
-            url.startsWith("//") -> "https:$url"
-            url.startsWith("/") -> "$mainUrl$url"
-            else -> "$mainUrl/${url.trimStart('/')}"
+            value.startsWith("http://") -> value
+            value.startsWith("https://") -> value
+            value.startsWith("//") -> "https:$value"
+            value.startsWith("/") -> "$mainUrl$value"
+            else -> "$mainUrl/${value.trimStart('/')}"
         }
     }
 
-    private fun extractPoster(
-        element: Element
-    ): String? {
-
+    private fun extractPoster(element: Element): String? {
         val image = element.selectFirst(
-            "img[data-src], img[data-lazy-src], img[src]"
+            "img[data-src], img[data-lazy-src], img[data-original], img[src]"
         ) ?: return null
 
-        val dataSrc = image.attr("data-src").trim()
+        val candidates = listOf(
+            image.attr("data-src"),
+            image.attr("data-lazy-src"),
+            image.attr("data-original"),
+            image.attr("src")
+        )
 
-        if (
-            dataSrc.startsWith("http") &&
-            !dataSrc.contains("/images/pixel.gif")
-        ) {
-            return dataSrc
-        }
-
-        val lazySrc = image.attr("data-lazy-src").trim()
-
-        if (
-            lazySrc.startsWith("http") &&
-            !lazySrc.contains("/images/pixel.gif")
-        ) {
-            return lazySrc
-        }
-
-        val src = image.attr("src").trim()
-
-        if (
-            src.startsWith("http") &&
-            !src.contains("/images/pixel.gif")
-        ) {
-            return src
-        }
-
-        return null
+        return candidates
+            .map { it.trim() }
+            .firstOrNull {
+                it.startsWith("http") &&
+                    !it.contains("/images/pixel.gif")
+            }
     }
 
-    private fun extractPosterFromDocument(
-        document: Document
-    ): String? {
+    private fun extractPosterFromDocument(document: Document): String? {
+        val meta = document
+            .selectFirst("meta[property='og:image']")
+            ?.attr("content")
+            ?.trim()
+
+        if (
+            !meta.isNullOrBlank() &&
+            meta.startsWith("http")
+        ) {
+            return meta
+        }
 
         val image = document.selectFirst(
-            "img[data-src], img[data-lazy-src], img[src]"
+            "img[data-src], img[data-lazy-src], img[data-original], img[src]"
         ) ?: return null
 
-        val dataSrc = image.attr("data-src").trim()
-
-        if (
-            dataSrc.startsWith("http") &&
-            !dataSrc.contains("/images/pixel.gif")
-        ) {
-            return dataSrc
-        }
-
-        val lazySrc = image.attr("data-lazy-src").trim()
-
-        if (
-            lazySrc.startsWith("http") &&
-            !lazySrc.contains("/images/pixel.gif")
-        ) {
-            return lazySrc
-        }
-
-        val src = image.attr("src").trim()
-
-        if (
-            src.startsWith("http") &&
-            !src.contains("/images/pixel.gif")
-        ) {
-            return src
-        }
-
-        return null
+        return listOf(
+            image.attr("data-src"),
+            image.attr("data-lazy-src"),
+            image.attr("data-original"),
+            image.attr("src")
+        )
+            .map { it.trim() }
+            .firstOrNull {
+                it.startsWith("http") &&
+                    !it.contains("/images/pixel.gif")
+            }
     }
 
     private fun parseResults(
@@ -121,40 +102,34 @@ class OurDramaProvider : MainAPI() {
     ): List<SearchResponse> {
 
         return document
-            .select("article.post-movie")
-            .mapNotNull { article ->
-
-                val link = article
-                    .selectFirst("h4 a[href]")
-                    ?: return@mapNotNull null
+            .select("article.post-movie h4 a[href]")
+            .mapNotNull { link ->
 
                 val title = link
                     .text()
                     .trim()
-                    .takeIf {
-                        it.isNotBlank()
-                    }
+                    .takeIf { it.isNotBlank() }
                     ?: return@mapNotNull null
 
                 val href = link
                     .attr("href")
                     .trim()
-                    .takeIf {
-                        it.isNotBlank()
-                    }
+                    .takeIf { it.isNotBlank() }
                     ?: return@mapNotNull null
+
+                val article = link.closest("article.post-movie")
 
                 newTvSeriesSearchResponse(
                     title,
                     absoluteUrl(href),
                     TvType.TvSeries
                 ) {
-                    posterUrl = extractPoster(article)
+                    posterUrl = article?.let {
+                        extractPoster(it)
+                    }
                 }
             }
-            .distinctBy {
-                it.url
-            }
+            .distinctBy { it.url }
     }
 
     override suspend fun getMainPage(
@@ -171,7 +146,10 @@ class OurDramaProvider : MainAPI() {
         }
 
         val document = app
-            .get(url)
+            .get(
+                url,
+                referer = "$mainUrl/"
+            )
             .document
 
         return newHomePageResponse(
@@ -184,74 +162,47 @@ class OurDramaProvider : MainAPI() {
         query: String
     ): List<SearchResponse> {
 
-        val response = app.post(
-            "$mainUrl/searchq",
-            data = mapOf(
-                "searchq" to query
-            ),
-            headers = mapOf(
-                "Content-Type" to
-                    "application/x-www-form-urlencoded; charset=UTF-8",
-                "X-Requested-With" to "XMLHttpRequest"
-            ),
-            referer = "$mainUrl/"
-        )
-
-        val results = parseResults(
-            response.document
-        )
-
-        if (results.isNotEmpty()) {
-            return results
-        }
-
         val encodedQuery = URLEncoder.encode(
             query,
             "UTF-8"
         )
 
-        return runCatching {
-            parseResults(
-                app.get(
-                    "$mainUrl/searchq?searchq=$encodedQuery",
-                    headers = mapOf(
-                        "X-Requested-With" to "XMLHttpRequest"
-                    ),
-                    referer = "$mainUrl/"
-                ).document
+        val document = app
+            .get(
+                "$mainUrl/search?s=$encodedQuery",
+                referer = "$mainUrl/"
             )
-        }.getOrDefault(emptyList())
+            .document
+
+        return parseResults(document)
     }
 
     override suspend fun load(
         url: String
     ): LoadResponse? {
 
-        val document = app.get(
-            url,
-            referer = "$mainUrl/"
-        ).document
+        val document = app
+            .get(
+                url,
+                referer = "$mainUrl/"
+            )
+            .document
 
-        val title =
-            document
+        val title = document
+            .selectFirst(
+                "h1, h2.entry-title, h1.entry-title"
+            )
+            ?.text()
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: document
                 .selectFirst(
-                    "h1, h2.entry-title, h1.entry-title"
+                    "meta[property='og:title']"
                 )
-                ?.text()
+                ?.attr("content")
                 ?.trim()
-                ?.takeIf {
-                    it.isNotBlank()
-                }
-                ?: document
-                    .selectFirst(
-                        "meta[property='og:title']"
-                    )
-                    ?.attr("content")
-                    ?.trim()
-                    ?.takeIf {
-                        it.isNotBlank()
-                    }
-                ?: return null
+                ?.takeIf { it.isNotBlank() }
+            ?: return null
 
         val poster =
             document
@@ -260,36 +211,34 @@ class OurDramaProvider : MainAPI() {
                 )
                 ?.attr("content")
                 ?.trim()
-                ?.takeIf {
-                    it.startsWith("http")
-                }
+                ?.takeIf { it.startsWith("http") }
                 ?: extractPosterFromDocument(document)
 
-        val plot =
-            document
-                .selectFirst(
-                    "meta[name='description'], meta[property='og:description']"
-                )
-                ?.attr("content")
-                ?.trim()
+        val plot = document
+            .selectFirst(
+                "meta[name='description'], meta[property='og:description']"
+            )
+            ?.attr("content")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
 
-        val year =
-            document
-                .selectFirst(".post-date")
-                ?.text()
-                ?.trim()
-                ?.toIntOrNull()
+        val year = document
+            .selectFirst(".post-date")
+            ?.text()
+            ?.trim()
+            ?.toIntOrNull()
 
         val episodes = document
-            .select("a[href*='/watch-']")
+            .select("a[href*='/episode/']")
+            .filterNot {
+                it.hasClass("watch_trailer")
+            }
             .mapNotNull { link ->
 
                 val href = link
                     .attr("href")
                     .trim()
-                    .takeIf {
-                        it.isNotBlank()
-                    }
+                    .takeIf { it.isNotBlank() }
                     ?: return@mapNotNull null
 
                 val episodeUrl = absoluteUrl(href)
@@ -297,9 +246,19 @@ class OurDramaProvider : MainAPI() {
                 val episodeText = link
                     .text()
                     .trim()
+                    .replace(
+                        Regex("\\s+"),
+                        " "
+                    )
 
-                val episode =
-                    Regex(
+                val episode = Regex(
+                    """(\d+)\s*/\s*\d+"""
+                )
+                    .find(episodeText)
+                    ?.groupValues
+                    ?.getOrNull(1)
+                    ?.toIntOrNull()
+                    ?: Regex(
                         """(?:الحلقة|episode|ep)[^\d]*(\d+)""",
                         RegexOption.IGNORE_CASE
                     )
@@ -307,35 +266,16 @@ class OurDramaProvider : MainAPI() {
                         ?.groupValues
                         ?.getOrNull(1)
                         ?.toIntOrNull()
-                        ?: Regex(
-                            """/(\d+)/?$"""
-                        )
-                            .find(episodeUrl)
-                            ?.groupValues
-                            ?.getOrNull(1)
-                            ?.toIntOrNull()
-                        ?: return@mapNotNull null
-
-                val season =
-                    Regex(
-                        """(?:الموسم|season)[^\d]*(\d+)""",
-                        RegexOption.IGNORE_CASE
-                    )
-                        .find(episodeText)
-                        ?.groupValues
-                        ?.getOrNull(1)
-                        ?.toIntOrNull()
-                        ?: 1
+                    ?: return@mapNotNull null
 
                 newEpisode(
                     episodeUrl
                 ) {
-
                     name = episodeText.ifBlank {
                         "Episode $episode"
                     }
 
-                    this.season = season
+                    season = 1
                     this.episode = episode
                 }
             }
@@ -366,41 +306,41 @@ class OurDramaProvider : MainAPI() {
         document: Document
     ): String? {
 
-        val metaToken = document
+        document
             .selectFirst(
                 "meta[name='csrf-token'], meta[name='csrf_token']"
             )
             ?.attr("content")
             ?.trim()
-            ?.takeIf {
-                it.isNotBlank()
+            ?.takeIf { it.isNotBlank() }
+            ?.let {
+                return it
             }
 
-        if (metaToken != null) {
-            return metaToken
-        }
+        document
+            .selectFirst(
+                "input[name='_token']"
+            )
+            ?.attr("value")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.let {
+                return it
+            }
 
         val html = document.html()
 
         val patterns = listOf(
-
             Regex(
                 """['"]X-CSRF-TOKEN['"]?\s*[:=]\s*['"]([^'"]+)['"]"""
             ),
-
             Regex(
                 """X-CSRF-TOKEN\s*:\s*['"]([^'"]+)['"]"""
             ),
-
-            Regex(
-                """X-CSRF-TOKEN\s*=\s*['"]([^'"]+)['"]"""
-            ),
-
             Regex(
                 """csrfToken\s*[:=]\s*['"]([^'"]+)['"]""",
                 RegexOption.IGNORE_CASE
             ),
-
             Regex(
                 """csrf-token['"]?\s*[:=]\s*['"]([^'"]+)['"]""",
                 RegexOption.IGNORE_CASE
@@ -427,14 +367,12 @@ class OurDramaProvider : MainAPI() {
         codePlay: String
     ): List<String> {
 
-        val document = Jsoup.parseBodyFragment(
+        val document = org.jsoup.Jsoup.parseBodyFragment(
             codePlay
         )
 
         return document
-            .select(
-                "iframe[src], iframe[data-src]"
-            )
+            .select("iframe[src], iframe[data-src]")
             .mapNotNull { iframe ->
 
                 val src = iframe
@@ -465,14 +403,16 @@ class OurDramaProvider : MainAPI() {
 
         val episodeUrl = data
 
-        val document = app.get(
-            episodeUrl,
-            referer = "$mainUrl/"
-        ).document
+        val document = runCatching {
+            app.get(
+                episodeUrl,
+                referer = "$mainUrl/"
+            ).document
+        }.getOrNull()
+            ?: return false
 
-        val csrfToken =
-            extractCsrfToken(document)
-                ?: return false
+        val csrfToken = extractCsrfToken(document)
+            ?: return false
 
         val serverCodes = document
             .select(
@@ -483,9 +423,7 @@ class OurDramaProvider : MainAPI() {
                 server
                     .attr("data-code")
                     .trim()
-                    .takeIf {
-                        it.isNotBlank()
-                    }
+                    .takeIf { it.isNotBlank() }
             }
             .distinct()
 
@@ -493,8 +431,16 @@ class OurDramaProvider : MainAPI() {
             return false
         }
 
+        val loadedUrls = mutableSetOf<String>()
+
         var loaded = false
 
+        /*
+         * Important:
+         * السيرفرات تتعالج sequentially.
+         * ما نستعملوش parallel requests لأن الاختبار السابق
+         * أثبت أن parallel requests تنجم تعمل ERR_CONNECTION_ABORTED.
+         */
         for (serverCode in serverCodes) {
 
             val response = runCatching {
@@ -522,34 +468,11 @@ class OurDramaProvider : MainAPI() {
             }.getOrNull()
                 ?: continue
 
-            val status = when {
-
-                json.optBoolean(
-                    "status",
-                    false
-                ) -> true
-
-                json.optString(
-                    "status"
-                ).equals(
-                    "true",
-                    ignoreCase = true
-                ) -> true
-
-                json.optString(
-                    "status"
-                ).equals(
-                    "success",
-                    ignoreCase = true
-                ) -> true
-
-                else -> false
-            }
-
-            if (!status) {
-                continue
-            }
-
+            /*
+             * codeplay هو القيمة المهمة.
+             * ما نربطوش نجاح الطلب بقيمة status لأن
+             * codeplay نفسه هو اللي يحتوي iframe الحقيقي.
+             */
             val codePlay = json
                 .optString("codeplay")
                 .trim()
@@ -568,189 +491,825 @@ class OurDramaProvider : MainAPI() {
 
             for (iframeUrl in iframeUrls) {
 
-                val hlsUrl = runCatching {
-                    extractHlsFromEmbed(
-                        iframeUrl,
-                        episodeUrl
-                    )
-                }.getOrNull()
-
-                if (hlsUrl.isNullOrBlank()) {
-                    continue
-                }
-
-                callback(
-                    newExtractorLink(
-                        source = "OurDrama",
-                        name = "OurDrama",
-                        url = hlsUrl,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        referer = iframeUrl
-                        quality = Qualities.Unknown.value
-                    }
+                val provider = detectProvider(
+                    iframeUrl
                 )
 
-                loaded = true
+                when (provider) {
+
+                    "rpmshare" -> {
+                        val sources = runCatching {
+                            extractRpmshareSources(
+                                iframeUrl
+                            )
+                        }.getOrDefault(emptyList())
+
+                        for (source in sources) {
+
+                            if (
+                                source.url.isBlank() ||
+                                !loadedUrls.add(source.url)
+                            ) {
+                                continue
+                            }
+
+                            callback(
+                                newExtractorLink(
+                                    source = "OurDrama - Rpmshare",
+                                    name = "Rpmshare",
+                                    url = source.url,
+                                    type = ExtractorLinkType.M3U8
+                                ) {
+                                    referer = source.referer
+                                    quality =
+                                        Qualities.Unknown.value
+                                }
+                            )
+
+                            loaded = true
+                        }
+                    }
+
+                    "okru" -> {
+                        val success = runCatching {
+                            loadExtractor(
+                                iframeUrl,
+                                episodeUrl,
+                                subtitleCallback,
+                                callback
+                            )
+                        }.getOrDefault(false)
+
+                        if (success) {
+                            loaded = true
+                        } else {
+                            val hls = runCatching {
+                                extractOkRuHls(
+                                    iframeUrl
+                                )
+                            }.getOrNull()
+
+                            if (
+                                !hls.isNullOrBlank() &&
+                                loadedUrls.add(hls)
+                            ) {
+                                callback(
+                                    newExtractorLink(
+                                        source = "OurDrama - OK.ru",
+                                        name = "OK.ru",
+                                        url = hls,
+                                        type = ExtractorLinkType.M3U8
+                                    ) {
+                                        referer = iframeUrl
+                                        quality =
+                                            Qualities.Unknown.value
+                                    }
+                                )
+
+                                loaded = true
+                            }
+                        }
+                    }
+
+                    "vidmo" -> {
+                        val success = runCatching {
+                            loadExtractor(
+                                iframeUrl,
+                                episodeUrl,
+                                subtitleCallback,
+                                callback
+                            )
+                        }.getOrDefault(false)
+
+                        if (success) {
+                            loaded = true
+                        } else {
+                            val hls = runCatching {
+                                extractPlayerHls(
+                                    iframeUrl,
+                                    episodeUrl
+                                )
+                            }.getOrNull()
+
+                            if (
+                                !hls.isNullOrBlank() &&
+                                loadedUrls.add(hls)
+                            ) {
+                                callback(
+                                    newExtractorLink(
+                                        source = "OurDrama - Vidmo",
+                                        name = "Vidmo",
+                                        url = hls,
+                                        type = ExtractorLinkType.M3U8
+                                    ) {
+                                        referer = iframeUrl
+                                        quality =
+                                            Qualities.Unknown.value
+                                    }
+                                )
+
+                                loaded = true
+                            }
+                        }
+                    }
+
+                    "earnvids" -> {
+                        val success = runCatching {
+                            loadExtractor(
+                                iframeUrl,
+                                episodeUrl,
+                                subtitleCallback,
+                                callback
+                            )
+                        }.getOrDefault(false)
+
+                        if (success) {
+                            loaded = true
+                        } else {
+                            val hls = runCatching {
+                                extractPlayerHls(
+                                    iframeUrl,
+                                    episodeUrl
+                                )
+                            }.getOrNull()
+
+                            if (
+                                !hls.isNullOrBlank() &&
+                                loadedUrls.add(hls)
+                            ) {
+                                callback(
+                                    newExtractorLink(
+                                        source = "OurDrama - Earnvids",
+                                        name = "Earnvids",
+                                        url = hls,
+                                        type = ExtractorLinkType.M3U8
+                                    ) {
+                                        referer = iframeUrl
+                                        quality =
+                                            Qualities.Unknown.value
+                                    }
+                                )
+
+                                loaded = true
+                            }
+                        }
+                    }
+
+                    else -> {
+                        val success = runCatching {
+                            loadExtractor(
+                                iframeUrl,
+                                episodeUrl,
+                                subtitleCallback,
+                                callback
+                            )
+                        }.getOrDefault(false)
+
+                        if (success) {
+                            loaded = true
+                        }
+                    }
+                }
             }
         }
 
         return loaded
     }
 
-    private suspend fun extractHlsFromEmbed(
-        iframeUrl: String,
-        episodeUrl: String
-    ): String? {
+    private fun detectProvider(
+        iframeUrl: String
+    ): String {
 
-        val response = app.get(
-            iframeUrl,
-            referer = episodeUrl
+        val host = runCatching {
+            URI(iframeUrl).host
+                ?.lowercase()
+                .orEmpty()
+        }.getOrDefault(
+            iframeUrl.lowercase()
         )
 
-        val html = response.text
+        return when {
+
+            host.contains("rpmvid.site") ||
+                host.contains("rpmshare") ->
+                "rpmshare"
+
+            host == "ok.ru" ||
+                host.endsWith(".ok.ru") ->
+                "okru"
+
+            host.contains("vidmoly") ||
+                host.contains("vidmo") ||
+                host.contains("vmnow") ->
+                "vidmo"
+
+            host.contains("ourdrama.cc") ->
+                "earnvids"
+
+            else ->
+                "unknown"
+        }
+    }
+
+    /*
+     * ============================================================
+     * Rpmshare
+     * ============================================================
+     */
+
+    private data class RpmSource(
+        val url: String,
+        val referer: String
+    )
+
+    private suspend fun extractRpmshareSources(
+        iframeUrl: String
+    ): List<RpmSource> {
+
+        val videoId = iframeUrl
+            .substringAfter("#", "")
+            .substringBefore("&")
+            .trim()
+
+        if (videoId.isBlank()) {
+            return emptyList()
+        }
+
+        val apiUrl =
+            "https://7.rpmvid.site/api/v1/video" +
+                "?id=${URLEncoder.encode(videoId, "UTF-8")}" +
+                "&w=384" +
+                "&h=832" +
+                "&r="
+
+        val encrypted = app
+            .get(
+                apiUrl,
+                referer = iframeUrl
+            )
+            .text
+            .trim()
+
+        if (encrypted.isBlank()) {
+            return emptyList()
+        }
+
+        val jsonText = decryptRpmshare(
+            encrypted
+        ) ?: return emptyList()
+
+        val json = runCatching {
+            JSONObject(jsonText)
+        }.getOrNull()
+            ?: return emptyList()
+
+        val pk = json.optJSONObject("pk")
+
+        val key = pk
+            ?.optString("k")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+
+        val keyExpire = pk
+            ?.optLong(
+                "kx",
+                0L
+            )
+            ?.takeIf { it > 0L }
+
+        val streamingConfig = runCatching {
+            JSONObject(
+                json.optString(
+                    "streamingConfig"
+                )
+            )
+        }.getOrNull()
+
+        val order = streamingConfig
+            ?.optJSONArray("order")
+
+        val sources = mutableListOf<RpmSource>()
+
+        fun addSource(
+            rawUrl: String?,
+            provider: String
+        ) {
+
+            var url = rawUrl
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?: return
+
+            val adjust = streamingConfig
+                ?.optJSONObject("adjust")
+                ?.optJSONObject(provider)
+
+            if (
+                adjust?.optBoolean(
+                    "disabled",
+                    false
+                ) == true
+            ) {
+                return
+            }
+
+            val domain = adjust
+                ?.optString("domain")
+                ?.trim()
+                .orEmpty()
+
+            val params = adjust
+                ?.optJSONObject("params")
+
+            if (
+                provider.equals(
+                    "Tiktok",
+                    ignoreCase = true
+                ) &&
+                url.startsWith("/hls/") &&
+                domain.isNotBlank()
+            ) {
+                url =
+                    "https://7.rpmvid.site" +
+                        "/hlsmod/" +
+                        domain +
+                        url
+            } else {
+                url = resolveRpmUrl(
+                    url,
+                    "https://7.rpmvid.site/"
+                )
+            }
+
+            if (params != null) {
+
+                val query = StringBuilder()
+
+                val keys = params.keys()
+
+                while (keys.hasNext()) {
+
+                    val keyName = keys.next()
+
+                    val value = params
+                        .optString(keyName)
+                        .trim()
+
+                    if (value.isBlank()) {
+                        continue
+                    }
+
+                    if (query.isNotEmpty()) {
+                        query.append("&")
+                    }
+
+                    query.append(
+                        URLEncoder.encode(
+                            keyName,
+                            "UTF-8"
+                        )
+                    )
+
+                    query.append("=")
+
+                    query.append(
+                        URLEncoder.encode(
+                            value,
+                            "UTF-8"
+                        )
+                    )
+                }
+
+                if (query.isNotEmpty()) {
+                    url = appendQuery(
+                        url,
+                        query.toString()
+                    )
+                }
+            }
+
+            /*
+             * The Rpmshare player adds k/kx to /v4/ URLs.
+             * Values come dynamically from pk.
+             */
+            if (
+                url.contains("/v4/") &&
+                !url.contains(
+                    "k=",
+                    ignoreCase = true
+                ) &&
+                !key.isNullOrBlank() &&
+                keyExpire != null
+            ) {
+                url = appendQuery(
+                    url,
+                    "k=${URLEncoder.encode(key, "UTF-8")}" +
+                        "&kx=$keyExpire"
+                )
+            }
+
+            if (
+                url.startsWith("http://") ||
+                url.startsWith("https://")
+            ) {
+                sources.add(
+                    RpmSource(
+                        url = url,
+                        referer = "https://7.rpmvid.site/"
+                    )
+                )
+            }
+        }
+
+        if (order != null) {
+
+            for (i in 0 until order.length()) {
+
+                val provider = order
+                    .optString(i)
+                    .trim()
+
+                when {
+                    provider.equals(
+                        "Tiktok",
+                        ignoreCase = true
+                    ) -> {
+                        addSource(
+                            json.optString(
+                                "hlsVideoTiktok"
+                            ),
+                            "Tiktok"
+                        )
+                    }
+
+                    provider.equals(
+                        "Google",
+                        ignoreCase = true
+                    ) -> {
+                        addSource(
+                            json.optString(
+                                "hlsVideoGoogle"
+                            ),
+                            "Google"
+                        )
+                    }
+
+                    provider.equals(
+                        "Cloudflare",
+                        ignoreCase = true
+                    ) -> {
+                        /*
+                         * cfNative is the direct HLS source.
+                         * cf is kept as fallback if cfNative is absent.
+                         */
+                        addSource(
+                            json.optString(
+                                "cfNative"
+                            ).takeIf {
+                                it.isNotBlank()
+                            } ?: json.optString("cf"),
+                            "Cloudflare"
+                        )
+                    }
+
+                    provider.equals(
+                        "In-House",
+                        ignoreCase = true
+                    ) -> {
+                        addSource(
+                            json.optString(
+                                "source"
+                            ),
+                            "In-House"
+                        )
+                    }
+                }
+            }
+        }
+
+        /*
+         * Fallback if the site's order is absent/changed.
+         * Only dynamic values from the current JSON are used.
+         */
+        if (sources.isEmpty()) {
+
+            addSource(
+                json.optString(
+                    "hlsVideoTiktok"
+                ),
+                "Tiktok"
+            )
+
+            addSource(
+                json.optString(
+                    "cfNative"
+                ),
+                "Cloudflare"
+            )
+
+            addSource(
+                json.optString(
+                    "source"
+                ),
+                "In-House"
+            )
+        }
+
+        return sources.distinctBy {
+            it.url
+        }
+    }
+
+    private fun decryptRpmshare(
+        encrypted: String
+    ): String? {
+
+        val cleanHex = encrypted
+            .trim()
+            .removePrefix("0x")
+
+        if (
+            cleanHex.isBlank() ||
+            cleanHex.length % 2 != 0
+        ) {
+            return null
+        }
+
+        val bytes = runCatching {
+
+            ByteArray(
+                cleanHex.length / 2
+            ) { index ->
+
+                cleanHex
+                    .substring(
+                        index * 2,
+                        index * 2 + 2
+                    )
+                    .toInt(16)
+                    .toByte()
+            }
+
+        }.getOrNull()
+            ?: return null
+
+        return runCatching {
+
+            val cipher = Cipher.getInstance(
+                "AES/CBC/PKCS5Padding"
+            )
+
+            val key = SecretKeySpec(
+                "kiemtienmua911ca"
+                    .toByteArray(Charsets.UTF_8),
+                "AES"
+            )
+
+            val iv = IvParameterSpec(
+                "1234567890oiuytr"
+                    .toByteArray(Charsets.UTF_8)
+            )
+
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                key,
+                iv
+            )
+
+            String(
+                cipher.doFinal(bytes),
+                Charsets.UTF_8
+            )
+
+        }.getOrNull()
+    }
+
+    private fun resolveRpmUrl(
+        url: String,
+        base: String
+    ): String {
+
+        return when {
+
+            url.startsWith("https://") ||
+                url.startsWith("http://") ->
+                url
+
+            url.startsWith("//") ->
+                "https:$url"
+
+            else ->
+                URI(base)
+                    .resolve(url)
+                    .toString()
+        }
+    }
+
+    private fun appendQuery(
+        url: String,
+        query: String
+    ): String {
+
+        if (query.isBlank()) {
+            return url
+        }
+
+        return if (url.contains("?")) {
+            "$url&$query"
+        } else {
+            "$url?$query"
+        }
+    }
+
+    /*
+     * ============================================================
+     * OK.ru
+     * ============================================================
+     */
+
+    private suspend fun extractOkRuHls(
+        iframeUrl: String
+    ): String? {
+
+        val html = app
+            .get(
+                iframeUrl,
+                referer = "$mainUrl/"
+            )
+            .text
 
         if (html.isBlank()) {
             return null
         }
 
-        /*
-         * المحاولة الأولى:
-         * decoder الرسمي الموجود في CloudStream.
-         */
-        val officialUnpacked = runCatching {
-            getAndUnpack(html)
-        }.getOrDefault(html)
-
-        extractHlsUrl(
-            officialUnpacked,
-            "hls3"
-        )?.let {
-            return it
-        }
-
-        extractHlsUrl(
-            officialUnpacked,
-            "hls2"
-        )?.let {
-            return it
-        }
-
-        /*
-         * المحاولة الثانية:
-         * manual P.A.C.K.E.R.
-         */
-        val document = Jsoup.parse(html)
-
-        val scripts = document
-            .select("script")
-            .map {
-                it.data()
-            }
-            .filter {
-                it.isNotBlank()
-            }
-
-        for (script in scripts) {
-
-            if (
-                !script.contains(
-                    "eval",
-                    ignoreCase = true
-                )
-            ) {
-                continue
-            }
-
-            val unpacked = unpackPacker(
-                script
-            ) ?: continue
-
-            extractHlsUrl(
-                unpacked,
-                "hls3"
-            )?.let {
-                return it
-            }
-
-            extractHlsUrl(
-                unpacked,
-                "hls2"
-            )?.let {
-                return it
-            }
-        }
-
-        /*
-         * المحاولة الثالثة:
-         * أحياناً يكون الرابط موجوداً أصلاً
-         * في HTML بدون packing.
-         */
-        extractHlsUrl(
-            html,
-            "hls3"
-        )?.let {
-            return it
-        }
-
-        extractHlsUrl(
-            html,
-            "hls2"
-        )?.let {
-            return it
-        }
-
-        return null
-    }
-
-    private fun extractHlsUrl(
-        content: String,
-        key: String
-    ): String? {
-
-        val escapedKey = Regex.escape(key)
-
         val patterns = listOf(
 
             Regex(
-                """["']$escapedKey["']\s*:\s*["']((?:\\.|[^"'\\])*)["']""",
+                """["']hlsManifestUrl["']\s*:\s*["']([^"']+\.m3u8[^"']*)["']""",
                 RegexOption.IGNORE_CASE
             ),
 
             Regex(
-                """\b$escapedKey\b\s*:\s*["']((?:\\.|[^"'\\])*)["']""",
-                RegexOption.IGNORE_CASE
-            ),
-
-            Regex(
-                """\b$escapedKey\b\s*=\s*["']((?:\\.|[^"'\\])*)["']""",
-                RegexOption.IGNORE_CASE
-            ),
-
-            Regex(
-                """\b(?:links|sources|video|player)\s*\.\s*$escapedKey\s*=\s*["']((?:\\.|[^"'\\])*)["']""",
+                """https?://[^"'\\\s<>]+\.m3u8[^"'\\\s<>]*""",
                 RegexOption.IGNORE_CASE
             )
         )
 
         for (pattern in patterns) {
 
-            val raw = pattern
+            val value = pattern
+                .find(html)
+                ?.groupValues
+                ?.getOrNull(
+                    if (pattern == patterns.first()) 1 else 0
+                )
+                ?.replace(
+                    "\\/",
+                    "/"
+                )
+                ?.trim()
+
+            if (
+                !value.isNullOrBlank() &&
+                (
+                    value.startsWith("https://") ||
+                        value.startsWith("http://")
+                )
+            ) {
+                return value
+            }
+        }
+
+        return null
+    }
+
+    /*
+     * ============================================================
+     * JWPlayer fallback
+     * ============================================================
+     *
+     * Earnvids / Vidmo عندهم JWPlayer حسب الاختبار.
+     * نحاول استخراج نفس file/source URL من HTML/JS
+     * إذا كان موجودًا server-side، وبعدها loadExtractor
+     * يبقى هو الطريق الأول.
+     */
+
+    private suspend fun extractPlayerHls(
+        iframeUrl: String,
+        episodeUrl: String
+    ): String? {
+
+        val html = app
+            .get(
+                iframeUrl,
+                referer = episodeUrl
+            )
+            .text
+
+        if (html.isBlank()) {
+            return null
+        }
+
+        val unpacked = runCatching {
+            getAndUnpack(html)
+        }.getOrDefault(html)
+
+        val contents = listOf(
+            unpacked,
+            html
+        ).distinct()
+
+        for (content in contents) {
+
+            val direct = extractM3u8FromText(
+                content
+            )
+
+            if (!direct.isNullOrBlank()) {
+                return direct
+            }
+
+            val file = extractPlayerFile(
+                content
+            )
+
+            if (
+                !file.isNullOrBlank() &&
+                file.contains(
+                    ".m3u8",
+                    ignoreCase = true
+                )
+            ) {
+                return resolvePlayerUrl(
+                    file,
+                    iframeUrl
+                )
+            }
+        }
+
+        return null
+    }
+
+    private fun extractM3u8FromText(
+        content: String
+    ): String? {
+
+        val match = Regex(
+            """https?://[^"'\\\s<>]+\.m3u8[^"'\\\s<>]*""",
+            RegexOption.IGNORE_CASE
+        )
+            .find(content)
+            ?.value
+            ?.replace(
+                "\\/",
+                "/"
+            )
+            ?.trim()
+
+        return match
+    }
+
+    private fun extractPlayerFile(
+        content: String
+    ): String? {
+
+        val patterns = listOf(
+
+            Regex(
+                """["']file["']\s*:\s*["']((?:\\.|[^"'\\])+)["']""",
+                RegexOption.IGNORE_CASE
+            ),
+
+            Regex(
+                """file\s*:\s*["']((?:\\.|[^"'\\])+)["']""",
+                RegexOption.IGNORE_CASE
+            ),
+
+            Regex(
+                """["']src["']\s*:\s*["']((?:\\.|[^"'\\])+)["']""",
+                RegexOption.IGNORE_CASE
+            )
+        )
+
+        for (pattern in patterns) {
+
+            val value = pattern
                 .find(content)
                 ?.groupValues
                 ?.getOrNull(1)
                 ?.trim()
                 ?: continue
 
-            val decoded = decodeJsString(
-                raw
-            )
-                .trim()
-                .trim('"', '\'')
+            val decoded = value
+                .replace("\\/", "/")
+                .replace("\\u0026", "&")
+                .replace("\\&", "&")
 
             if (
+                decoded.startsWith("http://") ||
                 decoded.startsWith("https://") ||
-                decoded.startsWith("http://")
+                decoded.startsWith("//") ||
+                decoded.startsWith("/")
             ) {
                 return decoded
             }
@@ -759,203 +1318,24 @@ class OurDramaProvider : MainAPI() {
         return null
     }
 
-    private fun unpackPacker(
-        script: String
-    ): String? {
-
-        /*
-         * Dean Edwards P.A.C.K.E.R.
-         *
-         * نحاول أكثر من شكل لأن المسافات والتنسيق
-         * ينجموا يتبدلوا بدون ما تتبدل البنية.
-         */
-
-        val patterns = listOf(
-
-            Regex(
-                """eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*d\s*\)\s*\{[\s\S]*?\}\s*\(\s*(['"])([\s\S]*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])([\s\S]*?)\5\s*\.\s*split\s*\(\s*['"]\|['"]\s*\)""",
-                RegexOption.IGNORE_CASE
-            ),
-
-            Regex(
-                """eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*d\s*\)[\s\S]*?\(\s*(['"])([\s\S]*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])([\s\S]*?)\5\s*\.\s*split\s*\(\s*['"]\|['"]\s*\)""",
-                RegexOption.IGNORE_CASE
-            )
-        )
-
-        for (pattern in patterns) {
-
-            val match = pattern
-                .find(script)
-                ?: continue
-
-            val packed = match
-                .groupValues
-                .getOrNull(2)
-                ?: continue
-
-            val base = match
-                .groupValues
-                .getOrNull(3)
-                ?.toIntOrNull()
-                ?: continue
-
-            val count = match
-                .groupValues
-                .getOrNull(4)
-                ?.toIntOrNull()
-                ?: continue
-
-            val dictionaryRaw = match
-                .groupValues
-                .getOrNull(6)
-                ?: continue
-
-            if (
-                base < 2 ||
-                count <= 0
-            ) {
-                continue
-            }
-
-            val dictionary = decodeJsString(
-                dictionaryRaw
-            ).split("|")
-
-            var unpacked = decodeJsString(
-                packed
-            )
-
-            for (index in count - 1 downTo 0) {
-
-                if (
-                    index >= dictionary.size
-                ) {
-                    continue
-                }
-
-                val word = dictionary[index]
-
-                if (word.isEmpty()) {
-                    continue
-                }
-
-                val token = encodeBase(
-                    index,
-                    base
-                )
-
-                unpacked = unpacked.replace(
-                    Regex(
-                        """\b${Regex.escape(token)}\b"""
-                    ),
-                    word
-                )
-            }
-
-            if (
-                unpacked.contains(
-                    "hls3",
-                    ignoreCase = true
-                ) ||
-                unpacked.contains(
-                    "hls2",
-                    ignoreCase = true
-                )
-            ) {
-                return unpacked
-            }
-        }
-
-        return null
-    }
-
-    private fun encodeBase(
-        value: Int,
-        base: Int
+    private fun resolvePlayerUrl(
+        url: String,
+        iframeUrl: String
     ): String {
 
-        val alphabet =
-            "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        return when {
 
-        if (
-            value == 0
-        ) {
-            return "0"
+            url.startsWith("https://") ||
+                url.startsWith("http://") ->
+                url
+
+            url.startsWith("//") ->
+                "https:$url"
+
+            else ->
+                URI(iframeUrl)
+                    .resolve(url)
+                    .toString()
         }
-
-        if (
-            base < 2 ||
-            base > alphabet.length
-        ) {
-            return value.toString()
-        }
-
-        var number = value
-
-        val result = StringBuilder()
-
-        while (number > 0) {
-
-            result.append(
-                alphabet[number % base]
-            )
-
-            number /= base
-        }
-
-        return result
-            .reverse()
-            .toString()
-    }
-
-    private fun decodeJsString(
-        value: String
-    ): String {
-
-        var result = value
-
-        result = result
-            .replace("\\'", "'")
-            .replace("\\\"", "\"")
-            .replace("\\/", "/")
-            .replace("\\n", "\n")
-            .replace("\\r", "\r")
-            .replace("\\t", "\t")
-
-        result = Regex(
-            """\\u([0-9a-fA-F]{4})"""
-        ).replace(result) { match ->
-
-            val number = match
-                .groupValues
-                .getOrNull(1)
-                ?.toIntOrNull(16)
-
-            number
-                ?.toChar()
-                ?.toString()
-                ?: match.value
-        }
-
-        result = Regex(
-            """\\x([0-9a-fA-F]{2})"""
-        ).replace(result) { match ->
-
-            val number = match
-                .groupValues
-                .getOrNull(1)
-                ?.toIntOrNull(16)
-
-            number
-                ?.toChar()
-                ?.toString()
-                ?: match.value
-        }
-
-        result = result
-            .replace("\\\\", "\\")
-
-        return result
     }
 }
