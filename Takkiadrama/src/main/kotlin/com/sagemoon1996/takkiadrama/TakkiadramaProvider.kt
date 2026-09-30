@@ -1,8 +1,9 @@
 package com.sagemoon1996.takkiadrama
 
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import org.json.JSONObject
+import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import java.net.URLEncoder
 
 class TakkiadramaProvider : MainAPI() {
@@ -23,7 +24,10 @@ class TakkiadramaProvider : MainAPI() {
         "$mainUrl/movies/" to "أحدث الأفلام"
     )
 
-    private fun getPageUrl(baseUrl: String, page: Int): String {
+    private fun getPageUrl(
+        baseUrl: String,
+        page: Int
+    ): String {
         return if (page <= 1) {
             baseUrl
         } else {
@@ -31,90 +35,113 @@ class TakkiadramaProvider : MainAPI() {
         }
     }
 
-    private fun getPoster(element: org.jsoup.nodes.Element): String? {
-        return element.selectFirst("img[data-img]")?.attr("data-img")
+    private fun getPoster(
+        element: Element
+    ): String? {
+        return element
+            .selectFirst("img[data-img]")
+            ?.attr("data-img")
             ?.takeIf { it.isNotBlank() }
-            ?: element.selectFirst("img")?.attr("src")
-                ?.takeIf { it.isNotBlank() && !it.contains("load.gif") }
+            ?: element
+                .selectFirst("img")
+                ?.attr("src")
+                ?.takeIf {
+                    it.isNotBlank() &&
+                    !it.contains("load.gif")
+                }
     }
 
     private fun parseDramaCards(
-        document: org.jsoup.nodes.Document
+        document: Document
     ): List<SearchResponse> {
-        return document.select(".drama-card").mapNotNull { card ->
+        return document
+            .select(".drama-card")
+            .mapNotNull { card ->
 
-            val href = card.attr("href").trim()
+                val href = card
+                    .attr("href")
+                    .trim()
 
-            if (href.isBlank()) {
-                return@mapNotNull null
-            }
-
-            val title = card.selectFirst(".drama-title")?.text()?.trim()
-                ?.takeIf { it.isNotBlank() }
-                ?: card.text().trim()
-
-            if (title.isBlank()) {
-                return@mapNotNull null
-            }
-
-            val poster = getPoster(card)
-
-            when {
-                href.contains("/series/") -> {
-                    newTvSeriesSearchResponse(
-                        title,
-                        href,
-                        TvType.TvSeries
-                    ) {
-                        posterUrl = poster
-                    }
+                if (href.isBlank()) {
+                    return@mapNotNull null
                 }
 
-                href.contains("/movies/") -> {
-                    newMovieSearchResponse(
-                        title,
-                        href,
-                        TvType.Movie
-                    ) {
-                        posterUrl = poster
-                    }
+                val title = card
+                    .selectFirst(".drama-title")
+                    ?.text()
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?: card.text().trim()
+
+                if (title.isBlank()) {
+                    return@mapNotNull null
                 }
 
-                else -> null
+                val poster = getPoster(card)
+
+                when {
+                    href.contains("/series/") -> {
+                        newTvSeriesSearchResponse(
+                            title,
+                            href,
+                            TvType.TvSeries
+                        ) {
+                            posterUrl = poster
+                        }
+                    }
+
+                    href.contains("/movies/") -> {
+                        newMovieSearchResponse(
+                            title,
+                            href,
+                            TvType.Movie
+                        ) {
+                            posterUrl = poster
+                        }
+                    }
+
+                    else -> null
+                }
             }
-        }
     }
 
     private fun parseEpisodeCards(
-        document: org.jsoup.nodes.Document
+        document: Document
     ): List<Episode> {
-        return document.select(".episode-card-landscape").mapNotNull { card ->
+        return document
+            .select(".episode-card-landscape")
+            .mapNotNull { card ->
 
-            val href = card.attr("href").trim()
+                val href = card
+                    .attr("href")
+                    .trim()
 
-            if (href.isBlank()) {
-                return@mapNotNull null
+                if (href.isBlank()) {
+                    return@mapNotNull null
+                }
+
+                val episodeTitle = card
+                    .selectFirst(".episode-card-title")
+                    ?.text()
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?: "حلقة"
+
+                val episodeNumber = card
+                    .selectFirst(".episode-card-number span")
+                    ?.text()
+                    ?.trim()
+                    ?.toIntOrNull()
+
+                val poster = getPoster(card)
+
+                newEpisode(href) {
+                    name = episodeTitle
+                    season = 1
+                    episode = episodeNumber ?: 1
+                    posterUrl = poster
+                }
             }
-
-            val episodeTitle = card.selectFirst(".episode-card-title")
-                ?.text()
-                ?.trim()
-                ?.takeIf { it.isNotBlank() }
-                ?: "حلقة"
-
-            val episodeNumber = card.selectFirst(
-                ".episode-card-number span"
-            )?.text()?.trim()?.toIntOrNull()
-
-            val poster = getPoster(card)
-
-            newEpisode(href) {
-                name = episodeTitle
-                season = 1
-                episode = episodeNumber ?: 1
-                posterUrl = poster
-            }
-        }
     }
 
     override suspend fun getMainPage(
@@ -122,16 +149,21 @@ class TakkiadramaProvider : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse {
 
-        val baseUrl = request.data
-        val url = getPageUrl(baseUrl, page)
+        val url = getPageUrl(
+            request.data,
+            page
+        )
 
-        val document = app.get(url).document
+        val document = app
+            .get(url)
+            .document
 
         val items = parseDramaCards(document)
 
-        val hasNext = document.selectFirst(
-            "a[href*=\"/page/${page + 1}/\"]"
-        ) != null
+        val hasNext = document
+            .selectFirst(
+                "a[href*=\"/page/${page + 1}/\"]"
+            ) != null
 
         return newHomePageResponse(
             request.name,
@@ -140,7 +172,9 @@ class TakkiadramaProvider : MainAPI() {
         )
     }
 
-    override suspend fun search(query: String): List<SearchResponse> {
+    override suspend fun search(
+        query: String
+    ): List<SearchResponse> {
 
         val encodedQuery = URLEncoder.encode(
             query.trim(),
@@ -149,47 +183,61 @@ class TakkiadramaProvider : MainAPI() {
 
         val url = "$mainUrl/?s=$encodedQuery"
 
-        val document = app.get(url).document
+        val document = app
+            .get(url)
+            .document
 
         return parseDramaCards(document)
     }
 
-    override suspend fun load(url: String): LoadResponse {
+    override suspend fun load(
+        url: String
+    ): LoadResponse {
 
-        val document = app.get(url).document
+        val document = app
+            .get(url)
+            .document
 
         return when {
 
             url.contains("/series/") -> {
-                val title = document.selectFirst("h1")
+
+                val title = document
+                    .selectFirst("h1")
                     ?.text()
                     ?.trim()
                     ?.takeIf { it.isNotBlank() }
-                    ?: url.substringAfterLast("/")
-                        .replace("-", " ")
-                        .trim()
+                    ?: throw ErrorLoadingException(
+                        "Series title not found"
+                    )
 
-                val poster = document.selectFirst(
-                    "img[data-img]"
-                )?.attr("data-img")
+                val poster = document
+                    .selectFirst("img[data-img]")
+                    ?.attr("data-img")
                     ?.takeIf { it.isNotBlank() }
-                    ?: document.selectFirst("img")
+                    ?: document
+                        .selectFirst("img")
                         ?.attr("src")
                         ?.takeIf {
                             it.isNotBlank() &&
                             !it.contains("load.gif")
                         }
 
-                val listUrl = document.selectFirst(
-                    "a[href*=\"/list/\"]"
-                )?.attr("href")
+                val listUrl = document
+                    .selectFirst("a[href*=\"/list/\"]")
+                    ?.attr("href")
+                    ?.takeIf { it.isNotBlank() }
                     ?: throw ErrorLoadingException(
                         "Episodes list not found"
                     )
 
-                val listDocument = app.get(listUrl).document
+                val listDocument = app
+                    .get(listUrl)
+                    .document
 
-                val episodes = parseEpisodeCards(listDocument)
+                val episodes = parseEpisodeCards(
+                    listDocument
+                )
 
                 newTvSeriesLoadResponse(
                     title,
@@ -202,18 +250,22 @@ class TakkiadramaProvider : MainAPI() {
             }
 
             url.contains("/movies/") -> {
-                val title = document.selectFirst("h1")
+
+                val title = document
+                    .selectFirst("h1")
                     ?.text()
                     ?.trim()
+                    ?.takeIf { it.isNotBlank() }
                     ?: throw ErrorLoadingException(
                         "Movie title not found"
                     )
 
-                val poster = document.selectFirst(
-                    "img[data-img]"
-                )?.attr("data-img")
+                val poster = document
+                    .selectFirst("img[data-img]")
+                    ?.attr("data-img")
                     ?.takeIf { it.isNotBlank() }
-                    ?: document.selectFirst("img")
+                    ?: document
+                        .selectFirst("img")
                         ?.attr("src")
                         ?.takeIf {
                             it.isNotBlank() &&
@@ -245,21 +297,27 @@ class TakkiadramaProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
-        val sourceDocument = app.get(data).document
+        val sourceDocument = app
+            .get(data)
+            .document
 
-        val watchUrl = sourceDocument.selectFirst(
-            "a[href*=\"/watch/\"]"
-        )?.attr("href")
+        val watchUrl = sourceDocument
+            .selectFirst("a[href*=\"/watch/\"]")
+            ?.attr("href")
+            ?.takeIf { it.isNotBlank() }
             ?: return false
 
-        val watchDocument = app.get(watchUrl).document
+        val watchDocument = app
+            .get(watchUrl)
+            .document
 
         val serverUrls = watchDocument
             .select("[data-server-url]")
-            .mapNotNull {
-                it.attr("data-server-url")
+            .mapNotNull { element ->
+                element
+                    .attr("data-server-url")
                     .trim()
-                    .takeIf { value -> value.isNotBlank() }
+                    .takeIf { it.isNotBlank() }
             }
             .distinct()
 
@@ -271,16 +329,20 @@ class TakkiadramaProvider : MainAPI() {
                 continue
             }
 
-            val serverDocument = app.get(
-                serverUrl,
-                referer = watchUrl
-            ).document
+            val serverDocument = app
+                .get(
+                    serverUrl,
+                    referer = watchUrl
+                )
+                .document
 
-            val appElement = serverDocument.selectFirst(
-                "#app[data-page]"
-            ) ?: continue
+            val appElement = serverDocument
+                .selectFirst("#app[data-page]")
+                ?: continue
 
-            val pageData = appElement.attr("data-page")
+            val pageData = appElement
+                .attr("data-page")
+                .trim()
 
             if (pageData.isBlank()) {
                 continue
@@ -292,14 +354,17 @@ class TakkiadramaProvider : MainAPI() {
                 continue
             }
 
-            val props = json.optJSONObject("props")
+            val props = json
+                .optJSONObject("props")
                 ?: continue
 
-            val videoUrl = props.optString("url")
+            val videoUrl = props
+                .optString("url")
                 .takeIf { it.isNotBlank() }
                 ?: continue
 
-            val mime = props.optString("mime")
+            val mime = props
+                .optString("mime")
                 .lowercase()
 
             val videoType = when {
@@ -314,7 +379,8 @@ class TakkiadramaProvider : MainAPI() {
                 }
             }
 
-            val videoTitle = props.optString("title")
+            val videoTitle = props
+                .optString("title")
                 .takeIf { it.isNotBlank() }
                 ?: "71stream"
 
