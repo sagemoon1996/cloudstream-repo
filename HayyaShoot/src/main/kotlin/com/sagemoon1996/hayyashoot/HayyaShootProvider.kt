@@ -332,6 +332,10 @@ class HayyaShootProvider : MainAPI() {
     // false = production (no fake links).
     private val debugMode = true
 
+    // Shown in the first DEBUG entry: if you do not see it, the app is still
+    // running an OLD build of the plugin (bump `version` in build.gradle.kts).
+    private val buildTag = "build-5"
+
     private class StepFailure(val step: String, val detail: String) :
         Exception("$step $detail")
 
@@ -493,6 +497,14 @@ class HayyaShootProvider : MainAPI() {
             "HayyaShoot",
             "loadLinks start type=${media.type} id=${media.id} s=${media.season} e=${media.episode}"
         )
+
+        // Always-visible marker (debug only): proves this build's loadLinks ran
+        if (debugMode) {
+            reportFailure(
+                callback,
+                "$buildTag reached ${media.type} id=${media.id} s=${media.season} e=${media.episode}"
+            )
+        }
 
         // Try each VidSrc host until one gives a stream
         for (embedUrl in candidates) {
