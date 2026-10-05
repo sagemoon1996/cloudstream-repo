@@ -9,7 +9,6 @@ import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -302,7 +301,10 @@ class HayyaShootProvider : MainAPI() {
 
         val embedUrl =
             if (media.type == "tv" && media.season != null && media.episode != null) {
-                "https://vidsrc.me/embed/tv?tmdb=${media.id}&season=${media.season}&episode=${media.episode}&sub=ar"
+                "https://vidsrc.me/embed/tv?tmdb=${media.id}" +
+                    "&season=${media.season}" +
+                    "&episode=${media.episode}" +
+                    "&sub=ar"
             } else {
                 "https://vidsrc.me/embed/movie?tmdb=${media.id}&sub=ar"
             }
@@ -310,38 +312,101 @@ class HayyaShootProvider : MainAPI() {
         try {
             val embedHtml = app.get(
                 embedUrl,
+                headers = browserHeaders
+            ).text
+
+            val apiPath = Regex(
+                """<iframe[^>]+id=["']player_iframe["'][^>]+data-api=["']([^"']+)["']""",
+                RegexOption.IGNORE_CASE
+            )
+                .find(embedHtml)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?: return false
+
+            val apiUrl = if (apiPath.startsWith("http")) {
+                apiPath
+            } else {
+                "https://vidsrc.me$apiPath"
+            }
+
+            val apiHtml = app.get(
+                apiUrl,
                 headers = browserHeaders + mapOf(
-                    "Referer" to mainUrl
+                    "Referer" to embedUrl,
+                    "Accept" to "application/json, text/plain, */*"
                 )
             ).text
 
-            val iframeRegex = Regex(
-                """<iframe[^>]+src=["']([^"']+)["']""",
+            val cloudUrl = Regex(
+                """"src"\s*:\s*"([^"]+)"""",
                 RegexOption.IGNORE_CASE
             )
+                .find(apiHtml)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.replace("\\/", "/")
+                ?: return false
 
-            val iframeUrls = iframeRegex
-                .findAll(embedHtml)
-                .mapNotNull { it.groupValues.getOrNull(1) }
-                .map { fixUrl(it) }
-                .distinct()
-                .toList()
+            val cloudHtml = app.get(
+                cloudUrl,
+                headers = browserHeaders + mapOf(
+                    "Referer" to embedUrl
+                )
+            ).text
 
-            for (iframeUrl in iframeUrls) {
-                try {
-                    loadExtractor(
-                        iframeUrl,
-                        embedUrl,
-                        subtitleCallback,
-                        callback
-                    )
-                } catch (e: Exception) {
-                    if (e is CancellationException) throw e
-                    logError(e)
-                }
+            val mediaUrl = Regex(
+                """(?:file|src|source|hls)\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)(?:\?[^"']*)?)["']""",
+                RegexOption.IGNORE_CASE
+            )
+                .find(cloudHtml)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.replace("\\/", "/")
+
+            if (!mediaUrl.isNullOrBlank()) {
+                callback(
+                    newExtractorLink(
+                        source = name,
+                        name = "VidSrc",
+                        url = mediaUrl,
+                        type = if (
+                            mediaUrl.contains(".m3u8", ignoreCase = true)
+                        ) {
+                            ExtractorLinkType.M3U8
+                        } else {
+                            ExtractorLinkType.VIDEO
+                        }
+                    ) {
+                        this.referer = "https://cloudorchestranova.com/"
+                        this.quality = Qualities.Unknown.value
+                        this.headers = mapOf(
+                            "User-Agent" to browserUserAgent
+                        )
+                    }
+                )
+
+                Regex(
+                    """https?://[^"'\\\s<>]+\.(?:vtt|srt)(?:\?[^"'\\\s<>]*)?""",
+                    RegexOption.IGNORE_CASE
+                )
+                    .findAll(cloudHtml)
+                    .map { it.value }
+                    .distinct()
+                    .forEach { subtitleUrl ->
+                        subtitleCallback(
+                            SubtitleFile(
+                                "Arabic",
+                                subtitleUrl
+                            )
+                        )
+                    }
+
+                return true
             }
 
-            return iframeUrls.isNotEmpty()
+            return false
+
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             logError(e)
