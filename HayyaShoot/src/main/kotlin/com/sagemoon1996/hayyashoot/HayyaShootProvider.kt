@@ -16,7 +16,6 @@ import java.net.URLEncoder
 import kotlin.coroutines.cancellation.CancellationException
 
 class HayyaShootProvider : MainAPI() {
-
     override var mainUrl = "https://hayyashoot.com"
     override var name = "HayyaShoot"
     override var lang = "ar"
@@ -28,7 +27,6 @@ class HayyaShootProvider : MainAPI() {
 
     override val hasMainPage = true
 
-    // Original site: /movie/popular and /tv/popular (language=ar-SA, page=N)
     override val mainPage = mainPageOf(
         "movie/popular" to "أفلام",
         "tv/popular" to "مسلسلات"
@@ -40,17 +38,12 @@ class HayyaShootProvider : MainAPI() {
     private val browserUserAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0"
 
-    // Same headers as @definisi/vidsrc-scraper 2.0.2
     private val browserHeaders = mapOf(
         "User-Agent" to browserUserAgent,
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language" to "en-US,en;q=0.5",
         "Accept-Encoding" to "identity"
     )
-
-    // =====================================================================
-    // TMDB AUTH TOKEN (extracted at runtime, never hardcoded)
-    // =====================================================================
 
     private val tokenMutex = Mutex()
 
@@ -73,10 +66,8 @@ class HayyaShootProvider : MainAPI() {
     private suspend fun fetchAuthToken(): String? {
         val page = app.get("$mainUrl/movies/", headers = browserHeaders).text
 
-        // 1) Token inside the page HTML (inline <script>)
         extractToken(page)?.let { return it }
 
-        // 2) Token inside external JS files of the site itself
         val scriptRegex = Regex(
             """<script[^>]+src=["']([^"']+)["']""",
             RegexOption.IGNORE_CASE
@@ -126,17 +117,12 @@ class HayyaShootProvider : MainAPI() {
     private suspend fun tmdbGet(path: String): String {
         var response = requestTmdb(path, getAuthToken())
 
-        // Token expired/rotated on the site -> fetch a fresh one once
         if (response.code == 401 || response.code == 403) {
             response = requestTmdb(path, getAuthToken(forceRefresh = true))
         }
 
         return response.text
     }
-
-    // =====================================================================
-    // URL helpers (same format as the site)
-    // =====================================================================
 
     private fun encodeTitle(title: String): String {
         val slug = title
@@ -177,10 +163,6 @@ class HayyaShootProvider : MainAPI() {
         }
     }
 
-    // =====================================================================
-    // MAIN PAGE
-    // =====================================================================
-
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
@@ -201,10 +183,6 @@ class HayyaShootProvider : MainAPI() {
             hasNext = items.isNotEmpty()
         )
     }
-
-    // =====================================================================
-    // SEARCH
-    // =====================================================================
 
     override suspend fun search(query: String): List<SearchResponse> {
         if (query.isBlank()) return emptyList()
@@ -229,16 +207,11 @@ class HayyaShootProvider : MainAPI() {
         return results
     }
 
-    // =====================================================================
-    // LOAD (details / seasons / episodes)
-    // =====================================================================
-
     override suspend fun load(url: String): LoadResponse? {
         val uri = Uri.parse(url)
         val movieId = uri.getQueryParameter("movie")?.toIntOrNull()
         val tvId = uri.getQueryParameter("tv")?.toIntOrNull()
 
-        // ------------------------- MOVIE -------------------------
         if (movieId != null) {
             val movie = parseJson<TmdbMovie>(
                 tmdbGet("movie/$movieId?language=ar-SA")
@@ -260,7 +233,6 @@ class HayyaShootProvider : MainAPI() {
             }
         }
 
-        // ------------------------- TV -------------------------
         if (tvId != null) {
             val tv = parseJson<TmdbTv>(
                 tmdbGet("tv/$tvId?language=ar-SA")
@@ -269,7 +241,6 @@ class HayyaShootProvider : MainAPI() {
             val title = tv.name ?: return null
             val episodes = arrayListOf<Episode>()
 
-            // Site logic: currentItem.seasons.filter(season_number > 0)
             tv.seasons
                 .orEmpty()
                 .filter { it.seasonNumber > 0 }
@@ -315,10 +286,6 @@ class HayyaShootProvider : MainAPI() {
         return null
     }
 
-    // =====================================================================
-    // LOAD LINKS  (Server 2 only = @definisi/vidsrc-scraper 2.0.2 logic)
-    // =====================================================================
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -332,97 +299,54 @@ class HayyaShootProvider : MainAPI() {
             return false
         }
 
-        // Step 1: embed URL
         val embedUrl =
             if (media.type == "tv" && media.season != null && media.episode != null) {
-                "https://vidsrc-embed.ru/embed/tv/${media.id}/${media.season}/${media.episode}"
+                "https://vidsrc.me/embed/tv?tmdb=${media.id}&season=${media.season}&episode=${media.episode}&sub=ar"
             } else {
-                "https://vidsrc-embed.ru/embed/movie/${media.id}"
+                "https://vidsrc.me/embed/movie?tmdb=${media.id}&sub=ar"
             }
 
         try {
-            val embedHtml = app.get(embedUrl, headers = browserHeaders).text
+            val embedHtml = app.get(
+                embedUrl,
+                headers = browserHeaders + mapOf(
+                    "Referer" to mainUrl
+                )
+            ).text
 
-            // Step 2: cloudnestra RCP iframe
-            val rcpRegex = Regex(
-                """src=["']((?:https?:)?//[^"']*cloudnestra\.com/rcp/[^"']+)["']""",
+            val iframeRegex = Regex(
+                """<iframe[^>]+src=["']([^"']+)["']""",
                 RegexOption.IGNORE_CASE
             )
 
-            var rcpUrl = rcpRegex.find(embedHtml)?.groupValues?.getOrNull(1)
-                ?: return false
-
-            if (rcpUrl.startsWith("//")) rcpUrl = "https:$rcpUrl"
-
-            // Step 3: RCP page (Referer = embed URL)
-            val rcpHtml = app.get(
-                rcpUrl,
-                headers = browserHeaders + mapOf("Referer" to embedUrl)
-            ).text
-
-            // Step 4: prorcp hash
-            val prorcpHash = Regex("""/prorcp/([a-zA-Z0-9=+/]+)""")
-                .find(rcpHtml)?.groupValues?.getOrNull(1)
-                ?: return false
-
-            val rcpUri = Uri.parse(rcpUrl)
-            val rcpOrigin = "${rcpUri.scheme}://${rcpUri.authority}"
-
-            // Step 5: prorcp page (Referer = RCP URL)
-            val prorcpHtml = app.get(
-                "$rcpOrigin/prorcp/$prorcpHash",
-                headers = browserHeaders + mapOf("Referer" to rcpUrl)
-            ).text
-
-            // Step 6: file: "..."
-            val rawFileUrl = Regex("""file:\s*["']([^"']+)["']""")
-                .find(prorcpHtml)?.groupValues?.getOrNull(1)
-                ?: return false
-
-            // Step 7: resolve {v1}..{v5} placeholders
-            val hlsUrl = rawFileUrl
-                .split(" or ")[0]
-                .trim()
-                .replace(Regex("""\{v[1-5]\}"""), "cloudnestra.com")
-
-            if (hlsUrl.isBlank()) return false
-
-            callback(
-                newExtractorLink(
-                    source = name,
-                    name = "VidSrc",
-                    url = hlsUrl,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    this.referer = "https://cloudnestra.com/"
-                    this.quality = Qualities.Unknown.value
-                    this.headers = mapOf("User-Agent" to browserUserAgent)
-                }
-            )
-
-            // Subtitles: same regex as the scraper (.vtt / .srt), deduplicated
-            Regex(
-                """["'](https?://[^"']+\.(?:vtt|srt))["']""",
-                RegexOption.IGNORE_CASE
-            )
-                .findAll(prorcpHtml)
-                .map { it.groupValues[1] }
+            val iframeUrls = iframeRegex
+                .findAll(embedHtml)
+                .mapNotNull { it.groupValues.getOrNull(1) }
+                .map { fixUrl(it) }
                 .distinct()
-                .forEach { subtitleUrl ->
-                    subtitleCallback(SubtitleFile("Arabic", subtitleUrl))
-                }
+                .toList()
 
-            return true
+            for (iframeUrl in iframeUrls) {
+                try {
+                    loadExtractor(
+                        iframeUrl,
+                        embedUrl,
+                        subtitleCallback,
+                        callback
+                    )
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    logError(e)
+                }
+            }
+
+            return iframeUrls.isNotEmpty()
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             logError(e)
             return false
         }
     }
-
-    // =====================================================================
-    // DATA CLASSES
-    // =====================================================================
 
     data class HayyaMediaData(
         val type: String,
