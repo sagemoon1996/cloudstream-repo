@@ -326,26 +326,125 @@ class HayyaShootProvider : MainAPI() {
     // loadLinks: Server 2 only = @definisi/vidsrc-scraper 2.0.2 logic
     // ---------------------------------------------------------------
 
-    // true  = when a step fails, a fake link named "DEBUG ..." appears in the
-    //         links list so you can see which step failed and why.
+    // true  = if NO server gives a link, "DEBUG ..." entries appear in the
+    //         links list (one per server tried) and explain which step failed.
     // false = production (no fake links).
     private val debugMode = true
+
+    private class StepFailure(val step: String, val detail: String) :
+        Exception("$step $detail")
+
+    private data class VidSrcResult(
+        val streams: List<String>,
+        val subtitles: List<String>
+    )
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
 
     private suspend fun reportFailure(
         callback: (ExtractorLink) -> Unit,
-        step: String,
-        detail: String = ""
+        text: String
     ) {
-        if (!debugMode) return
-        val label = "DEBUG $step $detail".replace(Regex("""\s+"""), " ").take(220)
+        val label = "DEBUG $text".replace(Regex("""\s+"""), " ").take(220)
         callback(
             newExtractorLink(name, label, "https://debug.invalid/", ExtractorLinkType.VIDEO) {
                 this.quality = Qualities.Unknown.value
             }
         )
+    }
+
+    // Server 2 = VidSrc. Same service on several hosts: the first host that
+    // gives a stream wins. The first one is the one from the scraper 2.0.2,
+    // the second is the original HayyaShoot embed (with sub=ar).
+    private fun embedCandidates(media: HayyaMediaData): List<String> {
+        val isTv = media.type == "tv" && media.season != null && media.episode != null
+        return if (isTv) {
+            val s = media.season
+            val e = media.episode
+            listOf(
+                "https://vidsrc-embed.ru/embed/tv/${media.id}/$s/$e",
+                "https://vidsrc.me/embed/tv?tmdb=${media.id}&season=$s&episode=$e&sub=ar",
+                "https://vidsrc.xyz/embed/tv?tmdb=${media.id}&season=$s&episode=$e&sub=ar",
+                "https://vidsrc.net/embed/tv?tmdb=${media.id}&season=$s&episode=$e&sub=ar"
+            )
+        } else {
+            listOf(
+                "https://vidsrc-embed.ru/embed/movie/${media.id}",
+                "https://vidsrc.me/embed/movie?tmdb=${media.id}&sub=ar",
+                "https://vidsrc.xyz/embed/movie?tmdb=${media.id}&sub=ar",
+                "https://vidsrc.net/embed/movie?tmdb=${media.id}&sub=ar"
+            )
+        }
+    }
+
+    // embed page -> cloudnestra RCP -> /prorcp/hash -> file: -> HLS (+ subtitles)
+    // Throws StepFailure with the failing step so the caller can try the next host.
+    private suspend fun resolveVidSrc(embedUrl: String): VidSrcResult {
+        // Step 1-2: embed page, RCP iframe (fallback: first absolute iframe)
+        val embedRes = app.get(embedUrl, headers = browserHeaders)
+        val embedHtml = embedRes.text
+
+        var rcpUrl = RCP_REGEX.find(embedHtml)?.groupValues?.getOrNull(1)
+            ?: IFRAME_REGEX.find(embedHtml)?.groupValues?.getOrNull(1)
+            ?: throw StepFailure(
+                "2-no-iframe",
+                "HTTP ${embedRes.code} len=${embedHtml.length} ${snippet(embedHtml)}"
+            )
+        if (rcpUrl.startsWith("//")) rcpUrl = "https:$rcpUrl"
+
+        // Step 3: RCP page (Referer = embed URL)
+        val rcpRes = app.get(
+            rcpUrl,
+            headers = browserHeaders + mapOf("Referer" to embedUrl)
+        )
+        val rcpHtml = rcpRes.text
+
+        // Step 4: prorcp path (fallback: srcrcp)
+        val prorcpPath = PRORCP_PATH_REGEX.find(rcpHtml)?.value
+            ?: SRCRCP_PATH_REGEX.find(rcpHtml)?.value
+            ?: throw StepFailure(
+                "4-no-prorcp",
+                "HTTP ${rcpRes.code} rcp=${Uri.parse(rcpUrl).host} len=${rcpHtml.length} ${snippet(rcpHtml)}"
+            )
+
+        val rcpUri = Uri.parse(rcpUrl)
+        val rcpOrigin = "${rcpUri.scheme}://${rcpUri.authority}"
+
+        // Step 5: prorcp page (Referer = RCP URL)
+        val prorcpRes = app.get(
+            "$rcpOrigin$prorcpPath",
+            headers = browserHeaders + mapOf("Referer" to rcpUrl)
+        )
+        val prorcpHtml = prorcpRes.text
+
+        // Step 6: file: "..." (fallback: any .m3u8 URL in the page)
+        val rawFile = FILE_REGEX.find(prorcpHtml)?.groupValues?.getOrNull(1)
+            ?: M3U8_REGEX.find(prorcpHtml.replace("\\/", "/"))?.value
+            ?: throw StepFailure(
+                "6-no-file",
+                "HTTP ${prorcpRes.code} len=${prorcpHtml.length} ${snippet(prorcpHtml)}"
+            )
+
+        // Step 7: every " or " alternative, {v1}..{v5} -> cloudnestra.com
+        val streams = rawFile
+            .split(" or ")
+            .map { it.trim().replace(PLACEHOLDER_REGEX, "cloudnestra.com") }
+            .filter { it.startsWith("http") }
+            .distinct()
+
+        if (streams.isEmpty()) {
+            throw StepFailure("7-bad-url", rawFile.take(150))
+        }
+
+        // Subtitles (.vtt / .srt) found in the prorcp page, deduplicated.
+        val subtitles = SUBTITLE_REGEX
+            .findAll(prorcpHtml.replace("\\/", "/"))
+            .map { it.groupValues[1] }
+            .distinct()
+            .toList()
+
+        return VidSrcResult(streams, subtitles)
     }
 
     override suspend fun loadLinks(
@@ -358,117 +457,73 @@ class HayyaShootProvider : MainAPI() {
             parseJson<HayyaMediaData>(data)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            reportFailure(callback, "0-bad-data", data.take(80))
+            if (debugMode) reportFailure(callback, "0-bad-data ${data.take(80)}")
             return false
         }
 
-        // Step 1: embed URL
-        val embedUrl =
-            if (media.type == "tv" && media.season != null && media.episode != null) {
-                "https://vidsrc-embed.ru/embed/tv/${media.id}/${media.season}/${media.episode}"
-            } else {
-                "https://vidsrc-embed.ru/embed/movie/${media.id}"
-            }
+        val candidates = embedCandidates(media)
+        val failures = ArrayList<String>()
+        var found = false
 
-        try {
-            val embedRes = app.get(embedUrl, headers = browserHeaders)
-            val embedHtml = embedRes.text
+        // Try each VidSrc host until one gives a stream
+        for (embedUrl in candidates) {
+            val host = Uri.parse(embedUrl).host ?: embedUrl
 
-            // Step 2: cloudnestra RCP iframe (fallback: first absolute iframe)
-            var rcpUrl = RCP_REGEX.find(embedHtml)?.groupValues?.getOrNull(1)
-                ?: IFRAME_REGEX.find(embedHtml)?.groupValues?.getOrNull(1)
+            try {
+                val result = resolveVidSrc(embedUrl)
 
-            if (rcpUrl == null) {
-                reportFailure(
-                    callback, "2-no-iframe",
-                    "HTTP ${embedRes.code} len=${embedHtml.length} ${snippet(embedHtml)}"
-                )
-                return false
-            }
-            if (rcpUrl.startsWith("//")) rcpUrl = "https:$rcpUrl"
-
-            // Step 3: RCP page (Referer = embed URL)
-            val rcpRes = app.get(
-                rcpUrl,
-                headers = browserHeaders + mapOf("Referer" to embedUrl)
-            )
-            val rcpHtml = rcpRes.text
-
-            // Step 4: prorcp path (fallback: srcrcp)
-            val prorcpPath = PRORCP_PATH_REGEX.find(rcpHtml)?.value
-                ?: SRCRCP_PATH_REGEX.find(rcpHtml)?.value
-
-            if (prorcpPath == null) {
-                reportFailure(
-                    callback, "4-no-prorcp",
-                    "HTTP ${rcpRes.code} host=${Uri.parse(rcpUrl).host} len=${rcpHtml.length} ${snippet(rcpHtml)}"
-                )
-                return false
-            }
-
-            val rcpUri = Uri.parse(rcpUrl)
-            val rcpOrigin = "${rcpUri.scheme}://${rcpUri.authority}"
-
-            // Step 5: prorcp page (Referer = RCP URL)
-            val prorcpRes = app.get(
-                "$rcpOrigin$prorcpPath",
-                headers = browserHeaders + mapOf("Referer" to rcpUrl)
-            )
-            val prorcpHtml = prorcpRes.text
-
-            // Step 6: file: "..." (fallback: any .m3u8 URL in the page)
-            val rawFile = FILE_REGEX.find(prorcpHtml)?.groupValues?.getOrNull(1)
-                ?: M3U8_REGEX.find(prorcpHtml.replace("\\/", "/"))?.value
-
-            if (rawFile == null) {
-                reportFailure(
-                    callback, "6-no-file",
-                    "HTTP ${prorcpRes.code} len=${prorcpHtml.length} ${snippet(prorcpHtml)}"
-                )
-                return false
-            }
-
-            // Step 7: first alternative + resolve {v1}..{v5} placeholders
-            val hlsUrl = rawFile
-                .split(" or ")[0]
-                .trim()
-                .replace(PLACEHOLDER_REGEX, "cloudnestra.com")
-
-            if (!hlsUrl.startsWith("http")) {
-                reportFailure(callback, "7-bad-url", hlsUrl.take(150))
-                return false
-            }
-
-            callback(
-                newExtractorLink(
-                    source = name,
-                    name = "VidSrc",
-                    url = hlsUrl,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    this.referer = "https://cloudnestra.com/"
-                    this.quality = Qualities.Unknown.value
-                    this.headers = mapOf("User-Agent" to userAgent)
+                result.streams.forEachIndexed { index, streamUrl ->
+                    callback(
+                        newExtractorLink(
+                            source = name,
+                            name = if (result.streams.size > 1) "VidSrc ${index + 1}" else "VidSrc",
+                            url = streamUrl,
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.referer = "https://cloudnestra.com/"
+                            this.quality = Qualities.Unknown.value
+                            this.headers = mapOf("User-Agent" to userAgent)
+                        }
+                    )
                 }
-            )
 
-            // Subtitles (.vtt / .srt) found in the prorcp page, deduplicated.
-            // "\/" is normalised in case the page escapes slashes.
-            SUBTITLE_REGEX
-                .findAll(prorcpHtml.replace("\\/", "/"))
-                .map { it.groupValues[1] }
-                .distinct()
-                .forEach { subtitleUrl ->
+                result.subtitles.forEach { subtitleUrl ->
                     subtitleCallback(SubtitleFile("Arabic", subtitleUrl))
                 }
 
-            return true
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            logError(e)
-            reportFailure(callback, "exception", "${e::class.java.simpleName}: ${e.message}")
-            return false
+                found = true
+                break
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                if (e is StepFailure) {
+                    failures.add("$host ${e.step} ${e.detail}")
+                } else {
+                    logError(e)
+                    failures.add("$host exception ${e::class.java.simpleName}: ${e.message}")
+                }
+            }
         }
+
+        // Last resort: CloudStream's built-in extractors on the first embed URL
+        if (!found) {
+            try {
+                found = loadExtractor(
+                    candidates.first(),
+                    "$mainUrl/",
+                    subtitleCallback,
+                    callback
+                )
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                logError(e)
+            }
+        }
+
+        if (!found && debugMode) {
+            failures.take(4).forEach { reportFailure(callback, it) }
+        }
+
+        return found
     }
 
     // ---------------------------------------------------------------
