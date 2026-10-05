@@ -1,19 +1,13 @@
 package com.sagemoon1996.hayyashoot
 
-import android.net.Uri
-import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.mvvm.logError
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
-import com.lagradost.cloudstream3.utils.AppUtils.toJson
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import org.json.JSONObject
+import org.jsoup.nodes.Document
 import java.net.URLEncoder
-import kotlin.coroutines.cancellation.CancellationException
 
 class HayyaShootProvider : MainAPI() {
 
@@ -21,303 +15,648 @@ class HayyaShootProvider : MainAPI() {
     override var name = "HayyaShoot"
     override var lang = "ar"
 
+    override val hasMainPage = true
+
     override val supportedTypes = setOf(
         TvType.Movie,
         TvType.TvSeries
     )
 
-    override val hasMainPage = true
-
-    // Original site: /movie/popular and /tv/popular (language=ar-SA, page=N)
     override val mainPage = mainPageOf(
-        "movie/popular" to "أفلام",
-        "tv/popular" to "مسلسلات"
+        "movie" to "الأفلام",
+        "tv" to "المسلسلات"
     )
 
-    private val imageBaseUrl = "https://image.tmdb.org/t/p/w500"
-    private val backdropBaseUrl = "https://image.tmdb.org/t/p/original"
+    private val tmdbBaseUrl = "https://api.themoviedb.org/3"
 
-    private val browserUserAgent =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0"
+    private val userAgent =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
-    // Same headers as @definisi/vidsrc-scraper 2.0.2
-    private val browserHeaders = mapOf(
-        "User-Agent" to browserUserAgent,
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language" to "en-US,en;q=0.5",
-        "Accept-Encoding" to "identity"
-    )
+    // ---------------------------------------------------------------
+    // TMDB TOKEN
+    // ---------------------------------------------------------------
 
-    // =====================================================================
-    // TMDB AUTH TOKEN (extracted at runtime, never hardcoded)
-    // =====================================================================
+    private suspend fun getTmdbToken(): String {
+        val html = app.get(
+            "$mainUrl/movies/",
+            headers = mapOf("User-Agent" to userAgent)
+        ).text
 
-    private val tokenMutex = Mutex()
-
-    @Volatile
-    private var cachedToken: String? = null
-
-    private val tokenPatterns = listOf(
-        Regex("""auth_?token\s*[=:]\s*["'`]([^"'`]+)["'`]""", RegexOption.IGNORE_CASE),
-        Regex("""Bearer\s+(eyJ[\w-]+\.[\w-]+\.[\w-]+)""")
-    )
-
-    private fun extractToken(text: String): String? {
-        for (pattern in tokenPatterns) {
-            val token = pattern.find(text)?.groupValues?.getOrNull(1)
-            if (!token.isNullOrBlank()) return token
-        }
-        return null
-    }
-
-    private suspend fun fetchAuthToken(): String? {
-        val page = app.get("$mainUrl/movies/", headers = browserHeaders).text
-
-        // 1) Token inside the page HTML (inline <script>)
-        extractToken(page)?.let { return it }
-
-        // 2) Token inside external JS files of the site itself
-        val scriptRegex = Regex(
-            """<script[^>]+src=["']([^"']+)["']""",
-            RegexOption.IGNORE_CASE
+        val patterns = listOf(
+            Regex("""Bearer\s+([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)"""),
+            Regex("""['"]?(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)['"]?""")
         )
 
-        for (match in scriptRegex.findAll(page)) {
-            val scriptUrl = fixUrl(match.groupValues[1])
-            val host = Uri.parse(scriptUrl).host ?: continue
-            if (!host.endsWith("hayyashoot.com")) continue
+        for (pattern in patterns) {
+            val token = pattern.find(html)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.trim()
 
-            try {
-                val js = app.get(scriptUrl, headers = browserHeaders).text
-                extractToken(js)?.let { return it }
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                logError(e)
+            if (!token.isNullOrBlank()) {
+                return token
             }
         }
 
-        return null
+        throw ErrorLoadingException("TMDB token not found")
     }
 
-    private suspend fun getAuthToken(forceRefresh: Boolean = false): String {
-        if (!forceRefresh) cachedToken?.let { return it }
+    private suspend fun tmdbGet(
+        path: String,
+        token: String
+    ): JSONObject {
 
-        return tokenMutex.withLock {
-            if (!forceRefresh) cachedToken?.let { return@withLock it }
-
-            val token = fetchAuthToken()
-                ?: throw ErrorLoadingException("HayyaShoot AUTH_TOKEN not found")
-
-            cachedToken = token
-            token
-        }
-    }
-
-    private suspend fun requestTmdb(path: String, token: String) =
-        app.get(
-            "https://api.themoviedb.org/3/$path",
+        val response = app.get(
+            "$tmdbBaseUrl$path",
             headers = mapOf(
-                "User-Agent" to browserUserAgent,
-                "Accept" to "application/json, text/plain, */*",
-                "Authorization" to "Bearer $token"
+                "Authorization" to "Bearer $token",
+                "Accept" to "application/json",
+                "User-Agent" to userAgent
             )
         )
 
-    private suspend fun tmdbGet(path: String): String {
-        var response = requestTmdb(path, getAuthToken())
+        return JSONObject(response.text)
+    }
 
-        // Token expired/rotated on the site -> fetch a fresh one once
-        if (response.code == 401 || response.code == 403) {
-            response = requestTmdb(path, getAuthToken(forceRefresh = true))
+    // ---------------------------------------------------------------
+    // HELPERS
+    // ---------------------------------------------------------------
+
+    private fun posterUrl(path: String?): String? {
+        return path
+            ?.takeIf { it.isNotBlank() && it != "null" }
+            ?.let {
+                "https://image.tmdb.org/t/p/w500$it"
+            }
+    }
+
+    private fun backdropUrl(path: String?): String? {
+        return path
+            ?.takeIf { it.isNotBlank() && it != "null" }
+            ?.let {
+                "https://image.tmdb.org/t/p/original$it"
+            }
+    }
+
+    private fun titleSlug(title: String): String {
+        return URLEncoder.encode(
+            title.trim()
+                .replace(Regex("""[\s-]+"""), "-"),
+            "UTF-8"
+        )
+    }
+
+    private fun hayyaUrl(
+        type: String,
+        id: Int,
+        title: String,
+        season: Int? = null,
+        episode: Int? = null
+    ): String {
+
+        val params = StringBuilder()
+
+        params.append("?")
+        params.append(type)
+        params.append("=")
+        params.append(id)
+
+        if (season != null) {
+            params.append("&s=")
+            params.append(season)
         }
 
-        return response.text
+        if (episode != null) {
+            params.append("&e=")
+            params.append(episode)
+        }
+
+        params.append("&title=")
+        params.append(titleSlug(title))
+
+        return "$mainUrl/movies/$params"
     }
 
-    // =====================================================================
-    // URL helpers (same format as the site)
-    // =====================================================================
+    private fun getQueryValue(
+        url: String,
+        key: String
+    ): String? {
+        val match = Regex(
+            """(?:\?|&)${Regex.escape(key)}=([^&]+)"""
+        ).find(url)
 
-    private fun encodeTitle(title: String): String {
-        val slug = title
-            .replace(Regex("""[\s-]+"""), "-")
-            .trim('-')
-        return URLEncoder.encode(slug, "UTF-8")
+        return match
+            ?.groupValues
+            ?.getOrNull(1)
     }
 
-    private fun movieUrl(id: Int, title: String) =
-        "$mainUrl/movies/?movie=$id&title=${encodeTitle(title)}"
+    private fun getIntQuery(
+        url: String,
+        key: String
+    ): Int? {
+        return getQueryValue(url, key)?.toIntOrNull()
+    }
 
-    private fun tvUrl(id: Int, title: String) =
-        "$mainUrl/movies/?tv=$id&title=${encodeTitle(title)}"
+    // ---------------------------------------------------------------
+    // SEARCH RESPONSE
+    // ---------------------------------------------------------------
 
-    private suspend fun toSearchResponse(
-        item: TmdbItem,
-        isMovie: Boolean
+    private fun movieSearch(
+        item: JSONObject
     ): SearchResponse? {
-        val itemTitle = (if (isMovie) item.title else item.name) ?: return null
-        val poster = item.posterPath?.let { imageBaseUrl + it }
 
-        return if (isMovie) {
-            newMovieSearchResponse(
-                itemTitle,
-                movieUrl(item.id, itemTitle),
-                TvType.Movie
-            ) {
-                this.posterUrl = poster
-            }
-        } else {
-            newTvSeriesSearchResponse(
-                itemTitle,
-                tvUrl(item.id, itemTitle),
-                TvType.TvSeries
-            ) {
-                this.posterUrl = poster
-            }
+        val id = item.optInt("id", 0)
+        if (id <= 0) return null
+
+        val title = item.optString("title")
+            .takeIf { it.isNotBlank() }
+            ?: return null
+
+        val url = hayyaUrl(
+            "movie",
+            id,
+            title
+        )
+
+        return newMovieSearchResponse(
+            title,
+            url,
+            TvType.Movie
+        ) {
+            posterUrl = posterUrl(
+                item.optString("poster_path")
+            )
         }
     }
 
-    // =====================================================================
+    private fun tvSearch(
+        item: JSONObject
+    ): SearchResponse? {
+
+        val id = item.optInt("id", 0)
+        if (id <= 0) return null
+
+        val title = item.optString("name")
+            .takeIf { it.isNotBlank() }
+            ?: return null
+
+        val url = hayyaUrl(
+            "tv",
+            id,
+            title
+        )
+
+        return newTvSeriesSearchResponse(
+            title,
+            url,
+            TvType.TvSeries
+        ) {
+            posterUrl = posterUrl(
+                item.optString("poster_path")
+            )
+        }
+    }
+
+    // ---------------------------------------------------------------
     // MAIN PAGE
-    // =====================================================================
+    // ---------------------------------------------------------------
 
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val isMovie = request.data.startsWith("movie")
 
-        val response = parseJson<TmdbResponse>(
-            tmdbGet("${request.data}?language=ar-SA&page=$page")
+        val token = getTmdbToken()
+
+        val type = if (
+            request.data.equals("tv", ignoreCase = true)
+        ) {
+            "tv"
+        } else {
+            "movie"
+        }
+
+        val response = tmdbGet(
+            "/$type/popular" +
+                "?language=ar-SA" +
+                "&page=$page",
+            token
         )
 
-        val items = response.results
-            .orEmpty()
-            .mapNotNull { toSearchResponse(it, isMovie) }
+        val results = response.optJSONArray("results")
+            ?: return newHomePageResponse(
+                request.name,
+                emptyList(),
+                hasNext = false
+            )
+
+        val items = (0 until results.length())
+            .mapNotNull { index ->
+                val item = results.optJSONObject(index)
+                    ?: return@mapNotNull null
+
+                if (type == "movie") {
+                    movieSearch(item)
+                } else {
+                    tvSearch(item)
+                }
+            }
+
+        val totalPages = response.optInt(
+            "total_pages",
+            page
+        )
 
         return newHomePageResponse(
             request.name,
             items,
-            hasNext = items.isNotEmpty()
+            hasNext = page < totalPages
         )
     }
 
-    // =====================================================================
+    // ---------------------------------------------------------------
     // SEARCH
-    // =====================================================================
+    // ---------------------------------------------------------------
 
-    override suspend fun search(query: String): List<SearchResponse> {
-        if (query.isBlank()) return emptyList()
+    override suspend fun search(
+        query: String
+    ): List<SearchResponse> = coroutineScope {
 
-        val encodedQuery = URLEncoder.encode(query, "UTF-8")
-        val results = arrayListOf<SearchResponse>()
+        val token = getTmdbToken()
 
-        val movies = parseJson<TmdbResponse>(
-            tmdbGet("search/movie?query=$encodedQuery&language=ar-SA&page=1")
+        val encoded = URLEncoder.encode(
+            query.trim(),
+            "UTF-8"
         )
-        movies.results.orEmpty().forEach { item ->
-            toSearchResponse(item, true)?.let { results.add(it) }
-        }
 
-        val shows = parseJson<TmdbResponse>(
-            tmdbGet("search/tv?query=$encodedQuery&language=ar-SA&page=1")
-        )
-        shows.results.orEmpty().forEach { item ->
-            toSearchResponse(item, false)?.let { results.add(it) }
-        }
-
-        return results
-    }
-
-    // =====================================================================
-    // LOAD (details / seasons / episodes)
-    // =====================================================================
-
-    override suspend fun load(url: String): LoadResponse? {
-        val uri = Uri.parse(url)
-        val movieId = uri.getQueryParameter("movie")?.toIntOrNull()
-        val tvId = uri.getQueryParameter("tv")?.toIntOrNull()
-
-        // ------------------------- MOVIE -------------------------
-        if (movieId != null) {
-            val movie = parseJson<TmdbMovie>(
-                tmdbGet("movie/$movieId?language=ar-SA")
-            )
-
-            val title = movie.title ?: return null
-
-            val data = HayyaMediaData(
-                type = "movie",
-                id = movieId
-            ).toJson()
-
-            return newMovieLoadResponse(title, url, TvType.Movie, data) {
-                this.posterUrl = movie.posterPath?.let { imageBaseUrl + it }
-                this.backgroundPosterUrl = movie.backdropPath?.let { backdropBaseUrl + it }
-                this.plot = movie.overview
-                this.year = movie.releaseDate?.take(4)?.toIntOrNull()
-                this.score = movie.voteAverage?.let { Score.from10(it) }
+        val movieDeferred = async {
+            try {
+                tmdbGet(
+                    "/search/movie" +
+                        "?query=$encoded" +
+                        "&language=ar-SA" +
+                        "&page=1",
+                    token
+                )
+            } catch (_: Exception) {
+                null
             }
         }
 
-        // ------------------------- TV -------------------------
-        if (tvId != null) {
-            val tv = parseJson<TmdbTv>(
-                tmdbGet("tv/$tvId?language=ar-SA")
-            )
+        val tvDeferred = async {
+            try {
+                tmdbGet(
+                    "/search/tv" +
+                        "?query=$encoded" +
+                        "&language=ar-SA" +
+                        "&page=1",
+                    token
+                )
+            } catch (_: Exception) {
+                null
+            }
+        }
 
-            val title = tv.name ?: return null
-            val episodes = arrayListOf<Episode>()
+        val movieResponse = movieDeferred.await()
+        val tvResponse = tvDeferred.await()
 
-            // Site logic: currentItem.seasons.filter(season_number > 0)
-            tv.seasons
-                .orEmpty()
-                .filter { it.seasonNumber > 0 }
-                .forEach { season ->
-                    val seasonData = try {
-                        parseJson<TmdbSeason>(
-                            tmdbGet("tv/$tvId/season/${season.seasonNumber}?language=ar-SA")
-                        )
-                    } catch (e: Exception) {
-                        if (e is CancellationException) throw e
-                        logError(e)
-                        null
-                    } ?: return@forEach
-
-                    seasonData.episodes.orEmpty().forEach { ep ->
-                        val epData = HayyaMediaData(
-                            type = "tv",
-                            id = tvId,
-                            season = season.seasonNumber,
-                            episode = ep.episodeNumber
-                        ).toJson()
-
-                        episodes.add(
-                            newEpisode(epData) {
-                                this.name = ep.name ?: "الحلقة ${ep.episodeNumber}"
-                                this.season = season.seasonNumber
-                                this.episode = ep.episodeNumber
-                                this.description = ep.overview
-                            }
+        val movies = movieResponse
+            ?.optJSONArray("results")
+            ?.let { array ->
+                (0 until array.length())
+                    .mapNotNull { index ->
+                        movieSearch(
+                            array.optJSONObject(index)
+                                ?: return@mapNotNull null
                         )
                     }
-                }
+            }
+            ?: emptyList()
 
-            return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                this.posterUrl = tv.posterPath?.let { imageBaseUrl + it }
-                this.backgroundPosterUrl = tv.backdropPath?.let { backdropBaseUrl + it }
-                this.plot = tv.overview
-                this.year = tv.firstAirDate?.take(4)?.toIntOrNull()
-                this.score = tv.voteAverage?.let { Score.from10(it) }
+        val tvShows = tvResponse
+            ?.optJSONArray("results")
+            ?.let { array ->
+                (0 until array.length())
+                    .mapNotNull { index ->
+                        tvSearch(
+                            array.optJSONObject(index)
+                                ?: return@mapNotNull null
+                        )
+                    }
+            }
+            ?: emptyList()
+
+        movies + tvShows
+    }
+
+    // ---------------------------------------------------------------
+    // LOAD MOVIE / TV
+    // ---------------------------------------------------------------
+
+    override suspend fun load(
+        url: String
+    ): LoadResponse {
+
+        val movieId = getIntQuery(url, "movie")
+        val tvId = getIntQuery(url, "tv")
+
+        val token = getTmdbToken()
+
+        if (movieId != null) {
+
+            val data = tmdbGet(
+                "/movie/$movieId?language=ar-SA",
+                token
+            )
+
+            val title = data.optString("title")
+                .takeIf { it.isNotBlank() }
+                ?: throw ErrorLoadingException(
+                    "Movie title not found"
+                )
+
+            val description = data.optString(
+                "overview"
+            ).takeIf { it.isNotBlank() }
+
+            val year = data.optString(
+                "release_date"
+            )
+                .takeIf { it.isNotBlank() }
+                ?.take(4)
+                ?.toIntOrNull()
+
+            return newMovieLoadResponse(
+                title,
+                url,
+                TvType.Movie,
+                url
+            ) {
+                posterUrl = posterUrl(
+                    data.optString("poster_path")
+                )
+
+                backgroundPosterUrl = backdropUrl(
+                    data.optString("backdrop_path")
+                )
+
+                plot = description
+                this.year = year
+
+                rating = (data.optDouble(
+                    "vote_average",
+                    0.0
+                ) * 10).toInt()
             }
         }
 
-        return null
+        if (tvId != null) {
+
+            val data = tmdbGet(
+                "/tv/$tvId?language=ar-SA",
+                token
+            )
+
+            val title = data.optString("name")
+                .takeIf { it.isNotBlank() }
+                ?: throw ErrorLoadingException(
+                    "TV title not found"
+                )
+
+            val description = data.optString(
+                "overview"
+            ).takeIf { it.isNotBlank() }
+
+            val year = data.optString(
+                "first_air_date"
+            )
+                .takeIf { it.isNotBlank() }
+                ?.take(4)
+                ?.toIntOrNull()
+
+            val seasons = data.optJSONArray("seasons")
+
+            val episodes = mutableListOf<Episode>()
+
+            if (seasons != null) {
+
+                for (i in 0 until seasons.length()) {
+
+                    val season = seasons.optJSONObject(i)
+                        ?: continue
+
+                    val seasonNumber =
+                        season.optInt(
+                            "season_number",
+                            -1
+                        )
+
+                    if (seasonNumber <= 0) continue
+
+                    val seasonData = try {
+                        tmdbGet(
+                            "/tv/$tvId/season/$seasonNumber" +
+                                "?language=ar-SA",
+                            token
+                        )
+                    } catch (_: Exception) {
+                        continue
+                    }
+
+                    val episodeArray =
+                        seasonData.optJSONArray(
+                            "episodes"
+                        ) ?: continue
+
+                    for (j in 0 until episodeArray.length()) {
+
+                        val ep =
+                            episodeArray.optJSONObject(j)
+                                ?: continue
+
+                        val episodeNumber =
+                            ep.optInt(
+                                "episode_number",
+                                0
+                            )
+
+                        if (episodeNumber <= 0) continue
+
+                        val episodeName =
+                            ep.optString("name")
+                                .takeIf { it.isNotBlank() }
+                                ?: "الحلقة $episodeNumber"
+
+                        val episodeUrl = hayyaUrl(
+                            "tv",
+                            tvId,
+                            title,
+                            seasonNumber,
+                            episodeNumber
+                        )
+
+                        newEpisode(
+                            episodeUrl
+                        ) {
+                            name = episodeName
+                            season = seasonNumber
+                            episode = episodeNumber
+
+                            posterUrl = posterUrl(
+                                ep.optString(
+                                    "still_path"
+                                )
+                            ) ?: posterUrl(
+                                data.optString(
+                                    "poster_path"
+                                )
+                            )
+
+                            description = ep.optString(
+                                "overview"
+                            ).takeIf { it.isNotBlank() }
+                        }.also {
+                            episodes.add(it)
+                        }
+                    }
+                }
+            }
+
+            return newTvSeriesLoadResponse(
+                title,
+                url,
+                TvType.TvSeries,
+                episodes
+            ) {
+                posterUrl = posterUrl(
+                    data.optString("poster_path")
+                )
+
+                backgroundPosterUrl = backdropUrl(
+                    data.optString("backdrop_path")
+                )
+
+                plot = description
+                this.year = year
+
+                rating = (data.optDouble(
+                    "vote_average",
+                    0.0
+                ) * 10).toInt()
+            }
+        }
+
+        throw ErrorLoadingException(
+            "Unsupported HayyaShoot URL"
+        )
     }
 
-    // =====================================================================
-    // LOAD LINKS  (Server 2 only = @definisi/vidsrc-scraper 2.0.2 logic)
-    // =====================================================================
+    // ---------------------------------------------------------------
+    // VIDSRC
+    // ---------------------------------------------------------------
+
+    private fun buildVidSrcEmbedUrl(
+        tmdbId: Int,
+        type: String,
+        season: Int?,
+        episode: Int?
+    ): String {
+
+        return if (type == "tv") {
+            "https://vidsrc-embed.ru/embed/tv/$tmdbId/$season/$episode"
+        } else {
+            "https://vidsrc-embed.ru/embed/movie/$tmdbId"
+        }
+    }
+
+    private fun extractRcpUrl(
+        document: String
+    ): String? {
+
+        val regex = Regex(
+            """src=["']((?:https?:)?//[^"']*cloudnestra\.com/rcp/[^"']+)["']""",
+            RegexOption.IGNORE_CASE
+        )
+
+        val value = regex.find(document)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.trim()
+            ?: return null
+
+        return if (value.startsWith("//")) {
+            "https:$value"
+        } else {
+            value
+        }
+    }
+
+    private fun extractProrcpHash(
+        document: String
+    ): String? {
+
+        return Regex(
+            """/prorcp/([a-zA-Z0-9=+/]+)"""
+        )
+            .find(document)
+            ?.groupValues
+            ?.getOrNull(1)
+    }
+
+    private fun extractFileUrl(
+        document: String
+    ): String? {
+
+        val raw = Regex(
+            """file:\s*["']([^"']+)["']"""
+        )
+            .find(document)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?: return null
+
+        return raw
+            .split(" or ")
+            .first()
+            .trim()
+            .replace(
+                Regex("""\{v[1-5]\}"""),
+                "cloudnestra.com"
+            )
+    }
+
+    private fun extractSubtitles(
+        document: String,
+        subtitleCallback: (SubtitleFile) -> Unit
+    ) {
+
+        val regex = Regex(
+            """["'](https?://[^"']+\.(?:vtt|srt))["']""",
+            RegexOption.IGNORE_CASE
+        )
+
+        val urls = regex
+            .findAll(document)
+            .map {
+                it.groupValues[1]
+            }
+            .distinct()
+
+        for (subtitleUrl in urls) {
+
+            subtitleCallback(
+                SubtitleFile(
+                    "Arabic",
+                    subtitleUrl
+                )
+            )
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // LOAD LINKS
+    // ---------------------------------------------------------------
 
     override suspend fun loadLinks(
         data: String,
@@ -325,156 +664,139 @@ class HayyaShootProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val media = try {
-            parseJson<HayyaMediaData>(data)
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
+
+        val movieId = getIntQuery(
+            data,
+            "movie"
+        )
+
+        val tvId = getIntQuery(
+            data,
+            "tv"
+        )
+
+        val season = getIntQuery(
+            data,
+            "s"
+        )
+
+        val episode = getIntQuery(
+            data,
+            "e"
+        )
+
+        val type: String
+        val tmdbId: Int
+
+        if (movieId != null) {
+            type = "movie"
+            tmdbId = movieId
+        } else if (
+            tvId != null &&
+            season != null &&
+            episode != null
+        ) {
+            type = "tv"
+            tmdbId = tvId
+        } else {
             return false
         }
 
-        // Step 1: embed URL
-        val embedUrl =
-            if (media.type == "tv" && media.season != null && media.episode != null) {
-                "https://vidsrc-embed.ru/embed/tv/${media.id}/${media.season}/${media.episode}"
-            } else {
-                "https://vidsrc-embed.ru/embed/movie/${media.id}"
-            }
+        val embedUrl = buildVidSrcEmbedUrl(
+            tmdbId,
+            type,
+            season,
+            episode
+        )
 
-        try {
-            val embedHtml = app.get(embedUrl, headers = browserHeaders).text
+        val defaultHeaders = mapOf(
+            "User-Agent" to
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) " +
+                "Gecko/20100101 Firefox/121.0",
+            "Accept" to
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language" to "en-US,en;q=0.5",
+            "Accept-Encoding" to "identity"
+        )
 
-            // Step 2: cloudnestra RCP iframe
-            val rcpRegex = Regex(
-                """src=["']((?:https?:)?//[^"']*cloudnestra\.com/rcp/[^"']+)["']""",
-                RegexOption.IGNORE_CASE
-            )
+        // Step 1:
+        // VidSrc embed
+        val embedDocument = try {
+            app.get(
+                embedUrl,
+                headers = defaultHeaders
+            ).text
+        } catch (_: Exception) {
+            return false
+        }
 
-            var rcpUrl = rcpRegex.find(embedHtml)?.groupValues?.getOrNull(1)
-                ?: return false
+        // Step 2:
+        // cloudnestra /rcp/
+        val rcpUrl = extractRcpUrl(
+            embedDocument
+        ) ?: return false
 
-            if (rcpUrl.startsWith("//")) rcpUrl = "https:$rcpUrl"
-
-            // Step 3: RCP page (Referer = embed URL)
-            val rcpHtml = app.get(
+        val rcpDocument = try {
+            app.get(
                 rcpUrl,
-                headers = browserHeaders + mapOf("Referer" to embedUrl)
+                headers = defaultHeaders,
+                referer = embedUrl
             ).text
-
-            // Step 4: prorcp hash
-            val prorcpHash = Regex("""/prorcp/([a-zA-Z0-9=+/]+)""")
-                .find(rcpHtml)?.groupValues?.getOrNull(1)
-                ?: return false
-
-            val rcpUri = Uri.parse(rcpUrl)
-            val rcpOrigin = "${rcpUri.scheme}://${rcpUri.authority}"
-
-            // Step 5: prorcp page (Referer = RCP URL)
-            val prorcpHtml = app.get(
-                "$rcpOrigin/prorcp/$prorcpHash",
-                headers = browserHeaders + mapOf("Referer" to rcpUrl)
-            ).text
-
-            // Step 6: file: "..."
-            val rawFileUrl = Regex("""file:\s*["']([^"']+)["']""")
-                .find(prorcpHtml)?.groupValues?.getOrNull(1)
-                ?: return false
-
-            // Step 7: resolve {v1}..{v5} placeholders
-            val hlsUrl = rawFileUrl
-                .split(" or ")[0]
-                .trim()
-                .replace(Regex("""\{v[1-5]\}"""), "cloudnestra.com")
-
-            if (hlsUrl.isBlank()) return false
-
-            callback(
-                newExtractorLink(
-                    source = name,
-                    name = "VidSrc",
-                    url = hlsUrl,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    this.referer = "https://cloudnestra.com/"
-                    this.quality = Qualities.Unknown.value
-                    this.headers = mapOf("User-Agent" to browserUserAgent)
-                }
-            )
-
-            // Subtitles: same regex as the scraper (.vtt / .srt), deduplicated
-            Regex(
-                """["'](https?://[^"']+\.(?:vtt|srt))["']""",
-                RegexOption.IGNORE_CASE
-            )
-                .findAll(prorcpHtml)
-                .map { it.groupValues[1] }
-                .distinct()
-                .forEach { subtitleUrl ->
-                    subtitleCallback(SubtitleFile("Arabic", subtitleUrl))
-                }
-
-            return true
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            logError(e)
+        } catch (_: Exception) {
             return false
         }
+
+        // Step 3:
+        // /prorcp/{hash}
+        val prorcpHash = extractProrcpHash(
+            rcpDocument
+        ) ?: return false
+
+        val rcpOrigin = try {
+            rcpUrl.substringBefore(
+                "/rcp/"
+            )
+        } catch (_: Exception) {
+            return false
+        }
+
+        val prorcpUrl =
+            "$rcpOrigin/prorcp/$prorcpHash"
+
+        // Step 4:
+        // file: "...m3u8"
+        val prorcpDocument = try {
+            app.get(
+                prorcpUrl,
+                headers = defaultHeaders,
+                referer = rcpUrl
+            ).text
+        } catch (_: Exception) {
+            return false
+        }
+
+        val hlsUrl = extractFileUrl(
+            prorcpDocument
+        ) ?: return false
+
+        // Subtitles from the same prorcp page.
+        extractSubtitles(
+            prorcpDocument,
+            subtitleCallback
+        )
+
+        callback(
+            newExtractorLink(
+                "VidSrc",
+                "VidSrc",
+                hlsUrl,
+                type = ExtractorLinkType.M3U8
+            ) {
+                referer = "https://cloudnestra.com/"
+                quality = Qualities.Unknown.value
+            }
+        )
+
+        return true
     }
-
-    // =====================================================================
-    // DATA CLASSES
-    // =====================================================================
-
-    data class HayyaMediaData(
-        val type: String,
-        val id: Int,
-        val season: Int? = null,
-        val episode: Int? = null
-    )
-
-    data class TmdbResponse(
-        @JsonProperty("results") val results: List<TmdbItem>? = null
-    )
-
-    data class TmdbItem(
-        @JsonProperty("id") val id: Int,
-        @JsonProperty("title") val title: String? = null,
-        @JsonProperty("name") val name: String? = null,
-        @JsonProperty("poster_path") val posterPath: String? = null
-    )
-
-    data class TmdbMovie(
-        @JsonProperty("id") val id: Int,
-        @JsonProperty("title") val title: String? = null,
-        @JsonProperty("overview") val overview: String? = null,
-        @JsonProperty("poster_path") val posterPath: String? = null,
-        @JsonProperty("backdrop_path") val backdropPath: String? = null,
-        @JsonProperty("release_date") val releaseDate: String? = null,
-        @JsonProperty("vote_average") val voteAverage: Double? = null
-    )
-
-    data class TmdbTv(
-        @JsonProperty("id") val id: Int,
-        @JsonProperty("name") val name: String? = null,
-        @JsonProperty("overview") val overview: String? = null,
-        @JsonProperty("poster_path") val posterPath: String? = null,
-        @JsonProperty("backdrop_path") val backdropPath: String? = null,
-        @JsonProperty("first_air_date") val firstAirDate: String? = null,
-        @JsonProperty("vote_average") val voteAverage: Double? = null,
-        @JsonProperty("seasons") val seasons: List<TmdbSeasonInfo>? = null
-    )
-
-    data class TmdbSeasonInfo(
-        @JsonProperty("season_number") val seasonNumber: Int,
-        @JsonProperty("name") val name: String? = null
-    )
-
-    data class TmdbSeason(
-        @JsonProperty("episodes") val episodes: List<TmdbEpisode>? = null
-    )
-
-    data class TmdbEpisode(
-        @JsonProperty("episode_number") val episodeNumber: Int,
-        @JsonProperty("name") val name: String? = null,
-        @JsonProperty("overview") val overview: String? = null
-    )
 }
