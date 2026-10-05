@@ -19,7 +19,7 @@ class HayyaShootProvider : MainAPI() {
 
     override var mainUrl = "https://hayyashoot.com"
     override var name = "HayyaShoot"
-    override val lang = "ar"
+    override var lang = "ar"
 
     override val supportedTypes = setOf(
         TvType.Movie,
