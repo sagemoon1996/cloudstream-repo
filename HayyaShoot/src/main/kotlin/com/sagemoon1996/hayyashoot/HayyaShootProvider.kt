@@ -384,6 +384,19 @@ class HayyaShootProvider : MainAPI() {
         }
     }
 
+    // True only if the URL answers 2xx and really is an HLS playlist.
+    private suspend fun isPlaylist(url: String, referer: String): Boolean =
+        try {
+            val res = app.get(
+                url,
+                headers = mapOf("User-Agent" to userAgent, "Referer" to referer)
+            )
+            res.code in 200..299 && res.text.trimStart().startsWith("#EXTM3U")
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            false
+        }
+
     // embed page -> cloudnestra RCP -> /prorcp/hash -> file: -> HLS (+ subtitles)
     // Throws StepFailure with the failing step so the caller can try the next host.
     private suspend fun resolveVidSrc(embedUrl: String): VidSrcResult {
@@ -447,7 +460,7 @@ class HayyaShootProvider : MainAPI() {
         // The scraper used cloudnestra.com; the RCP host can rotate to another
         // domain, so the RCP root domain is tried as well.
         val rcpRoot = (rcpUri.host ?: "").split(".").takeLast(2).joinToString(".")
-        val placeholderDomains = listOf("cloudnestra.com", rcpRoot)
+        val placeholderDomains = listOf(rcpRoot, "cloudnestra.com")
             .filter { it.isNotBlank() }
             .distinct()
 
@@ -513,11 +526,26 @@ class HayyaShootProvider : MainAPI() {
             try {
                 val result = resolveVidSrc(embedUrl)
 
-                result.streams.forEachIndexed { index, streamUrl ->
+                // Keep only playlists that really answer; if none does, still
+                // offer them all (and explain in a DEBUG entry).
+                val playable = result.streams.filter { isPlaylist(it, result.referer) }
+                val toEmit = playable.ifEmpty { result.streams }
+
+                Log.e("HayyaShoot", "streams=${result.streams.size} playable=${playable.size}")
+                if (playable.isEmpty() && debugMode) {
+                    val hosts = result.streams
+                        .mapNotNull { Uri.parse(it).host }
+                        .distinct()
+                        .take(4)
+                        .joinToString(",")
+                    reportFailure(callback, "8-unreachable hosts=$hosts")
+                }
+
+                toEmit.forEachIndexed { index, streamUrl ->
                     callback(
                         newExtractorLink(
                             source = name,
-                            name = if (result.streams.size > 1) "VidSrc ${index + 1}" else "VidSrc",
+                            name = if (toEmit.size > 1) "VidSrc ${index + 1}" else "VidSrc",
                             url = streamUrl,
                             type = ExtractorLinkType.M3U8
                         ) {
