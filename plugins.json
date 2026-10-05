@@ -81,6 +81,27 @@
         "name": "FiveTV"
     },
     {
+        "iconUrl": "https://hayyashoot.com/favicon.ico",
+        "fileHash": "sha256-8a8d0b68b6db32e3316027e6d02ceed99f6c07577196d45d1f953e30c18da9bf",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
+        "fileSize": 33254,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "sagemoon1996"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries"
+        ],
+        "version": 1,
+        "internalName": "HayyaShoot",
+        "description": "HayyaShoot Arabic movies and TV series provider",
+        "url": "https://raw.githubusercontent.com/sagemoon1996/cloudstream-repo/builds/HayyaShoot.cs3",
+        "name": "HayyaShoot"
+    },
+    {
         "fileHash": "sha256-c0648886d5569ca8cee828208f6234e90fac200549e88a0b31b771b2fc5f482e",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
