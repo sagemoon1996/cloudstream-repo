@@ -337,7 +337,8 @@ class HayyaShootProvider : MainAPI() {
 
     private data class VidSrcResult(
         val streams: List<String>,
-        val subtitles: List<String>
+        val subtitles: List<String>,
+        val referer: String
     )
 
     private fun snippet(text: String) =
@@ -356,23 +357,23 @@ class HayyaShootProvider : MainAPI() {
     }
 
     // Server 2 = VidSrc. Same service on several hosts: the first host that
-    // gives a stream wins. The first one is the one from the scraper 2.0.2,
-    // the second is the original HayyaShoot embed (with sub=ar).
+    // gives a stream wins. The first one is EXACTLY what hayyashoot.com puts in
+    // its Server 2 iframe (switchServer(2)); the second is the scraper 2.0.2 host.
     private fun embedCandidates(media: HayyaMediaData): List<String> {
         val isTv = media.type == "tv" && media.season != null && media.episode != null
         return if (isTv) {
             val s = media.season
             val e = media.episode
             listOf(
-                "https://vidsrc-embed.ru/embed/tv/${media.id}/$s/$e",
                 "https://vidsrc.me/embed/tv?tmdb=${media.id}&season=$s&episode=$e&sub=ar",
+                "https://vidsrc-embed.ru/embed/tv/${media.id}/$s/$e",
                 "https://vidsrc.xyz/embed/tv?tmdb=${media.id}&season=$s&episode=$e&sub=ar",
                 "https://vidsrc.net/embed/tv?tmdb=${media.id}&season=$s&episode=$e&sub=ar"
             )
         } else {
             listOf(
-                "https://vidsrc-embed.ru/embed/movie/${media.id}",
                 "https://vidsrc.me/embed/movie?tmdb=${media.id}&sub=ar",
+                "https://vidsrc-embed.ru/embed/movie/${media.id}",
                 "https://vidsrc.xyz/embed/movie?tmdb=${media.id}&sub=ar",
                 "https://vidsrc.net/embed/movie?tmdb=${media.id}&sub=ar"
             )
@@ -383,8 +384,14 @@ class HayyaShootProvider : MainAPI() {
     // Throws StepFailure with the failing step so the caller can try the next host.
     private suspend fun resolveVidSrc(embedUrl: String): VidSrcResult {
         // Step 1-2: embed page, RCP iframe (fallback: first absolute iframe)
-        val embedRes = app.get(embedUrl, headers = browserHeaders)
+        // The site's iframe uses referrerpolicy="origin" -> Referer = https://hayyashoot.com/
+        val embedRes = app.get(
+            embedUrl,
+            headers = browserHeaders + mapOf("Referer" to "$mainUrl/")
+        )
         val embedHtml = embedRes.text
+        // vidsrc.me redirects to another host: the real page URL is the final one
+        val embedPageUrl = embedRes.url.ifBlank { embedUrl }
 
         var rcpUrl = RCP_REGEX.find(embedHtml)?.groupValues?.getOrNull(1)
             ?: IFRAME_REGEX.find(embedHtml)?.groupValues?.getOrNull(1)
@@ -392,12 +399,17 @@ class HayyaShootProvider : MainAPI() {
                 "2-no-iframe",
                 "HTTP ${embedRes.code} len=${embedHtml.length} ${snippet(embedHtml)}"
             )
-        if (rcpUrl.startsWith("//")) rcpUrl = "https:$rcpUrl"
+        if (rcpUrl.startsWith("//")) {
+            rcpUrl = "https:$rcpUrl"
+        } else if (rcpUrl.startsWith("/")) {
+            val pageUri = Uri.parse(embedPageUrl)
+            rcpUrl = "${pageUri.scheme}://${pageUri.authority}$rcpUrl"
+        }
 
-        // Step 3: RCP page (Referer = embed URL)
+        // Step 3: RCP page (Referer = embed page URL)
         val rcpRes = app.get(
             rcpUrl,
-            headers = browserHeaders + mapOf("Referer" to embedUrl)
+            headers = browserHeaders + mapOf("Referer" to embedPageUrl)
         )
         val rcpHtml = rcpRes.text
 
@@ -427,10 +439,21 @@ class HayyaShootProvider : MainAPI() {
                 "HTTP ${prorcpRes.code} len=${prorcpHtml.length} ${snippet(prorcpHtml)}"
             )
 
-        // Step 7: every " or " alternative, {v1}..{v5} -> cloudnestra.com
+        // Step 7: every " or " alternative, {v1}..{v5} -> domain.
+        // The scraper used cloudnestra.com; the RCP host can rotate to another
+        // domain, so the RCP root domain is tried as well.
+        val rcpRoot = (rcpUri.host ?: "").split(".").takeLast(2).joinToString(".")
+        val placeholderDomains = listOf("cloudnestra.com", rcpRoot)
+            .filter { it.isNotBlank() }
+            .distinct()
+
         val streams = rawFile
             .split(" or ")
-            .map { it.trim().replace(PLACEHOLDER_REGEX, "cloudnestra.com") }
+            .flatMap { alt ->
+                placeholderDomains.map { domain ->
+                    alt.trim().replace(PLACEHOLDER_REGEX, domain)
+                }
+            }
             .filter { it.startsWith("http") }
             .distinct()
 
@@ -445,7 +468,7 @@ class HayyaShootProvider : MainAPI() {
             .distinct()
             .toList()
 
-        return VidSrcResult(streams, subtitles)
+        return VidSrcResult(streams, subtitles, "$rcpOrigin/")
     }
 
     override suspend fun loadLinks(
@@ -486,7 +509,7 @@ class HayyaShootProvider : MainAPI() {
                             url = streamUrl,
                             type = ExtractorLinkType.M3U8
                         ) {
-                            this.referer = "https://cloudnestra.com/"
+                            this.referer = result.referer
                             this.quality = Qualities.Unknown.value
                             this.headers = mapOf("User-Agent" to userAgent)
                         }
