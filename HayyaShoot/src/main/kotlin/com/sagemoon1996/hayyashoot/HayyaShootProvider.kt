@@ -1,6 +1,7 @@
 package com.sagemoon1996.hayyashoot
 
 import android.net.Uri
+import android.util.Log
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.mvvm.logError
@@ -465,6 +466,11 @@ class HayyaShootProvider : MainAPI() {
         val failures = ArrayList<String>()
         var found = false
 
+        Log.e(
+            "HayyaShoot",
+            "loadLinks start type=${media.type} id=${media.id} s=${media.season} e=${media.episode}"
+        )
+
         // Try each VidSrc host until one gives a stream
         for (embedUrl in candidates) {
             val host = Uri.parse(embedUrl).host ?: embedUrl
@@ -492,6 +498,7 @@ class HayyaShootProvider : MainAPI() {
                 }
 
                 found = true
+                Log.e("HayyaShoot", "OK host=$host streams=${result.streams.size} subs=${result.subtitles.size}")
                 break
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
@@ -501,6 +508,7 @@ class HayyaShootProvider : MainAPI() {
                     logError(e)
                     failures.add("$host exception ${e::class.java.simpleName}: ${e.message}")
                 }
+                Log.e("HayyaShoot", "FAIL ${failures.last()}")
             }
         }
 
@@ -523,6 +531,7 @@ class HayyaShootProvider : MainAPI() {
             failures.take(4).forEach { reportFailure(callback, it) }
         }
 
+        Log.e("HayyaShoot", "loadLinks end found=$found")
         return found
     }
 
