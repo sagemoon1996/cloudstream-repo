@@ -11,6 +11,7 @@ import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import io.github.charlietap.chasm.embedding.invoke
 import io.github.charlietap.chasm.embedding.instance
 import io.github.charlietap.chasm.embedding.module
+import io.github.charlietap.chasm.embedding.shapes.expect
 import io.github.charlietap.chasm.embedding.store
 import io.github.charlietap.chasm.type.NumberValue
 import kotlinx.coroutines.async
@@ -30,15 +31,22 @@ class HayyaShootProvider : MainAPI() {
     override var lang = "ar"
 
     override val hasMainPage = true
-    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
+
+    override val supportedTypes = setOf(
+        TvType.Movie,
+        TvType.TvSeries
+    )
 
     override val mainPage = mainPageOf(
         "movie/popular" to "أفلام",
         "tv/popular" to "مسلسلات"
     )
 
-    private val posterBase = "https://image.tmdb.org/t/p/w500"
-    private val backdropBase = "https://image.tmdb.org/t/p/original"
+    private val posterBase =
+        "https://image.tmdb.org/t/p/w500"
+
+    private val backdropBase =
+        "https://image.tmdb.org/t/p/original"
 
     private val userAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0"
@@ -50,9 +58,9 @@ class HayyaShootProvider : MainAPI() {
         "Accept-Encoding" to "identity"
     )
 
-    // ---------------------------------------------------------
-    // TMDB
-    // ---------------------------------------------------------
+    // ---------------------------------------------------------------
+    // TMDB AUTH
+    // ---------------------------------------------------------------
 
     private val tokenMutex = Mutex()
 
@@ -60,35 +68,70 @@ class HayyaShootProvider : MainAPI() {
     private var cachedToken: String? = null
 
     private val tokenPatterns = listOf(
-        Regex("""auth_?token\s*[=:]\s*["'`]([^"'`]+)["'`]""", RegexOption.IGNORE_CASE),
-        Regex("""Bearer\s+(eyJ[\w-]+\.[\w-]+\.[\w-]+)""")
+        Regex(
+            """auth_?token\s*[=:]\s*["'`]([^"'`]+)["'`]""",
+            RegexOption.IGNORE_CASE
+        ),
+        Regex(
+            """Bearer\s+(eyJ[\w-]+\.[\w-]+\.[\w-]+)"""
+        )
     )
 
-    private fun extractToken(text: String): String? =
-        tokenPatterns.firstNotNullOfOrNull {
-            it.find(text)?.groupValues?.getOrNull(1)
-                ?.takeIf(String::isNotBlank)
+    private fun extractToken(
+        text: String
+    ): String? {
+        for (pattern in tokenPatterns) {
+            pattern.find(text)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.takeIf { it.isNotBlank() }
+                ?.let { return it }
         }
+        return null
+    }
 
     private suspend fun fetchAuthToken(): String? {
-        val page = app.get("$mainUrl/movies/", headers = browserHeaders).text
+        val html =
+            app.get(
+                "$mainUrl/movies/",
+                headers = browserHeaders
+            ).text
 
-        extractToken(page)?.let { return it }
+        extractToken(html)?.let {
+            return it
+        }
 
-        val scripts = Regex(
+        val scriptRegex = Regex(
             """<script[^>]+src=["']([^"']+)["']""",
             RegexOption.IGNORE_CASE
         )
 
-        for (match in scripts.findAll(page)) {
-            val url = fixUrl(match.groupValues[1])
-            if (!Uri.parse(url).host.orEmpty().endsWith("hayyashoot.com")) continue
+        for (match in scriptRegex.findAll(html)) {
+
+            val scriptUrl =
+                fixUrl(match.groupValues[1])
+
+            val host =
+                Uri.parse(scriptUrl).host
+                    ?: continue
+
+            if (!host.endsWith("hayyashoot.com")) {
+                continue
+            }
 
             try {
-                extractToken(app.get(url, headers = browserHeaders).text)
-                    ?.let { return it }
+                extractToken(
+                    app.get(
+                        scriptUrl,
+                        headers = browserHeaders
+                    ).text
+                )?.let {
+                    return it
+                }
             } catch (e: Exception) {
-                if (e is CancellationException) throw e
+                if (e is CancellationException) {
+                    throw e
+                }
                 logError(e)
             }
         }
@@ -96,169 +139,310 @@ class HayyaShootProvider : MainAPI() {
         return null
     }
 
-    private suspend fun getAuthToken(force: Boolean = false): String {
-        if (!force) cachedToken?.let { return it }
+    private suspend fun getAuthToken(
+        forceRefresh: Boolean = false
+    ): String {
+
+        if (!forceRefresh) {
+            cachedToken?.let {
+                return it
+            }
+        }
 
         return tokenMutex.withLock {
-            if (!force) cachedToken?.let { return@withLock it }
 
-            val token = fetchAuthToken()
-                ?: throw ErrorLoadingException("HayyaShoot AUTH_TOKEN not found")
+            if (!forceRefresh) {
+                cachedToken?.let {
+                    return@withLock it
+                }
+            }
+
+            val token =
+                fetchAuthToken()
+                    ?: throw ErrorLoadingException(
+                        "HayyaShoot AUTH_TOKEN not found"
+                    )
 
             cachedToken = token
             token
         }
     }
 
-    private suspend fun tmdbGet(path: String): String {
-        suspend fun request(token: String) =
-            app.get(
-                "https://api.themoviedb.org/3/$path",
-                headers = mapOf(
-                    "User-Agent" to userAgent,
-                    "Accept" to "application/json, text/plain, */*",
-                    "Authorization" to "Bearer $token"
-                )
+    private suspend fun requestTmdb(
+        path: String,
+        token: String
+    ) =
+        app.get(
+            "https://api.themoviedb.org/3/$path",
+            headers = mapOf(
+                "User-Agent" to userAgent,
+                "Accept" to "application/json, text/plain, */*",
+                "Authorization" to "Bearer $token"
+            )
+        )
+
+    private suspend fun tmdbGet(
+        path: String
+    ): String {
+
+        var response =
+            requestTmdb(
+                path,
+                getAuthToken()
             )
 
-        var response = request(getAuthToken())
-
-        if (response.code == 401 || response.code == 403) {
-            response = request(getAuthToken(true))
+        if (
+            response.code == 401 ||
+            response.code == 403
+        ) {
+            response =
+                requestTmdb(
+                    path,
+                    getAuthToken(
+                        forceRefresh = true
+                    )
+                )
         }
 
         return response.text
     }
 
-    // ---------------------------------------------------------
-    // Helpers
-    // ---------------------------------------------------------
+    // ---------------------------------------------------------------
+    // HELPERS
+    // ---------------------------------------------------------------
 
-    private fun slug(title: String) =
+    private fun slug(
+        title: String
+    ): String =
         URLEncoder.encode(
-            title.replace(Regex("""[\s-]+"""), "-").trim('-'),
+            title
+                .replace(
+                    Regex("""[\s-]+"""),
+                    "-"
+                )
+                .trim('-'),
             "UTF-8"
         )
 
-    private fun movieUrl(id: Int, title: String) =
+    private fun movieUrl(
+        id: Int,
+        title: String
+    ) =
         "$mainUrl/movies/?movie=$id&title=${slug(title)}"
 
-    private fun tvUrl(id: Int, title: String) =
+    private fun tvUrl(
+        id: Int,
+        title: String
+    ) =
         "$mainUrl/movies/?tv=$id&title=${slug(title)}"
 
-    private fun yearOf(date: String?) =
-        date?.take(4)?.toIntOrNull()
+    private fun yearOf(
+        date: String?
+    ): Int? =
+        date
+            ?.take(4)
+            ?.toIntOrNull()
 
     private fun toSearchResponse(
         item: TmdbItem,
-        movie: Boolean
+        isMovie: Boolean
     ): SearchResponse? {
-        val title = (if (movie) item.title else item.name)
-            ?.takeIf(String::isNotBlank)
-            ?: return null
 
-        val poster = item.posterPath?.let { posterBase + it }
+        val title =
+            if (isMovie) {
+                item.title
+            } else {
+                item.name
+            }?.takeIf {
+                it.isNotBlank()
+            } ?: return null
 
-        return if (movie) {
+        val poster =
+            item.posterPath?.let {
+                posterBase + it
+            }
+
+        return if (isMovie) {
+
             newMovieSearchResponse(
                 title,
-                movieUrl(item.id, title),
+                movieUrl(
+                    item.id,
+                    title
+                ),
                 TvType.Movie
             ) {
-                posterUrl = poster
-                year = yearOf(item.releaseDate)
+                this.posterUrl = poster
+                this.year =
+                    yearOf(item.releaseDate)
             }
+
         } else {
+
             newTvSeriesSearchResponse(
                 title,
-                tvUrl(item.id, title),
+                tvUrl(
+                    item.id,
+                    title
+                ),
                 TvType.TvSeries
             ) {
-                posterUrl = poster
-                year = yearOf(item.firstAirDate)
+                this.posterUrl = poster
+                this.year =
+                    yearOf(item.firstAirDate)
             }
         }
     }
 
-    private suspend fun fetchList(path: String): TmdbResponse? =
+    private suspend fun fetchList(
+        path: String
+    ): TmdbResponse? =
         try {
-            parseJson<TmdbResponse>(tmdbGet(path))
+            parseJson<TmdbResponse>(
+                tmdbGet(path)
+            )
         } catch (e: Exception) {
-            if (e is CancellationException) throw e
+            if (e is CancellationException) {
+                throw e
+            }
             logError(e)
             null
         }
 
-    // ---------------------------------------------------------
-    // Main page
-    // ---------------------------------------------------------
+    // ---------------------------------------------------------------
+    // MAIN PAGE
+    // ---------------------------------------------------------------
 
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val movie = request.data.startsWith("movie")
-        val response = fetchList(
-            "${request.data}?language=ar-SA&page=$page"
-        )
 
-        val items = response?.results.orEmpty()
-            .mapNotNull { toSearchResponse(it, movie) }
-            .distinctBy { it.url }
+        val isMovie =
+            request.data.startsWith("movie")
+
+        val response =
+            fetchList(
+                "${request.data}?language=ar-SA&page=$page"
+            )
+
+        val items =
+            response?.results
+                .orEmpty()
+                .mapNotNull {
+                    toSearchResponse(
+                        it,
+                        isMovie
+                    )
+                }
+                .distinctBy {
+                    it.url
+                }
 
         return newHomePageResponse(
             request.name,
             items,
-            hasNext = page < (response?.totalPages ?: 1)
+            hasNext =
+                page < (response?.totalPages ?: 1)
         )
     }
 
-    // ---------------------------------------------------------
-    // Search
-    // ---------------------------------------------------------
+    // ---------------------------------------------------------------
+    // SEARCH
+    // ---------------------------------------------------------------
 
-    override suspend fun search(query: String): List<SearchResponse> {
-        val q = query.trim()
-        if (q.isBlank()) return emptyList()
+    override suspend fun search(
+        query: String
+    ): List<SearchResponse> {
 
-        val encoded = URLEncoder.encode(q, "UTF-8")
+        val trimmed =
+            query.trim()
+
+        if (trimmed.isBlank()) {
+            return emptyList()
+        }
+
+        val q =
+            URLEncoder.encode(
+                trimmed,
+                "UTF-8"
+            )
 
         return coroutineScope {
+
             val movies = async {
                 fetchList(
-                    "search/movie?query=$encoded&language=ar-SA&page=1"
+                    "search/movie?query=$q&language=ar-SA&page=1"
                 )
             }
 
             val shows = async {
                 fetchList(
-                    "search/tv?query=$encoded&language=ar-SA&page=1"
+                    "search/tv?query=$q&language=ar-SA&page=1"
                 )
             }
 
-            val movieResults = movies.await()
-                ?.results.orEmpty()
-                .mapNotNull { toSearchResponse(it, true) }
+            val movieResults =
+                movies.await()
+                    ?.results
+                    .orEmpty()
+                    .mapNotNull {
+                        toSearchResponse(
+                            it,
+                            true
+                        )
+                    }
 
-            val tvResults = shows.await()
-                ?.results.orEmpty()
-                .mapNotNull { toSearchResponse(it, false) }
+            val showResults =
+                shows.await()
+                    ?.results
+                    .orEmpty()
+                    .mapNotNull {
+                        toSearchResponse(
+                            it,
+                            false
+                        )
+                    }
 
-            (movieResults + tvResults).distinctBy { it.url }
+            (movieResults + showResults)
+                .distinctBy {
+                    it.url
+                }
         }
     }
 
-    // ---------------------------------------------------------
-    // Load
-    // ---------------------------------------------------------
+    // ---------------------------------------------------------------
+    // LOAD
+    // ---------------------------------------------------------------
 
-    override suspend fun load(url: String): LoadResponse? {
-        val uri = Uri.parse(url)
-        val movieId = uri.getQueryParameter("movie")?.toIntOrNull()
-        val tvId = uri.getQueryParameter("tv")?.toIntOrNull()
+    override suspend fun load(
+        url: String
+    ): LoadResponse? {
 
-        if (movieId != null) return loadMovie(url, movieId)
-        if (tvId != null) return loadTv(url, tvId)
+        val uri =
+            Uri.parse(url)
+
+        val movieId =
+            uri.getQueryParameter("movie")
+                ?.toIntOrNull()
+
+        val tvId =
+            uri.getQueryParameter("tv")
+                ?.toIntOrNull()
+
+        if (movieId != null) {
+            return loadMovie(
+                url,
+                movieId
+            )
+        }
+
+        if (tvId != null) {
+            return loadTv(
+                url,
+                tvId
+            )
+        }
 
         return null
     }
@@ -267,25 +451,51 @@ class HayyaShootProvider : MainAPI() {
         url: String,
         id: Int
     ): LoadResponse? {
-        val movie = parseJson<TmdbMovie>(
-            tmdbGet("movie/$id?language=ar-SA")
-        )
 
-        val title = movie.title
-            ?.takeIf(String::isNotBlank)
-            ?: return null
+        val movie =
+            parseJson<TmdbMovie>(
+                tmdbGet(
+                    "movie/$id?language=ar-SA"
+                )
+            )
+
+        val title =
+            movie.title
+                ?.takeIf {
+                    it.isNotBlank()
+                }
+                ?: return null
+
+        val data =
+            HayyaMediaData(
+                type = "movie",
+                id = id
+            ).toJson()
 
         return newMovieLoadResponse(
             title,
             url,
             TvType.Movie,
-            HayyaMediaData("movie", id).toJson()
+            data
         ) {
-            posterUrl = movie.posterPath?.let { posterBase + it }
-            backgroundPosterUrl =
-                movie.backdropPath?.let { backdropBase + it }
-            plot = movie.overview
-            year = yearOf(movie.releaseDate)
+
+            this.posterUrl =
+                movie.posterPath?.let {
+                    posterBase + it
+                }
+
+            this.backgroundPosterUrl =
+                movie.backdropPath?.let {
+                    backdropBase + it
+                }
+
+            this.plot =
+                movie.overview
+
+            this.year =
+                yearOf(
+                    movie.releaseDate
+                )
         }
     }
 
@@ -293,60 +503,106 @@ class HayyaShootProvider : MainAPI() {
         url: String,
         id: Int
     ): LoadResponse? {
-        val tv = parseJson<TmdbTv>(
-            tmdbGet("tv/$id?language=ar-SA")
-        )
 
-        val title = tv.name
-            ?.takeIf(String::isNotBlank)
-            ?: return null
+        val tv =
+            parseJson<TmdbTv>(
+                tmdbGet(
+                    "tv/$id?language=ar-SA"
+                )
+            )
 
-        val seasons = tv.seasons.orEmpty()
-            .filter {
-                it.seasonNumber > 0 &&
+        val title =
+            tv.name
+                ?.takeIf {
+                    it.isNotBlank()
+                }
+                ?: return null
+
+        val seasons =
+            tv.seasons
+                .orEmpty()
+                .filter {
+                    it.seasonNumber > 0 &&
                     (it.episodeCount ?: 1) > 0
-            }
+                }
 
-        val seasonData = coroutineScope {
-            seasons.map { season ->
-                async {
-                    try {
-                        season.seasonNumber to parseJson<TmdbSeason>(
-                            tmdbGet(
-                                "tv/$id/season/${season.seasonNumber}?language=ar-SA"
-                            )
-                        )
-                    } catch (e: Exception) {
-                        if (e is CancellationException) throw e
-                        logError(e)
-                        null
+        val seasonData =
+            coroutineScope {
+
+                seasons.map { season ->
+
+                    async {
+
+                        try {
+
+                            season.seasonNumber to
+                                parseJson<TmdbSeason>(
+                                    tmdbGet(
+                                        "tv/$id/season/${season.seasonNumber}?language=ar-SA"
+                                    )
+                                )
+
+                        } catch (e: Exception) {
+
+                            if (
+                                e is CancellationException
+                            ) {
+                                throw e
+                            }
+
+                            logError(e)
+                            null
+                        }
                     }
-                }
-            }.awaitAll()
-        }.filterNotNull().sortedBy { it.first }
-
-        val episodes = seasonData.flatMap { (season, data) ->
-            data.episodes.orEmpty().map { ep ->
-                newEpisode(
-                    HayyaMediaData(
-                        type = "tv",
-                        id = id,
-                        season = season,
-                        episode = ep.episodeNumber
-                    ).toJson()
-                ) {
-                    name = ep.name
-                        ?.takeIf(String::isNotBlank)
-                        ?: "الحلقة ${ep.episodeNumber}"
-
-                    this.season = season
-                    episode = ep.episodeNumber
-                    description = ep.overview
-                    posterUrl =
-                        ep.stillPath?.let { posterBase + it }
-                }
+                }.awaitAll()
             }
-        }
+                .filterNotNull()
+                .sortedBy {
+                    it.first
+                }
+
+        val episodes =
+            seasonData.flatMap {
+                (seasonNumber, season) ->
+
+                season.episodes
+                    .orEmpty()
+                    .map { episode ->
+
+                        val data =
+                            HayyaMediaData(
+                                type = "tv",
+                                id = id,
+                                season = seasonNumber,
+                                episode =
+                                    episode.episodeNumber
+                            ).toJson()
+
+                        newEpisode(data) {
+
+                            this.name =
+                                episode.name
+                                    ?.takeIf {
+                                        it.isNotBlank()
+                                    }
+                                    ?: "الحلقة ${episode.episodeNumber}"
+
+                            this.season =
+                                seasonNumber
+
+                            this.episode =
+                                episode.episodeNumber
+
+                            this.description =
+                                episode.overview
+
+                            this.posterUrl =
+                                episode.stillPath?.let {
+                                    posterBase + it
+                                }
+                        }
+                    }
+            }
 
         return newTvSeriesLoadResponse(
             title,
@@ -354,207 +610,378 @@ class HayyaShootProvider : MainAPI() {
             TvType.TvSeries,
             episodes
         ) {
-            posterUrl = tv.posterPath?.let { posterBase + it }
-            backgroundPosterUrl =
-                tv.backdropPath?.let { backdropBase + it }
-            plot = tv.overview
-            year = yearOf(tv.firstAirDate)
+
+            this.posterUrl =
+                tv.posterPath?.let {
+                    posterBase + it
+                }
+
+            this.backgroundPosterUrl =
+                tv.backdropPath?.let {
+                    backdropBase + it
+                }
+
+            this.plot =
+                tv.overview
+
+            this.year =
+                yearOf(
+                    tv.firstAirDate
+                )
         }
     }
 
-    // ---------------------------------------------------------
-    // Current VidSrc
-    // ---------------------------------------------------------
-
-    private data class VidSrcResult(
-        val url: String,
-        val referer: String
-    )
-
-    private suspend fun decryptStreamUrls(
-        root: JSONObject,
-        encrypted: ByteArray
-    ): List<String> {
-
-        val vs = root.optJSONObject("vs")
-            ?: throw ErrorLoadingException("VidSrc: missing vs")
-
-        val wasmBytes = if (vs.optString("wasm_url").isNotBlank()) {
-            app.get(
-                vs.getString("wasm_url"),
-                headers = mapOf("User-Agent" to userAgent)
-            ).body?.bytes()
-                ?: throw ErrorLoadingException("VidSrc: empty WASM")
-        } else {
-            val wasm = vs.optString("wasm")
-                .takeIf(String::isNotBlank)
-                ?: throw ErrorLoadingException("VidSrc: missing wasm")
-
-            Base64.decode(wasm, Base64.DEFAULT)
-        }
-
-        val wasmModule = module(wasmBytes)
-        val wasmStore = store()
-        val wasmInstance = instance(wasmStore, wasmModule)
-
-        val memory = wasmInstance.exports
-            .first { it.name == "memory" }
-            .value
-
-        val alloc = invoke(
-            wasmStore,
-            wasmInstance,
-            "alloc",
-            listOf(NumberValue.I32(encrypted.size))
-        )
-
-        val ptr =
-            (alloc.firstOrNull() as? NumberValue.I32)?.value
-                ?: throw ErrorLoadingException("VidSrc: alloc failed")
-
-        encrypted.forEachIndexed { i, byte ->
-            memory.writeByte(
-                wasmStore,
-                ptr + i,
-                byte
-            )
-        }
-
-        val result = invoke(
-            wasmStore,
-            wasmInstance,
-            "decrypt",
-            listOf(
-                NumberValue.I32(ptr),
-                NumberValue.I32(encrypted.size)
-            )
-        )
-
-        val length =
-            (result.firstOrNull() as? NumberValue.I32)?.value
-                ?: throw ErrorLoadingException("VidSrc: decrypt failed")
-
-        if (length <= 0) {
-            throw ErrorLoadingException(
-                "VidSrc: decrypt returned $length"
-            )
-        }
-
-        val output = ByteArray(length)
-
-        for (i in 0 until length) {
-            output[i] = memory.readByte(
-                wasmStore,
-                ptr + 12 + i
-            )
-        }
-
-        return String(output, Charsets.UTF_8)
-            .split('\n')
-            .map(String::trim)
-            .filter { it.startsWith("http") }
-    }
+    // ---------------------------------------------------------------
+    // VIDSRC CURRENT API + WASM
+    // ---------------------------------------------------------------
 
     private suspend fun resolveVidSrc(
         media: HayyaMediaData
-    ): VidSrcResult {
+    ): String {
 
-        val api = buildString {
-            append("https://data.vidsrc.sh/api.php?type=")
-            append(if (media.type == "tv") "tv" else "movie")
-            append("&tmdb=").append(media.id)
+        val apiUrl =
+            buildString {
 
-            if (media.type == "tv") {
-                append("&season=").append(media.season)
-                append("&episode=").append(media.episode)
+                append(
+                    "https://data.vidsrc.sh/api.php?type="
+                )
+
+                append(
+                    if (media.type == "tv") {
+                        "tv"
+                    } else {
+                        "movie"
+                    }
+                )
+
+                append(
+                    "&tmdb="
+                )
+                append(media.id)
+
+                if (media.type == "tv") {
+
+                    append(
+                        "&season="
+                    )
+                    append(media.season)
+
+                    append(
+                        "&episode="
+                    )
+                    append(media.episode)
+                }
+
+                append(
+                    "&stream_urls"
+                )
             }
 
-            append("&stream_urls")
-        }
-
-        val response = app.get(
-            api,
-            headers = browserHeaders + mapOf(
-                "Referer" to "https://vidsrc.sh/"
+        val response =
+            app.get(
+                apiUrl,
+                headers =
+                    browserHeaders +
+                        mapOf(
+                            "Referer" to
+                                "https://vidsrc.sh/"
+                        )
             )
-        )
 
         if (response.code !in 200..299) {
+
             throw ErrorLoadingException(
                 "VidSrc API HTTP ${response.code}"
             )
         }
 
-        val root = JSONObject(response.text)
-        val value = root
-            .optJSONObject("data")
-            ?.opt("stream_urls")
-            ?: throw ErrorLoadingException(
-                "VidSrc: missing stream_urls"
+        val root =
+            JSONObject(
+                response.text
             )
 
-        val streams = when (value) {
-            is JSONArray -> {
-                (0 until value.length())
-                    .mapNotNull {
-                        value.optString(it)
-                            .takeIf(String::isNotBlank)
-                    }
-            }
+        val data =
+            root.optJSONObject("data")
+                ?: throw ErrorLoadingException(
+                    "VidSrc: no data"
+                )
 
-            is String -> {
-                val encrypted = try {
-                    Base64.decode(value, Base64.DEFAULT)
-                } catch (e: Exception) {
-                    throw ErrorLoadingException(
-                        "VidSrc: invalid stream_urls"
-                    )
+        val streamValue =
+            data.opt("stream_urls")
+
+        val streams =
+            when (streamValue) {
+
+                is JSONArray -> {
+
+                    (0 until streamValue.length())
+                        .mapNotNull {
+                            streamValue
+                                .optString(it)
+                                .takeIf {
+                                    it.isNotBlank()
+                                }
+                        }
                 }
 
-                decryptStreamUrls(root, encrypted)
+                is String -> {
+
+                    val encrypted =
+                        try {
+
+                            Base64.decode(
+                                streamValue,
+                                Base64.DEFAULT
+                            )
+
+                        } catch (e: Exception) {
+
+                            throw ErrorLoadingException(
+                                "VidSrc: invalid stream_urls"
+                            )
+                        }
+
+                    val vs =
+                        root.optJSONObject("vs")
+                            ?: throw ErrorLoadingException(
+                                "VidSrc: missing vs"
+                            )
+
+                    val wasmBytes =
+                        if (
+                            vs.has("wasm_url")
+                        ) {
+
+                            val wasmUrl =
+                                vs.optString(
+                                    "wasm_url"
+                                )
+
+                            if (
+                                wasmUrl.isBlank()
+                            ) {
+                                throw ErrorLoadingException(
+                                    "VidSrc: empty wasm_url"
+                                )
+                            }
+
+                            app.get(
+                                wasmUrl,
+                                headers =
+                                    mapOf(
+                                        "User-Agent" to
+                                            userAgent
+                                    )
+                            )
+                                .body
+                                ?.bytes()
+                                ?: throw ErrorLoadingException(
+                                    "VidSrc: empty WASM"
+                                )
+
+                        } else {
+
+                            val wasm =
+                                vs.optString(
+                                    "wasm"
+                                )
+
+                            if (
+                                wasm.isBlank()
+                            ) {
+                                throw ErrorLoadingException(
+                                    "VidSrc: missing wasm"
+                                )
+                            }
+
+                            Base64.decode(
+                                wasm,
+                                Base64.DEFAULT
+                            )
+                        }
+
+                    // Chasm 1.5.0
+
+                    val wasmModule =
+                        module(
+                            wasmBytes
+                        ).expect(
+                            "VidSrc: failed to decode WASM"
+                        )
+
+                    val wasmStore =
+                        store()
+
+                    val wasmInstance =
+                        instance(
+                            wasmStore,
+                            wasmModule,
+                            emptyList()
+                        ).expect(
+                            "VidSrc: failed to instantiate WASM"
+                        )
+
+                    val memory =
+                        wasmInstance.exports
+                            .firstOrNull {
+                                it.name == "memory"
+                            }
+                            ?.value
+                            ?: throw ErrorLoadingException(
+                                "VidSrc: WASM memory export not found"
+                            )
+
+                    val allocResult =
+                        invoke(
+                            wasmStore,
+                            wasmInstance,
+                            "alloc",
+                            listOf(
+                                NumberValue.I32(
+                                    encrypted.size
+                                )
+                            )
+                        ).expect(
+                            "VidSrc: alloc failed"
+                        )
+
+                    val ptr =
+                        (
+                            allocResult
+                                .firstOrNull()
+                                as? NumberValue.I32
+                            )?.value
+                            ?: throw ErrorLoadingException(
+                                "VidSrc: alloc returned no pointer"
+                            )
+
+                    for (
+                        i in encrypted.indices
+                    ) {
+
+                        memory.writeByte(
+                            wasmStore,
+                            ptr + i,
+                            encrypted[i]
+                        )
+                    }
+
+                    val decryptResult =
+                        invoke(
+                            wasmStore,
+                            wasmInstance,
+                            "decrypt",
+                            listOf(
+                                NumberValue.I32(
+                                    ptr
+                                ),
+                                NumberValue.I32(
+                                    encrypted.size
+                                )
+                            )
+                        ).expect(
+                            "VidSrc: decrypt failed"
+                        )
+
+                    val outLen =
+                        (
+                            decryptResult
+                                .firstOrNull()
+                                as? NumberValue.I32
+                            )?.value
+                            ?: throw ErrorLoadingException(
+                                "VidSrc: decrypt returned no length"
+                            )
+
+                    if (outLen <= 0) {
+                        throw ErrorLoadingException(
+                            "VidSrc: invalid decrypt length $outLen"
+                        )
+                    }
+
+                    val decoded =
+                        ByteArray(outLen)
+
+                    for (
+                        i in 0 until outLen
+                    ) {
+
+                        decoded[i] =
+                            memory.readByte(
+                                wasmStore,
+                                ptr + 12 + i
+                            )
+                    }
+
+                    String(
+                        decoded,
+                        Charsets.UTF_8
+                    )
+                        .split("\n")
+                        .map {
+                            it.trim()
+                        }
+                        .filter {
+                            it.startsWith("http")
+                        }
+                }
+
+                else -> emptyList()
             }
 
-            else -> emptyList()
+        if (streams.isEmpty()) {
+
+            throw ErrorLoadingException(
+                "VidSrc: no streams"
+            )
         }
 
-        val raw = streams.firstOrNull()
-            ?: throw ErrorLoadingException(
-                "VidSrc: no stream"
-            )
+        val raw =
+            streams.first()
 
-        val uri = Uri.parse(raw)
-        val origin = "${uri.scheme}://${uri.authority}"
+        val uri =
+            Uri.parse(raw)
 
-        val token = app.get(
-            "$origin/generate.php",
-            headers = mapOf(
-                "User-Agent" to userAgent,
-                "Referer" to "https://vidsrc.sh/"
+        val origin =
+            "${uri.scheme}://${uri.authority}"
+
+        val token =
+            app.get(
+                "$origin/generate.php",
+                headers =
+                    mapOf(
+                        "User-Agent" to
+                            userAgent
+                    )
             )
-        ).text.trim()
+                .text
+                .trim()
 
         if (token.isBlank()) {
+
             throw ErrorLoadingException(
                 "VidSrc: empty generate token"
             )
         }
 
-        val finalUrl =
-            if (raw.contains("__TOKEN__")) {
-                raw.replace("__TOKEN__", token)
-            } else {
-                "$raw?token=$token"
-            }
+        return if (
+            raw.contains("__TOKEN__")
+        ) {
 
-        return VidSrcResult(
-            finalUrl,
-            "https://vidsrc.sh/"
-        )
+            raw.replace(
+                "__TOKEN__",
+                token
+            )
+
+        } else {
+
+            "$raw?token=$token"
+        }
     }
 
-    // ---------------------------------------------------------
-    // Links
-    // ---------------------------------------------------------
+    // ---------------------------------------------------------------
+    // LINKS
+    // ---------------------------------------------------------------
 
     override suspend fun loadLinks(
         data: String,
@@ -563,43 +990,72 @@ class HayyaShootProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
-        val media = try {
-            parseJson<HayyaMediaData>(data)
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            logError(e)
-            return false
-        }
+        val media =
+            try {
+
+                parseJson<HayyaMediaData>(
+                    data
+                )
+
+            } catch (e: Exception) {
+
+                if (
+                    e is CancellationException
+                ) {
+                    throw e
+                }
+
+                logError(e)
+                return false
+            }
 
         return try {
-            val result = resolveVidSrc(media)
+
+            val streamUrl =
+                resolveVidSrc(
+                    media
+                )
 
             callback(
                 newExtractorLink(
                     source = name,
                     name = "VidSrc",
-                    url = result.url,
+                    url = streamUrl,
                     type = ExtractorLinkType.M3U8
                 ) {
-                    referer = result.referer
-                    quality = Qualities.Unknown.value
-                    headers = mapOf(
-                        "User-Agent" to userAgent
-                    )
+
+                    this.referer =
+                        "https://vidsrc.sh/"
+
+                    this.quality =
+                        Qualities.Unknown.value
+
+                    this.headers =
+                        mapOf(
+                            "User-Agent" to
+                                userAgent
+                        )
                 }
             )
 
             true
+
         } catch (e: Exception) {
-            if (e is CancellationException) throw e
+
+            if (
+                e is CancellationException
+            ) {
+                throw e
+            }
+
             logError(e)
             false
         }
     }
 
-    // ---------------------------------------------------------
-    // Data
-    // ---------------------------------------------------------
+    // ---------------------------------------------------------------
+    // DATA
+    // ---------------------------------------------------------------
 
     data class HayyaMediaData(
         val type: String,
