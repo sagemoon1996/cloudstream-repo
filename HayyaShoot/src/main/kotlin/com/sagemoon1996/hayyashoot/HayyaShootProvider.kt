@@ -352,17 +352,13 @@ class HayyaShootProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // loadLinks: Server 2 only = @definisi/vidsrc-scraper 2.0.2 logic
+    // loadLinks: Server 2 only = VidSrc
     // ---------------------------------------------------------------
 
-    // true  = if NO server gives a link, "DEBUG ..." entries appear in the
-    //         links list (one per server tried) and explain which step failed.
-    // false = production (no fake links).
     private val debugMode = true
 
-    // Shown in the first DEBUG entry: if you do not see it, the app is still
-    // running an OLD build of the plugin (bump `version` in build.gradle.kts).
-    private val buildTag = "build-14"
+    // New build marker
+    private val buildTag = "build-15"
 
     private class StepFailure(val step: String, val detail: String) :
         Exception("$step $detail")
@@ -382,20 +378,25 @@ class HayyaShootProvider : MainAPI() {
     ) {
         val label = "DEBUG $text".replace(Regex("""\s+"""), " ").take(220)
         callback(
-            newExtractorLink(name, label, "https://debug.invalid/", ExtractorLinkType.VIDEO) {
+            newExtractorLink(
+                name,
+                label,
+                "https://debug.invalid/",
+                ExtractorLinkType.VIDEO
+            ) {
                 this.quality = Qualities.Unknown.value
             }
         )
     }
 
-    // Server 2 = VidSrc. Same service on several hosts: the first host that
-    // gives a stream wins. The first one is EXACTLY what hayyashoot.com puts in
-    // its Server 2 iframe (switchServer(2)); the second is the scraper 2.0.2 host.
+    // Server 2 = VidSrc.
     private fun embedCandidates(media: HayyaMediaData): List<String> {
         val isTv = media.type == "tv" && media.season != null && media.episode != null
+
         return if (isTv) {
             val s = media.season
             val e = media.episode
+
             listOf(
                 "https://vidsrc.me/embed/tv?tmdb=${media.id}&season=$s&episode=$e&sub=ar",
                 "https://vidsrc-embed.ru/embed/tv/${media.id}/$s/$e",
@@ -412,15 +413,19 @@ class HayyaShootProvider : MainAPI() {
         }
     }
 
-    // The playlist answers only with the right Referer (a download without it was
-    // empty). Try the likely ones and keep the first that returns "#EXTM3U".
-    private suspend fun pickReferer(streamUrl: String, candidates: List<String>): String {
+    private suspend fun pickReferer(
+        streamUrl: String,
+        candidates: List<String>
+    ): String {
         val list = candidates.filter { it.isNotBlank() }.distinct()
+
         for (candidate in list) {
             val (ok, why) = playlistCheck(streamUrl, candidate)
             trace("referer ${Uri.parse(candidate).host} -> $why")
+
             if (ok) return candidate
         }
+
         return list.firstOrNull() ?: "$mainUrl/"
     }
 
@@ -429,8 +434,8 @@ class HayyaShootProvider : MainAPI() {
         return "${u.scheme}://${u.authority}/"
     }
 
-    // Loads the page in CloudStream's hidden WebView and returns the first
-    // .m3u8 request the page's own player makes (null if none shows up).
+    // Loads the page in CloudStream's hidden WebView and captures
+    // the first real HLS/CloudOrchestra stream request.
     private suspend fun sniffM3u8(
         url: String,
         referer: String,
@@ -443,40 +448,59 @@ class HayyaShootProvider : MainAPI() {
                     referer = referer,
                     interceptor = WebViewResolver(STREAM_URL_REGEX)
                 )
-                res.url.takeIf { STREAM_URL_REGEX.containsMatchIn(it) }
+
+                val captured = res.url
+
+                trace(
+                    "interceptor result host=${Uri.parse(captured).host} " +
+                        "match=${STREAM_URL_REGEX.containsMatchIn(captured)}"
+                )
+
+                captured.takeIf {
+                    STREAM_URL_REGEX.containsMatchIn(it)
+                }
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             logError(e)
+            trace("sniff exception ${e::class.java.simpleName}: ${e.message}")
             null
         }
 
-    // Current VidSrc chain (confirmed from the page):
-    //   embed page -> <iframe id="player_iframe" data-api="/vs_src.php?...">
-    //   -> GET data-api -> JSON {"src": "https://cloudorchestranova.com/embed/...?vs=..."}
-    //   -> the player page only answers with a vidsrc Referer; opening it directly
-    //      returns "Not Found", and the vs= token changes every time (never hardcode).
-    // The final .m3u8 is requested by the player's JS, so if it is not visible in
-    // the player HTML it is sniffed with a WebView.
-    private suspend fun resolveVsSrc(embedUrl: String, allowWebView: Boolean): VidSrcResult {
+    // Current VidSrc chain:
+    // embed -> data-api -> CloudOrchestra iframe -> generated stream.
+    private suspend fun resolveVsSrc(
+        embedUrl: String,
+        allowWebView: Boolean
+    ): VidSrcResult {
         val embedRes = app.get(
             embedUrl,
-            headers = browserHeaders + mapOf("Referer" to "$mainUrl/")
+            headers = browserHeaders + mapOf(
+                "Referer" to "$mainUrl/"
+            )
         )
+
         val embedHtml = embedRes.text
         val embedPageUrl = embedRes.url.ifBlank { embedUrl }
 
         val dataApi = DATA_API_REGEX.find(embedHtml)
-            ?.groupValues?.getOrNull(1)
+            ?.groupValues
+            ?.getOrNull(1)
             ?.replace("&amp;", "&")
 
-        trace("embed HTTP ${embedRes.code} final=${Uri.parse(embedPageUrl).host} data-api=${dataApi != null}")
+        trace(
+            "embed HTTP ${embedRes.code} " +
+                "final=${Uri.parse(embedPageUrl).host} " +
+                "data-api=${dataApi != null}"
+        )
 
         var playerUrl: String? = null
         var reason = ""
 
         if (dataApi == null) {
-            reason = "2-no-data-api HTTP ${embedRes.code} len=${embedHtml.length} ${snippet(embedHtml)}"
+            reason =
+                "2-no-data-api HTTP ${embedRes.code} " +
+                    "len=${embedHtml.length} ${snippet(embedHtml)}"
         } else {
             val apiUrl = try {
                 URI(embedPageUrl).resolve(dataApi).toString()
@@ -494,7 +518,8 @@ class HayyaShootProvider : MainAPI() {
             )
 
             playerUrl = try {
-                parseJson<VsSrcResponse>(apiRes.text).src
+                parseJson<VsSrcResponse>(apiRes.text)
+                    .src
                     ?.replace("\\/", "/")
                     ?.takeIf { it.startsWith("http") }
             } catch (e: Exception) {
@@ -503,170 +528,285 @@ class HayyaShootProvider : MainAPI() {
             }
 
             if (playerUrl == null) {
-                reason = "3-vs_src HTTP ${apiRes.code} ${snippet(apiRes.text)}"
+                reason =
+                    "3-vs_src HTTP ${apiRes.code} " +
+                        snippet(apiRes.text)
             }
         }
 
-        trace("vs_src playerUrl=${playerUrl?.let { Uri.parse(it).host }} ${reason.take(120)}")
+        trace(
+            "vs_src playerUrl=" +
+                "${playerUrl?.let { Uri.parse(it).host }} " +
+                reason.take(120)
+        )
 
-        // The stream is generated by the player's own JS
-        // (cloudorchestra -> generate.php -> https://<host>/pl/H4sI...), so it is
-        // not in any HTML. A hidden WebView runs the player and we catch that URL.
         if (allowWebView) {
             var sniffed: String? = null
 
-            // B1) the player page alone (fresh vs= token) with the vidsrc Referer
+            /*
+             * B1:
+             * Open the dynamically generated CloudOrchestra player.
+             *
+             * We DO NOT open its URL manually.
+             * The WebView receives it with the VidSrc referer.
+             */
             if (playerUrl != null) {
-                trace("B1 webview on player (20s)")
-                sniffed = sniffM3u8(playerUrl, originOf(embedPageUrl), 20_000L)
-                trace("B1 result=${sniffed?.take(90)}")
-                if (sniffed == null) reason += " webview-player-no-stream"
-            }
+                trace("B1 webview on player (35s)")
 
-            // B2) the real nested-iframe flow, starting from the embed page
-            if (sniffed == null) {
-                trace("B2 webview on embed (25s)")
-                sniffed = sniffM3u8(embedUrl, "$mainUrl/", 25_000L)
-                trace("B2 result=${sniffed?.take(90)}")
-                if (sniffed == null) reason += " webview-embed-no-stream"
-            }
-
-            if (sniffed != null) {
-                // The playlist is hotlink-protected: keep the Referer that works
-                val referer = pickReferer(
-                    sniffed,
-                    listOfNotNull(
-                        playerUrl?.let { originOf(it) },
-                        originOf(sniffed),
-                        originOf(embedPageUrl),
-                        "https://vidsrc.me/",
-                        "$mainUrl/"
-                    )
+                sniffed = sniffM3u8(
+                    playerUrl,
+                    originOf(embedPageUrl),
+                    35_000L
                 )
-                return VidSrcResult(listOf(sniffed), emptyList(), referer)
+
+                trace("B1 result=${sniffed?.take(180)}")
+
+                if (sniffed == null) {
+                    reason += " webview-player-no-stream"
+                }
+            }
+
+            /*
+             * B2:
+             * Full VidSrc embedded flow.
+             */
+            if (sniffed == null) {
+                trace("B2 webview on embed (35s)")
+
+                sniffed = sniffM3u8(
+                    embedUrl,
+                    "$mainUrl/",
+                    35_000L
+                )
+
+                trace("B2 result=${sniffed?.take(180)}")
+
+                if (sniffed == null) {
+                    reason += " webview-embed-no-stream"
+                }
+            }
+
+            /*
+             * IMPORTANT:
+             *
+             * Do NOT call playlistCheck() here.
+             *
+             * The URL was captured from the browser/player session.
+             * A separate HTTP request can lose the session/referer/cookies.
+             */
+            if (!sniffed.isNullOrBlank()) {
+                val referer = when {
+                    playerUrl != null ->
+                        originOf(playerUrl)
+
+                    else ->
+                        originOf(embedPageUrl)
+                }
+
+                return VidSrcResult(
+                    streams = listOf(sniffed),
+                    subtitles = emptyList(),
+                    referer = referer
+                )
             }
         }
 
-        throw StepFailure("vs_src-chain", reason)
+        throw StepFailure(
+            "vs_src-chain",
+            reason
+        )
     }
 
-    // True only if the URL answers 2xx and really is an HLS playlist.
     private fun trace(msg: String) {
         val line = "${System.currentTimeMillis() - traceStart}ms $msg"
         traceLines.add(line)
         Log.e("HayyaShoot", line)
     }
 
-    // (is it a real playlist?, short explanation)
-    private suspend fun playlistCheck(url: String, referer: String): Pair<Boolean, String> =
+    private suspend fun playlistCheck(
+        url: String,
+        referer: String
+    ): Pair<Boolean, String> =
         try {
             withTimeoutOrNull(6_000L) {
                 val res = app.get(
                     url,
-                    headers = mapOf("User-Agent" to userAgent, "Referer" to referer)
+                    headers = mapOf(
+                        "User-Agent" to userAgent,
+                        "Referer" to referer
+                    )
                 )
-                val ok = res.code in 200..299 && res.text.trimStart().startsWith("#EXTM3U")
-                ok to "HTTP ${res.code} len=${res.text.length} ${if (ok) "PLAYLIST" else snippet(res.text)}"
+
+                val ok =
+                    res.code in 200..299 &&
+                        res.text.trimStart().startsWith("#EXTM3U")
+
+                ok to
+                    "HTTP ${res.code} len=${res.text.length} " +
+                        if (ok) {
+                            "PLAYLIST"
+                        } else {
+                            snippet(res.text)
+                        }
             } ?: (false to "timeout 6s")
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             false to "exception ${e::class.java.simpleName}"
         }
 
-    private suspend fun isPlaylist(url: String, referer: String): Boolean =
+    private suspend fun isPlaylist(
+        url: String,
+        referer: String
+    ): Boolean =
         playlistCheck(url, referer).first
 
-    // embed page -> cloudnestra RCP -> /prorcp/hash -> file: -> HLS (+ subtitles)
-    // Throws StepFailure with the failing step so the caller can try the next host.
-    private suspend fun resolveVidSrc(embedUrl: String): VidSrcResult {
-        // Step 1-2: embed page, RCP iframe (fallback: first absolute iframe)
-        // The site's iframe uses referrerpolicy="origin" -> Referer = https://hayyashoot.com/
+    // Legacy CloudOrchestra/RCP resolver kept intact as a fallback helper.
+    private suspend fun resolveVidSrc(
+        embedUrl: String
+    ): VidSrcResult {
         val embedRes = app.get(
             embedUrl,
-            headers = browserHeaders + mapOf("Referer" to "$mainUrl/")
-        )
-        val embedHtml = embedRes.text
-        // vidsrc.me redirects to another host: the real page URL is the final one
-        val embedPageUrl = embedRes.url.ifBlank { embedUrl }
-
-        var rcpUrl = RCP_REGEX.find(embedHtml)?.groupValues?.getOrNull(1)
-            ?: IFRAME_REGEX.find(embedHtml)?.groupValues?.getOrNull(1)
-            ?: throw StepFailure(
-                "2-no-iframe",
-                "HTTP ${embedRes.code} len=${embedHtml.length} ${snippet(embedHtml)}"
+            headers = browserHeaders + mapOf(
+                "Referer" to "$mainUrl/"
             )
+        )
+
+        val embedHtml = embedRes.text
+
+        val embedPageUrl =
+            embedRes.url.ifBlank { embedUrl }
+
+        var rcpUrl =
+            RCP_REGEX.find(embedHtml)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?: IFRAME_REGEX.find(embedHtml)
+                    ?.groupValues
+                    ?.getOrNull(1)
+                ?: throw StepFailure(
+                    "2-no-iframe",
+                    "HTTP ${embedRes.code} " +
+                        "len=${embedHtml.length} " +
+                        snippet(embedHtml)
+                )
+
         if (rcpUrl.startsWith("//")) {
             rcpUrl = "https:$rcpUrl"
         } else if (rcpUrl.startsWith("/")) {
             val pageUri = Uri.parse(embedPageUrl)
-            rcpUrl = "${pageUri.scheme}://${pageUri.authority}$rcpUrl"
+            rcpUrl =
+                "${pageUri.scheme}://${pageUri.authority}$rcpUrl"
         }
 
-        // Step 3: RCP page (Referer = embed page URL)
         val rcpRes = app.get(
             rcpUrl,
-            headers = browserHeaders + mapOf("Referer" to embedPageUrl)
+            headers = browserHeaders + mapOf(
+                "Referer" to embedPageUrl
+            )
         )
+
         val rcpHtml = rcpRes.text
 
-        // Step 4: prorcp path (fallback: srcrcp)
-        val prorcpPath = PRORCP_PATH_REGEX.find(rcpHtml)?.value
-            ?: SRCRCP_PATH_REGEX.find(rcpHtml)?.value
-            ?: throw StepFailure(
-                "4-no-prorcp",
-                "HTTP ${rcpRes.code} rcp=${Uri.parse(rcpUrl).host} len=${rcpHtml.length} ${snippet(rcpHtml)}"
-            )
+        val prorcpPath =
+            PRORCP_PATH_REGEX.find(rcpHtml)?.value
+                ?: SRCRCP_PATH_REGEX.find(rcpHtml)?.value
+                ?: throw StepFailure(
+                    "4-no-prorcp",
+                    "HTTP ${rcpRes.code} " +
+                        "rcp=${Uri.parse(rcpUrl).host} " +
+                        "len=${rcpHtml.length} " +
+                        snippet(rcpHtml)
+                )
 
         val rcpUri = Uri.parse(rcpUrl)
-        val rcpOrigin = "${rcpUri.scheme}://${rcpUri.authority}"
+        val rcpOrigin =
+            "${rcpUri.scheme}://${rcpUri.authority}"
 
-        // Step 5: prorcp page (Referer = RCP URL)
         val prorcpRes = app.get(
             "$rcpOrigin$prorcpPath",
-            headers = browserHeaders + mapOf("Referer" to rcpUrl)
+            headers = browserHeaders + mapOf(
+                "Referer" to rcpUrl
+            )
         )
+
         val prorcpHtml = prorcpRes.text
 
-        // Step 6: file: "..." (fallback: any .m3u8 URL in the page)
-        val rawFile = FILE_REGEX.find(prorcpHtml)?.groupValues?.getOrNull(1)
-            ?: M3U8_REGEX.find(prorcpHtml.replace("\\/", "/"))?.value
-            ?: PL_REGEX.find(prorcpHtml.replace("\\/", "/"))?.value
-            ?: throw StepFailure(
-                "6-no-file",
-                "HTTP ${prorcpRes.code} len=${prorcpHtml.length} ${snippet(prorcpHtml)}"
+        val rawFile =
+            FILE_REGEX.find(prorcpHtml)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?: M3U8_REGEX.find(
+                    prorcpHtml.replace("\\/", "/")
+                )?.value
+                ?: PL_REGEX.find(
+                    prorcpHtml.replace("\\/", "/")
+                )?.value
+                ?: throw StepFailure(
+                    "6-no-file",
+                    "HTTP ${prorcpRes.code} " +
+                        "len=${prorcpHtml.length} " +
+                        snippet(prorcpHtml)
+                )
+
+        val rcpRoot =
+            (rcpUri.host ?: "")
+                .split(".")
+                .takeLast(2)
+                .joinToString(".")
+
+        val placeholderDomains =
+            listOf(
+                rcpRoot,
+                "cloudnestra.com"
             )
+                .filter { it.isNotBlank() }
+                .distinct()
 
-        // Step 7: every " or " alternative, {v1}..{v5} -> domain.
-        // The scraper used cloudnestra.com; the RCP host can rotate to another
-        // domain, so the RCP root domain is tried as well.
-        val rcpRoot = (rcpUri.host ?: "").split(".").takeLast(2).joinToString(".")
-        val placeholderDomains = listOf(rcpRoot, "cloudnestra.com")
-            .filter { it.isNotBlank() }
-            .distinct()
-
-        val streams = rawFile
-            .split(" or ")
-            .flatMap { alt ->
-                placeholderDomains.map { domain ->
-                    alt.trim().replace(PLACEHOLDER_REGEX, domain)
+        val streams =
+            rawFile
+                .split(" or ")
+                .flatMap { alt ->
+                    placeholderDomains.map { domain ->
+                        alt.trim()
+                            .replace(
+                                PLACEHOLDER_REGEX,
+                                domain
+                            )
+                    }
                 }
-            }
-            .filter { it.startsWith("http") }
-            .distinct()
+                .filter {
+                    it.startsWith("http")
+                }
+                .distinct()
 
         if (streams.isEmpty()) {
-            throw StepFailure("7-bad-url", rawFile.take(150))
+            throw StepFailure(
+                "7-bad-url",
+                rawFile.take(150)
+            )
         }
 
-        // Subtitles (.vtt / .srt) found in the prorcp page, deduplicated.
-        val subtitles = SUBTITLE_REGEX
-            .findAll(prorcpHtml.replace("\\/", "/"))
-            .map { it.groupValues[1] }
-            .distinct()
-            .toList()
+        val subtitles =
+            SUBTITLE_REGEX
+                .findAll(
+                    prorcpHtml.replace("\\/", "/")
+                )
+                .map {
+                    it.groupValues[1]
+                }
+                .distinct()
+                .toList()
 
-        return VidSrcResult(streams, subtitles, "$rcpOrigin/")
+        return VidSrcResult(
+            streams,
+            subtitles,
+            "$rcpOrigin/"
+        )
     }
+
+    // ---------------------------------------------------------------
+    // loadLinks
+    // ---------------------------------------------------------------
 
     override suspend fun loadLinks(
         data: String,
@@ -678,120 +818,271 @@ class HayyaShootProvider : MainAPI() {
             parseJson<HayyaMediaData>(data)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            if (debugMode) reportFailure(callback, "0-bad-data ${data.take(80)}")
+
+            if (debugMode) {
+                reportFailure(
+                    callback,
+                    "0-bad-data ${data.take(80)}"
+                )
+            }
+
             return false
         }
 
         traceStart = System.currentTimeMillis()
         traceLines.clear()
-        trace("$buildTag start ${media.type} id=${media.id} s=${media.season} e=${media.episode}")
+
+        trace(
+            "$buildTag start " +
+                "${media.type} " +
+                "id=${media.id} " +
+                "s=${media.season} " +
+                "e=${media.episode}"
+        )
 
         val candidates = embedCandidates(media)
         val failures = ArrayList<String>()
-        var found = false
 
         Log.e(
             "HayyaShoot",
-            "loadLinks start type=${media.type} id=${media.id} s=${media.season} e=${media.episode}"
+            "loadLinks start " +
+                "type=${media.type} " +
+                "id=${media.id} " +
+                "s=${media.season} " +
+                "e=${media.episode}"
         )
 
-        // Try each VidSrc host until one gives a stream
-        // Hard time budget: loadLinks must never spin forever
-        val completed = withTimeoutOrNull(60_000L) {
-            for ((index, embedUrl) in candidates.withIndex()) {
-                val host = Uri.parse(embedUrl).host ?: embedUrl
+        /*
+         * Main path:
+         *
+         * VidSrc embed
+         * -> CloudOrchestra
+         * -> WebView
+         * -> captured /pl/... or /pI/... or .m3u8
+         *
+         * IMPORTANT:
+         * The captured URL is emitted immediately.
+         * We do NOT perform another HTTP playlistCheck().
+         */
+        val completed =
+            withTimeoutOrNull(75_000L) {
 
-                try {
-                    val result = resolveVsSrc(
-                        embedUrl,
-                        allowWebView = true
+                for ((index, embedUrl) in candidates.withIndex()) {
+                    val host =
+                        Uri.parse(embedUrl).host
+                            ?: embedUrl
+
+                    try {
+                        trace(
+                            "TRY $host index=$index"
+                        )
+
+                        val result =
+                            resolveVsSrc(
+                                embedUrl,
+                                allowWebView = true
+                            )
+
+                        if (result.streams.isEmpty()) {
+                            throw StepFailure(
+                                "empty-streams",
+                                host
+                            )
+                        }
+
+                        /*
+                         * Emit exactly what the WebView captured.
+                         *
+                         * No playlistCheck().
+                         * No second HTTP request.
+                         */
+                        result.streams.forEachIndexed {
+                            streamIndex,
+                            streamUrl ->
+
+                            trace(
+                                "EMIT stream " +
+                                    streamUrl.take(220)
+                            )
+
+                            callback(
+                                newExtractorLink(
+                                    source = name,
+                                    name =
+                                        if (result.streams.size > 1) {
+                                            "VidSrc ${streamIndex + 1}"
+                                        } else {
+                                            "VidSrc"
+                                        },
+                                    url = streamUrl,
+                                    type = ExtractorLinkType.M3U8
+                                ) {
+                                    this.referer =
+                                        result.referer
+
+                                    this.quality =
+                                        Qualities.Unknown.value
+
+                                    this.headers =
+                                        mapOf(
+                                            "User-Agent" to userAgent
+                                        )
+                                }
+                            )
+                        }
+
+                        result.subtitles.forEach {
+                            subtitleUrl ->
+
+                            subtitleCallback(
+                                SubtitleFile(
+                                    "Arabic",
+                                    subtitleUrl
+                                )
+                            )
+                        }
+
+                        trace(
+                            "OK host=$host " +
+                                "streams=${result.streams.size} " +
+                                "subs=${result.subtitles.size}"
+                        )
+
+                        true
+                    } catch (e: Exception) {
+                        if (e is CancellationException) {
+                            throw e
+                        }
+
+                        val why =
+                            if (e is StepFailure) {
+                                "${e.step} ${e.detail}"
+                            } else {
+                                logError(e)
+                                "exception " +
+                                    "${e::class.java.simpleName}: " +
+                                    e.message
+                            }
+
+                        failures.add(
+                            "$host $why"
+                        )
+
+                        trace(
+                            "FAIL $host $why"
+                        )
+
+                        false
+                    }.let { success ->
+                        if (success) {
+                            return@withTimeoutOrNull true
+                        }
+                    }
+                }
+
+                false
+            } ?: false
+
+        /*
+         * Built-in CloudStream extractor fallback.
+         */
+        if (!completed) {
+            try {
+                trace(
+                    "BUILT-IN extractor"
+                )
+
+                val extracted =
+                    withTimeoutOrNull(20_000L) {
+                        loadExtractor(
+                            candidates.first(),
+                            "$mainUrl/",
+                            subtitleCallback,
+                            callback
+                        )
+                    } ?: false
+
+                if (extracted) {
+                    trace(
+                        "BUILT-IN HIT"
                     )
 
-                    // Keep only playlists that really answer; if none does, still
-                    // offer them all (and explain in a DEBUG entry).
-                    val playable = result.streams.filter { isPlaylist(it, result.referer) }
-                    val toEmit = playable.ifEmpty { result.streams }
+                    lastDiagnostic =
+                        traceLines.joinToString("\n")
 
-                    Log.e("HayyaShoot", "streams=${result.streams.size} playable=${playable.size}")
-                    if (playable.isEmpty() && debugMode) {
-                        val hosts = result.streams
-                            .mapNotNull { Uri.parse(it).host }
-                            .distinct()
-                            .take(4)
-                            .joinToString(",")
-                        reportFailure(callback, "8-unreachable hosts=$hosts")
-                    }
+                    return true
+                }
 
-                    toEmit.forEachIndexed { index, streamUrl ->
-                        callback(
-                            newExtractorLink(
-                                source = name,
-                                name = if (toEmit.size > 1) "VidSrc ${index + 1}" else "VidSrc",
-                                url = streamUrl,
-                                type = ExtractorLinkType.M3U8
-                            ) {
-                                this.referer = result.referer
-                                this.quality = Qualities.Unknown.value
-                                this.headers = mapOf("User-Agent" to userAgent)
-                            }
+                trace(
+                    "BUILT-IN MISS"
+                )
+            } catch (e: Exception) {
+                if (e is CancellationException) {
+                    throw e
+                }
+
+                logError(e)
+
+                failures.add(
+                    "builtin " +
+                        "${e::class.java.simpleName}: " +
+                        e.message
+                )
+
+                trace(
+                    "BUILT-IN FAIL " +
+                        failures.last()
+                )
+            }
+        }
+
+        if (debugMode) {
+            if (failures.isEmpty()) {
+                reportFailure(
+                    callback,
+                    "$buildTag no-stream " +
+                        "${media.type} " +
+                        "id=${media.id}"
+                )
+            } else {
+                failures
+                    .take(4)
+                    .forEach {
+                        reportFailure(
+                            callback,
+                            "$buildTag $it"
                         )
                     }
+            }
+        }
 
-                    result.subtitles.forEach { subtitleUrl ->
-                        subtitleCallback(SubtitleFile("Arabic", subtitleUrl))
+        trace(
+            "end found=false"
+        )
+
+        lastDiagnostic =
+            buildString {
+                traceLines
+                    .toList()
+                    .forEach {
+                        append(it)
+                            .append('\n')
                     }
 
-                    found = true
-                    Log.e("HayyaShoot", "OK host=$host streams=${result.streams.size} subs=${result.subtitles.size}")
-                    break
-                } catch (e: Exception) {
-                    if (e is CancellationException) throw e
-                    if (e is StepFailure) {
-                        failures.add("$host ${e.step} ${e.detail}")
-                    } else {
-                        logError(e)
-                        failures.add("$host exception ${e::class.java.simpleName}: ${e.message}")
+                if (failures.isNotEmpty()) {
+                    append(
+                        "--- failures ---\n"
+                    )
+
+                    failures.forEach {
+                        append("- ")
+                            .append(it)
+                            .append('\n')
                     }
-                    Log.e("HayyaShoot", "FAIL ${failures.last()}")
                 }
             }
-            true
-        }
-        if (completed == null) failures.add("timeout-60s (still running, stopped)")
 
-        // Last resort: CloudStream's built-in extractors on the first embed URL
-        if (!found) {
-            try {
-                found = withTimeoutOrNull(15_000L) {
-                    loadExtractor(
-                        candidates.first(),
-                        "$mainUrl/",
-                        subtitleCallback,
-                        callback
-                    )
-                } ?: false
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                logError(e)
-            }
-        }
-
-        if (!found && debugMode) {
-            if (failures.isEmpty()) {
-                reportFailure(callback, "$buildTag no-failure-info ${media.type} id=${media.id}")
-            } else {
-                failures.take(4).forEach { reportFailure(callback, "$buildTag $it") }
-            }
-        }
-
-        trace("end found=$found")
-        lastDiagnostic = buildString {
-            traceLines.toList().forEach { append(it).append('\n') }
-            if (failures.isNotEmpty()) append("--- failures ---\n")
-            failures.forEach { append("- ").append(it).append('\n') }
-        }
-
-        return found
+        return false
     }
 
     // ---------------------------------------------------------------
@@ -799,43 +1090,76 @@ class HayyaShootProvider : MainAPI() {
     // ---------------------------------------------------------------
 
     private companion object {
-        // Debug diagnostics, shown in the app (home card + diagnostics page)
+
         @Volatile
         var lastDiagnostic: String? = null
 
         @Volatile
         var traceStart: Long = 0L
 
-        val traceLines: MutableList<String> =
-            java.util.Collections.synchronizedList(ArrayList<String>())
+        val traceLines:
+            MutableList<String> =
+            java.util.Collections.synchronizedList(
+                ArrayList<String>()
+            )
 
         val RCP_REGEX = Regex(
             """src=["']((?:https?:)?//[^"']*cloudnestra\.com/rcp/[^"']+)["']""",
             RegexOption.IGNORE_CASE
         )
-        val PRORCP_REGEX = Regex("""/prorcp/([a-zA-Z0-9=+/]+)""")
-        val PRORCP_PATH_REGEX = Regex("""/prorcp/[a-zA-Z0-9=+/]+""")
-        val SRCRCP_PATH_REGEX = Regex("""/srcrcp/[a-zA-Z0-9=+/_-]+""")
+
+        val PRORCP_REGEX = Regex(
+            """/prorcp/([a-zA-Z0-9=+/]+)"""
+        )
+
+        val PRORCP_PATH_REGEX = Regex(
+            """/prorcp/[a-zA-Z0-9=+/]+"""
+        )
+
+        val SRCRCP_PATH_REGEX = Regex(
+            """/srcrcp/[a-zA-Z0-9=+/_-]+"""
+        )
+
         val IFRAME_REGEX = Regex(
             """<iframe[^>]+src=["']((?:https?:)?//[^"']+)["']""",
             RegexOption.IGNORE_CASE
         )
-        val M3U8_REGEX = Regex("""https?://[^"'\s\\]+\.m3u8[^"'\s\\]*""")
 
-        // Seen in the real player (no .m3u8 extension): https://<host>/pl/H4sIAAAA...
+        val M3U8_REGEX = Regex(
+            """https?://[^"'\s\\]+\.m3u8[^"'\s\\]*"""
+        )
+
         val PL_REGEX = Regex(
             """https?://[^"'\s\\]+/p[li]/H4s[il][^"'\s\\]*""",
             RegexOption.IGNORE_CASE
         )
 
-        // What the player really requests (network log): /pl/H4sI... and /pI/H4sI...
+        /*
+         * Real network requests observed from the player:
+         *
+         *   /pl/H4s...
+         *   /pI/H4s...
+         *
+         * Some requests may also end in .m3u8 with query parameters.
+         */
         val STREAM_URL_REGEX = Regex(
-            """\.m3u8|/p[li]/H4s[il]""",
+            """(?:\.m3u8(?:\?[^"'\\\s]*)?|/p[li]/H4s[il][^"'\\\s]*)""",
             RegexOption.IGNORE_CASE
         )
-        val FILE_REGEX = Regex("""file:\s*["']([^"']+)["']""")
-        val DATA_API_REGEX = Regex("""data-api=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
-        val PLACEHOLDER_REGEX = Regex("""\{v[1-5]\}""")
+
+        val FILE_REGEX = Regex(
+            """file:\s*["']([^"']+)["']"""
+        )
+
+        val DATA_API_REGEX = Regex(
+            """data-api=["']([^"']+)["']""",
+            RegexOption.IGNORE_CASE
+        )
+
+        val PLACEHOLDER_REGEX = Regex(
+            """\{v[1-5]\}"""
+        )
+
         val SUBTITLE_REGEX = Regex(
             """["'](https?://[^"']+\.(?:vtt|srt))["']""",
             RegexOption.IGNORE_CASE
@@ -854,57 +1178,111 @@ class HayyaShootProvider : MainAPI() {
     )
 
     data class VsSrcResponse(
-        @JsonProperty("src") val src: String? = null
+        @JsonProperty("src")
+        val src: String? = null
     )
 
     data class TmdbResponse(
-        @JsonProperty("results") val results: List<TmdbItem>? = null,
-        @JsonProperty("total_pages") val totalPages: Int? = null
+        @JsonProperty("results")
+        val results: List<TmdbItem>? = null,
+
+        @JsonProperty("total_pages")
+        val totalPages: Int? = null
     )
 
     data class TmdbItem(
-        @JsonProperty("id") val id: Int,
-        @JsonProperty("title") val title: String? = null,
-        @JsonProperty("name") val name: String? = null,
-        @JsonProperty("poster_path") val posterPath: String? = null,
-        @JsonProperty("release_date") val releaseDate: String? = null,
-        @JsonProperty("first_air_date") val firstAirDate: String? = null
+        @JsonProperty("id")
+        val id: Int,
+
+        @JsonProperty("title")
+        val title: String? = null,
+
+        @JsonProperty("name")
+        val name: String? = null,
+
+        @JsonProperty("poster_path")
+        val posterPath: String? = null,
+
+        @JsonProperty("release_date")
+        val releaseDate: String? = null,
+
+        @JsonProperty("first_air_date")
+        val firstAirDate: String? = null
     )
 
     data class TmdbMovie(
-        @JsonProperty("id") val id: Int,
-        @JsonProperty("title") val title: String? = null,
-        @JsonProperty("overview") val overview: String? = null,
-        @JsonProperty("poster_path") val posterPath: String? = null,
-        @JsonProperty("backdrop_path") val backdropPath: String? = null,
-        @JsonProperty("release_date") val releaseDate: String? = null,
-        @JsonProperty("vote_average") val voteAverage: Double? = null
+        @JsonProperty("id")
+        val id: Int,
+
+        @JsonProperty("title")
+        val title: String? = null,
+
+        @JsonProperty("overview")
+        val overview: String? = null,
+
+        @JsonProperty("poster_path")
+        val posterPath: String? = null,
+
+        @JsonProperty("backdrop_path")
+        val backdropPath: String? = null,
+
+        @JsonProperty("release_date")
+        val releaseDate: String? = null,
+
+        @JsonProperty("vote_average")
+        val voteAverage: Double? = null
     )
 
     data class TmdbTv(
-        @JsonProperty("id") val id: Int,
-        @JsonProperty("name") val name: String? = null,
-        @JsonProperty("overview") val overview: String? = null,
-        @JsonProperty("poster_path") val posterPath: String? = null,
-        @JsonProperty("backdrop_path") val backdropPath: String? = null,
-        @JsonProperty("first_air_date") val firstAirDate: String? = null,
-        @JsonProperty("vote_average") val voteAverage: Double? = null,
-        @JsonProperty("seasons") val seasons: List<TmdbSeasonInfo>? = null
+        @JsonProperty("id")
+        val id: Int,
+
+        @JsonProperty("name")
+        val name: String? = null,
+
+        @JsonProperty("overview")
+        val overview: String? = null,
+
+        @JsonProperty("poster_path")
+        val posterPath: String? = null,
+
+        @JsonProperty("backdrop_path")
+        val backdropPath: String? = null,
+
+        @JsonProperty("first_air_date")
+        val firstAirDate: String? = null,
+
+        @JsonProperty("vote_average")
+        val voteAverage: Double? = null,
+
+        @JsonProperty("seasons")
+        val seasons: List<TmdbSeasonInfo>? = null
     )
 
     data class TmdbSeasonInfo(
-        @JsonProperty("season_number") val seasonNumber: Int,
-        @JsonProperty("episode_count") val episodeCount: Int? = null
+        @JsonProperty("season_number")
+        val seasonNumber: Int,
+
+        @JsonProperty("episode_count")
+        val episodeCount: Int? = null
     )
 
     data class TmdbSeason(
-        @JsonProperty("episodes") val episodes: List<TmdbEpisode>? = null
+        @JsonProperty("episodes")
+        val episodes: List<TmdbEpisode>? = null
     )
 
     data class TmdbEpisode(
-        @JsonProperty("episode_number") val episodeNumber: Int,
-        @JsonProperty("name") val name: String? = null,
-        @JsonProperty("overview") val overview: String? = null,
-        @JsonProperty("still_path") val stillPath: String? = null
+        @JsonProperty("episode_number")
+        val episodeNumber: Int,
+
+        @JsonProperty("name")
+        val name: String? = null,
+
+        @JsonProperty("overview")
+        val overview: String? = null,
+
+        @JsonProperty("still_path")
+        val stillPath: String? = null
     )
 }
