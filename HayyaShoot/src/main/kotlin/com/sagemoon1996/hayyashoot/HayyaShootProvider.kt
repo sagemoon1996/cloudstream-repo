@@ -22,7 +22,7 @@ import kotlin.coroutines.cancellation.CancellationException
 class HayyaShootProvider : MainAPI() {
 
     override var mainUrl = "https://hayyashoot.com"
-    override var name = "HayyaShoot"
+    override var name = "HayyaShoot2"
     override var lang = "ar"
 
     override val hasMainPage = true
@@ -241,6 +241,20 @@ class HayyaShootProvider : MainAPI() {
         val trimmed = query.trim()
         if (trimmed.isBlank()) return emptyList()
 
+        // MANUAL MODE: paste a playlist URL (copied from the Via sniffer) in the
+        // search box and get one card that plays it.
+        if (trimmed.startsWith("http", ignoreCase = true) &&
+            STREAM_URL_REGEX.containsMatchIn(trimmed)
+        ) {
+            return listOf(
+                newMovieSearchResponse(
+                    "Play pasted stream",
+                    "$mainUrl/manual?u=${URLEncoder.encode(trimmed, "UTF-8")}",
+                    TvType.Movie
+                )
+            )
+        }
+
         val q = URLEncoder.encode(trimmed, "UTF-8")
 
         return coroutineScope {
@@ -261,6 +275,19 @@ class HayyaShootProvider : MainAPI() {
     // ---------------------------------------------------------------
 
     override suspend fun load(url: String): LoadResponse? {
+        if (url.contains("/manual?u=")) {
+            val streamUrl = Uri.parse(url).getQueryParameter("u") ?: return null
+            return newMovieLoadResponse(
+                "Pasted stream",
+                url,
+                TvType.Movie,
+                "manual:$streamUrl"
+            ) {
+                this.plot = "Plays the playlist URL you pasted in the search box.\n" +
+                    "Host: ${Uri.parse(streamUrl).host}"
+            }
+        }
+
         if (debugMode && url.endsWith("/diag")) {
             return newMovieLoadResponse(
                 "Diagnostics $buildTag",
@@ -362,7 +389,7 @@ class HayyaShootProvider : MainAPI() {
 
     // Shown in the first DEBUG entry: if you do not see it, the app is still
     // running an OLD build of the plugin (bump `version` in build.gradle.kts).
-    private val buildTag = "build-16"
+    private val buildTag = "build-17"
 
     private class StepFailure(val step: String, val detail: String) :
         Exception("$step $detail")
@@ -594,12 +621,16 @@ class HayyaShootProvider : MainAPI() {
     }
 
     // (is it a real playlist?, short explanation)
-    private suspend fun playlistCheck(url: String, referer: String): Pair<Boolean, String> =
+    private suspend fun playlistCheck(
+        url: String,
+        referer: String,
+        ua: String = userAgent
+    ): Pair<Boolean, String> =
         try {
             withTimeoutOrNull(6_000L) {
                 val res = app.get(
                     url,
-                    headers = mapOf("User-Agent" to userAgent, "Referer" to referer)
+                    headers = mapOf("User-Agent" to ua, "Referer" to referer)
                 )
                 val ok = res.code in 200..299 && res.text.trimStart().startsWith("#EXTM3U")
                 ok to "HTTP ${res.code} len=${res.text.length} ${if (ok) "PLAYLIST" else snippet(res.text)}"
@@ -704,12 +735,74 @@ class HayyaShootProvider : MainAPI() {
         return VidSrcResult(streams, subtitles, "$rcpOrigin/")
     }
 
+    // Plays a playlist URL given by hand. The playlist is hotlink-protected, so every
+    // likely Referer is tested; each one that really answers "#EXTM3U" becomes a link.
+    // If none answers, all are still offered so the player itself can try them.
+    private suspend fun loadManual(
+        streamUrl: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        traceStart = System.currentTimeMillis()
+        traceLines.clear()
+        trace("$buildTag manual host=${Uri.parse(streamUrl).host}")
+
+        val referers = listOf(
+            "https://cloudorchestranova.com/",
+            "https://vidsrc.sh/",
+            originOf(streamUrl),
+            "https://vidsrc.me/",
+            "$mainUrl/"
+        ).distinct()
+
+        suspend fun emit(referer: String, label: String) {
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = label,
+                    url = streamUrl,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = referer
+                    this.quality = Qualities.Unknown.value
+                    this.headers = mapOf(
+                        "User-Agent" to MOBILE_CHROME_UA,
+                        "Origin" to referer.trimEnd('/')
+                    )
+                }
+            )
+        }
+
+        var emitted = 0
+        for (referer in referers) {
+            val (ok, why) = playlistCheck(streamUrl, referer, MOBILE_CHROME_UA)
+            trace("referer ${Uri.parse(referer).host} -> $why")
+            if (ok) {
+                emit(referer, "Manual (${Uri.parse(referer).host})")
+                emitted++
+            }
+        }
+
+        if (emitted == 0) {
+            referers.forEach { referer ->
+                emit(referer, "Manual try ${Uri.parse(referer).host}")
+            }
+            emitted = referers.size
+        }
+
+        lastDiagnostic = traceLines.toList().joinToString("\n")
+        return emitted > 0
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        if (data.startsWith("manual:")) {
+            return loadManual(data.removePrefix("manual:"), callback)
+        }
+
         val media = try {
             parseJson<HayyaMediaData>(data)
         } catch (e: Exception) {
