@@ -267,7 +267,6 @@ class HayyaShootProvider : MainAPI() {
             this.backgroundPosterUrl = movie.backdropPath?.let { backdropBase + it }
             this.plot = movie.overview
             this.year = yearOf(movie.releaseDate)
-            this.score = movie.voteAverage?.let { Score.from10(it) }
         }
     }
 
@@ -322,7 +321,6 @@ class HayyaShootProvider : MainAPI() {
             this.backgroundPosterUrl = tv.backdropPath?.let { backdropBase + it }
             this.plot = tv.overview
             this.year = yearOf(tv.firstAirDate)
-            this.score = tv.voteAverage?.let { Score.from10(it) }
         }
     }
 
@@ -337,7 +335,7 @@ class HayyaShootProvider : MainAPI() {
 
     // Shown in the first DEBUG entry: if you do not see it, the app is still
     // running an OLD build of the plugin (bump `version` in build.gradle.kts).
-    private val buildTag = "build-11"
+    private val buildTag = "build-12"
 
     private class StepFailure(val step: String, val detail: String) :
         Exception("$step $detail")
