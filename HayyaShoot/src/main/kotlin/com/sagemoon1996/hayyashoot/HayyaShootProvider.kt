@@ -206,10 +206,25 @@ class HayyaShootProvider : MainAPI() {
 
         val response = fetchList("${request.data}?language=ar-SA&page=$page")
 
-        val items = response?.results
+        val baseItems = response?.results
             .orEmpty()
             .mapNotNull { toSearchResponse(it, isMovie) }
             .distinctBy { it.url }
+
+        // Debug only: a card that opens the last loadLinks diagnostic as text
+        val diag = lastDiagnostic
+        val items =
+            if (debugMode && page == 1 && isMovie && diag != null) {
+                listOf(
+                    newMovieSearchResponse(
+                        "🔧 DIAG ${diag.lineSequence().firstOrNull().orEmpty()}",
+                        "$mainUrl/diag",
+                        TvType.Movie
+                    )
+                ) + baseItems
+            } else {
+                baseItems
+            }
 
         return newHomePageResponse(
             request.name,
@@ -246,6 +261,17 @@ class HayyaShootProvider : MainAPI() {
     // ---------------------------------------------------------------
 
     override suspend fun load(url: String): LoadResponse? {
+        if (debugMode && url.endsWith("/diag")) {
+            return newMovieLoadResponse(
+                "Diagnostics $buildTag",
+                url,
+                TvType.Movie,
+                "diag"
+            ) {
+                this.plot = lastDiagnostic ?: "No loadLinks run yet. Play an episode, then come back."
+            }
+        }
+
         val uri = Uri.parse(url)
         val movieId = uri.getQueryParameter("movie")?.toIntOrNull()
         val tvId = uri.getQueryParameter("tv")?.toIntOrNull()
@@ -337,7 +363,7 @@ class HayyaShootProvider : MainAPI() {
 
     // Shown in the first DEBUG entry: if you do not see it, the app is still
     // running an OLD build of the plugin (bump `version` in build.gradle.kts).
-    private val buildTag = "build-8"
+    private val buildTag = "build-9"
 
     private class StepFailure(val step: String, val detail: String) :
         Exception("$step $detail")
@@ -722,6 +748,14 @@ class HayyaShootProvider : MainAPI() {
             }
         }
 
+        lastDiagnostic = buildString {
+            append("$buildTag ${media.type} id=${media.id}")
+            append(" s=${media.season} e=${media.episode}\n")
+            append("found=$found\n")
+            if (failures.isEmpty()) append("(no failure recorded)")
+            failures.forEach { append("- ").append(it).append("\n") }
+        }
+
         Log.e("HayyaShoot", "loadLinks end found=$found")
         return found
     }
@@ -731,6 +765,10 @@ class HayyaShootProvider : MainAPI() {
     // ---------------------------------------------------------------
 
     private companion object {
+        // Last loadLinks diagnostic, shown on the home page (debug only)
+        @Volatile
+        var lastDiagnostic: String? = null
+
         val RCP_REGEX = Regex(
             """src=["']((?:https?:)?//[^"']*cloudnestra\.com/rcp/[^"']+)["']""",
             RegexOption.IGNORE_CASE
