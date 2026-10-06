@@ -362,7 +362,7 @@ class HayyaShootProvider : MainAPI() {
 
     // Shown in the first DEBUG entry: if you do not see it, the app is still
     // running an OLD build of the plugin (bump `version` in build.gradle.kts).
-    private val buildTag = "build-17"
+    private val buildTag = "build-16"
 
     private class StepFailure(val step: String, val detail: String) :
         Exception("$step $detail")
@@ -397,6 +397,7 @@ class HayyaShootProvider : MainAPI() {
             val s = media.season
             val e = media.episode
             listOf(
+                "https://vidsrc.sh/embed/tv?tmdb=${media.id}&season=$s&episode=$e&sub=ar&autoplay=1",
                 "https://vidsrc.sh/embed/tv/${media.id}/$s/$e",
                 "https://vidsrc.me/embed/tv?tmdb=${media.id}&season=$s&episode=$e&sub=ar",
                 "https://vidsrc-embed.ru/embed/tv/${media.id}/$s/$e",
@@ -405,7 +406,8 @@ class HayyaShootProvider : MainAPI() {
             )
         } else {
             listOf(
-                "https://vidsrc.sh/embed/movie?tmdb=${media.id}&sub=ar",
+                "https://vidsrc.sh/embed/movie?tmdb=${media.id}&sub=ar&autoplay=1",
+                "https://vidsrc.sh/embed/movie/${media.id}",
                 "https://vidsrc.me/embed/movie?tmdb=${media.id}&sub=ar",
                 "https://vidsrc-embed.ru/embed/movie/${media.id}",
                 "https://vidsrc.xyz/embed/movie?tmdb=${media.id}&sub=ar",
@@ -434,22 +436,46 @@ class HayyaShootProvider : MainAPI() {
     // Loads the page in CloudStream's hidden WebView and returns the first
     // .m3u8 request the page's own player makes (null if none shows up).
     private suspend fun sniffM3u8(
+        label: String,
         url: String,
         referer: String,
-        timeoutMs: Long = 20_000L
+        timeoutMs: Long,
+        ua: String? = null
     ): String? =
         try {
-            withTimeoutOrNull(timeoutMs) {
-                val res = app.get(
-                    url,
-                    referer = referer,
-                    interceptor = WebViewResolver(STREAM_URL_REGEX)
-                )
-                res.url.takeIf { STREAM_URL_REGEX.containsMatchIn(it) }
+            withTimeoutOrNull(timeoutMs + 5_000L) {
+                val resolver =
+                    if (ua != null) {
+                        WebViewResolver(
+                            STREAM_URL_REGEX,
+                            additionalUrls = listOf(Regex(""".*""")),
+                            userAgent = ua,
+                            script = CLICK_SCRIPT,
+                            timeout = timeoutMs
+                        )
+                    } else {
+                        WebViewResolver(
+                            STREAM_URL_REGEX,
+                            additionalUrls = listOf(Regex(""".*""")),
+                            script = CLICK_SCRIPT,
+                            timeout = timeoutMs
+                        )
+                    }
+                val (hit, others) = resolver.resolveUsingWebView(url, referer)
+
+                // Everything else the WebView requested, to see how far the player got
+                val seen = others
+                    .map { it.url.toString().substringAfter("://").take(70) }
+                    .distinct()
+                trace("$label webview saw ${others.size} requests (${seen.size} distinct)")
+                seen.take(30).forEach { trace("$label req $it") }
+
+                hit?.url?.toString()
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             logError(e)
+            trace("$label webview exception ${e::class.java.simpleName}: ${e.message}")
             null
         }
 
@@ -519,18 +545,26 @@ class HayyaShootProvider : MainAPI() {
 
             // B1) the player page alone (fresh vs= token) with the vidsrc Referer
             if (playerUrl != null) {
-                trace("B1 webview on player (20s)")
-                sniffed = sniffM3u8(playerUrl, originOf(embedPageUrl), 20_000L)
+                trace("B1 webview on player (20s, mobile Chrome UA)")
+                sniffed = sniffM3u8("B1", playerUrl, originOf(embedPageUrl), 20_000L, MOBILE_CHROME_UA)
                 trace("B1 result=${sniffed?.take(90)}")
                 if (sniffed == null) reason += " webview-player-no-stream"
             }
 
             // B2) the real nested-iframe flow, starting from the embed page
             if (sniffed == null) {
-                trace("B2 webview on embed (25s)")
-                sniffed = sniffM3u8(embedUrl, "$mainUrl/", 25_000L)
+                trace("B2 webview on embed (25s, mobile Chrome UA)")
+                sniffed = sniffM3u8("B2", embedUrl, "$mainUrl/", 25_000L, MOBILE_CHROME_UA)
                 trace("B2 result=${sniffed?.take(90)}")
                 if (sniffed == null) reason += " webview-embed-no-stream"
+            }
+
+            // B3) same embed page with a desktop browser identity
+            if (sniffed == null) {
+                trace("B3 webview on embed (20s, desktop UA)")
+                sniffed = sniffM3u8("B3", embedUrl, "$mainUrl/", 20_000L, userAgent)
+                trace("B3 result=${sniffed?.take(90)}")
+                if (sniffed == null) reason += " webview-desktop-no-stream"
             }
 
             if (sniffed != null) {
@@ -699,7 +733,7 @@ class HayyaShootProvider : MainAPI() {
 
         // Try each VidSrc host until one gives a stream
         // Hard time budget: loadLinks must never spin forever
-        val completed = withTimeoutOrNull(60_000L) {
+        val completed = withTimeoutOrNull(90_000L) {
             for ((index, embedUrl) in candidates.withIndex()) {
                 val host = Uri.parse(embedUrl).host ?: embedUrl
 
@@ -712,7 +746,7 @@ class HayyaShootProvider : MainAPI() {
                         else "${e::class.java.simpleName}: ${e.message}"
                         failures.add("$host $why")
                         Log.e("HayyaShoot", "vs_src chain failed: $why")
-                        resolveVidSrc(embedUrl)
+                        resolveVidSrc(embedUrl)   // legacy cloudnestra chain
                     }
 
                     // Keep only playlists that really answer; if none does, still
@@ -765,8 +799,7 @@ class HayyaShootProvider : MainAPI() {
             }
             true
         }
-
-        if (completed == null) failures.add("timeout-60s (still running, stopped)")
+        if (completed == null) failures.add("timeout-90s (still running, stopped)")
 
         // Last resort: CloudStream's built-in extractors on the first embed URL
         if (!found) {
@@ -830,10 +863,53 @@ class HayyaShootProvider : MainAPI() {
             RegexOption.IGNORE_CASE
         )
         val M3U8_REGEX = Regex("""https?://[^"'\s\\]+\.m3u8[^"'\s\\]*""")
+
+        // Seen in the real player (no .m3u8 extension): https://<host>/pl/H4sIAAAA...
         val PL_REGEX = Regex(
             """https?://[^"'\s\\]+/p[li]/H4s[il][^"'\s\\]*""",
             RegexOption.IGNORE_CASE
         )
+
+        // Tries to start the player: click the usual play buttons, play every <video>,
+        // and click the centre of the page. Repeats for ~15 s. Synthetic clicks are not
+        // user gestures, but most players start fetching the playlist on click anyway.
+        // Chrome on Android WITHOUT the "; wv" WebView marker some players block
+        const val MOBILE_CHROME_UA =
+            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+
+        const val CLICK_SCRIPT = """
+            (function () {
+              var n = 0;
+              var t = setInterval(function () {
+                n++;
+                try {
+                  var sels = ['.jw-icon-display', '.vjs-big-play-button',
+                              '.plyr__control--overlaid', '.play-button', '.play',
+                              '#play', '[aria-label="Play"]', 'button[title*="Play"]'];
+                  sels.forEach(function (s) {
+                    document.querySelectorAll(s).forEach(function (e) {
+                      try { e.click(); } catch (x) {}
+                    });
+                  });
+                  document.querySelectorAll('video').forEach(function (v) {
+                    try { v.muted = true; v.play(); } catch (x) {}
+                  });
+                  var el = document.elementFromPoint(window.innerWidth / 2, window.innerHeight / 2);
+                  if (el) {
+                    ['mousedown', 'mouseup', 'click'].forEach(function (ev) {
+                      try {
+                        el.dispatchEvent(new MouseEvent(ev, {bubbles: true, cancelable: true, view: window}));
+                      } catch (x) {}
+                    });
+                  }
+                } catch (e) {}
+                if (n > 20) clearInterval(t);
+              }, 700);
+            })();
+        """
+
+        // What the player really requests (network log): /pl/H4sI... and /pI/H4sI...
         val STREAM_URL_REGEX = Regex(
             """\.m3u8|/p[li]/H4s[il]""",
             RegexOption.IGNORE_CASE
