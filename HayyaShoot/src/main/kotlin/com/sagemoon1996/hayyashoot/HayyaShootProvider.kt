@@ -5,6 +5,7 @@ import android.util.Log
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.mvvm.logError
+import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
@@ -13,6 +14,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.net.URI
 import java.net.URLEncoder
 import kotlin.coroutines.cancellation.CancellationException
 
@@ -334,7 +336,7 @@ class HayyaShootProvider : MainAPI() {
 
     // Shown in the first DEBUG entry: if you do not see it, the app is still
     // running an OLD build of the plugin (bump `version` in build.gradle.kts).
-    private val buildTag = "build-5"
+    private val buildTag = "build-6"
 
     private class StepFailure(val step: String, val detail: String) :
         Exception("$step $detail")
@@ -382,6 +384,116 @@ class HayyaShootProvider : MainAPI() {
                 "https://vidsrc.net/embed/movie?tmdb=${media.id}&sub=ar"
             )
         }
+    }
+
+    private fun originOf(url: String): String {
+        val u = Uri.parse(url)
+        return "${u.scheme}://${u.authority}/"
+    }
+
+    // Loads the page in CloudStream's hidden WebView and returns the first
+    // .m3u8 request the page's own player makes (null if none shows up).
+    private suspend fun sniffM3u8(url: String, referer: String): String? =
+        try {
+            val res = app.get(
+                url,
+                referer = referer,
+                interceptor = WebViewResolver(Regex("""\.m3u8"""))
+            )
+            res.url.takeIf { it.contains(".m3u8") }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            logError(e)
+            null
+        }
+
+    // Current VidSrc chain (confirmed from the page):
+    //   embed page -> <iframe id="player_iframe" data-api="/vs_src.php?...">
+    //   -> GET data-api -> JSON {"src": "https://cloudorchestranova.com/embed/...?vs=..."}
+    //   -> the player page only answers with a vidsrc Referer; opening it directly
+    //      returns "Not Found", and the vs= token changes every time (never hardcode).
+    // The final .m3u8 is requested by the player's JS, so if it is not visible in
+    // the player HTML it is sniffed with a WebView.
+    private suspend fun resolveVsSrc(embedUrl: String, allowWebView: Boolean): VidSrcResult {
+        val embedRes = app.get(
+            embedUrl,
+            headers = browserHeaders + mapOf("Referer" to "$mainUrl/")
+        )
+        val embedHtml = embedRes.text
+        val embedPageUrl = embedRes.url.ifBlank { embedUrl }
+
+        val dataApi = DATA_API_REGEX.find(embedHtml)
+            ?.groupValues?.getOrNull(1)
+            ?.replace("&amp;", "&")
+
+        var playerUrl: String? = null
+        var reason = ""
+
+        if (dataApi == null) {
+            reason = "2-no-data-api HTTP ${embedRes.code} len=${embedHtml.length} ${snippet(embedHtml)}"
+        } else {
+            val apiUrl = try {
+                URI(embedPageUrl).resolve(dataApi).toString()
+            } catch (e: Exception) {
+                dataApi
+            }
+
+            val apiRes = app.get(
+                apiUrl,
+                headers = browserHeaders + mapOf(
+                    "Referer" to embedPageUrl,
+                    "Accept" to "application/json, text/plain, */*",
+                    "X-Requested-With" to "XMLHttpRequest"
+                )
+            )
+
+            playerUrl = try {
+                parseJson<VsSrcResponse>(apiRes.text).src
+                    ?.replace("\\/", "/")
+                    ?.takeIf { it.startsWith("http") }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                null
+            }
+
+            if (playerUrl == null) {
+                reason = "3-vs_src HTTP ${apiRes.code} ${snippet(apiRes.text)}"
+            }
+        }
+
+        // A) player page fetched with the vidsrc Referer: stream visible in the HTML?
+        if (playerUrl != null) {
+            val playerRes = app.get(
+                playerUrl,
+                headers = browserHeaders + mapOf("Referer" to embedPageUrl)
+            )
+            val text = playerRes.text.replace("\\/", "/")
+            val direct = if (playerRes.code in 200..299) {
+                M3U8_REGEX.find(text)?.value
+                    ?: FILE_REGEX.find(text)?.groupValues?.getOrNull(1)
+                        ?.takeIf { it.startsWith("http") }
+            } else null
+
+            if (direct != null) {
+                return VidSrcResult(listOf(direct), emptyList(), originOf(playerUrl))
+            }
+
+            reason += " player HTTP ${playerRes.code} len=${text.length} ${snippet(text)}"
+        }
+
+        // B) WebView: the real nested-iframe flow, then the player page alone
+        if (allowWebView) {
+            val sniffed = sniffM3u8(embedUrl, "$mainUrl/")
+                ?: playerUrl?.let { sniffM3u8(it, embedPageUrl) }
+
+            if (sniffed != null) {
+                val referer = originOf(playerUrl ?: embedPageUrl)
+                return VidSrcResult(listOf(sniffed), emptyList(), referer)
+            }
+            reason += " webview-no-m3u8"
+        }
+
+        throw StepFailure("vs_src-chain", reason)
     }
 
     // True only if the URL answers 2xx and really is an HLS playlist.
@@ -520,11 +632,20 @@ class HayyaShootProvider : MainAPI() {
         }
 
         // Try each VidSrc host until one gives a stream
-        for (embedUrl in candidates) {
+        for ((index, embedUrl) in candidates.withIndex()) {
             val host = Uri.parse(embedUrl).host ?: embedUrl
 
             try {
-                val result = resolveVidSrc(embedUrl)
+                val result = try {
+                    resolveVsSrc(embedUrl, allowWebView = index == 0)
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    val why = if (e is StepFailure) "${e.step} ${e.detail}"
+                    else "${e::class.java.simpleName}: ${e.message}"
+                    failures.add("$host $why")
+                    Log.e("HayyaShoot", "vs_src chain failed: $why")
+                    resolveVidSrc(embedUrl)   // legacy cloudnestra chain
+                }
 
                 // Keep only playlists that really answer; if none does, still
                 // offer them all (and explain in a DEBUG entry).
@@ -616,6 +737,7 @@ class HayyaShootProvider : MainAPI() {
         )
         val M3U8_REGEX = Regex("""https?://[^"'\s\\]+\.m3u8[^"'\s\\]*""")
         val FILE_REGEX = Regex("""file:\s*["']([^"']+)["']""")
+        val DATA_API_REGEX = Regex("""data-api=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
         val PLACEHOLDER_REGEX = Regex("""\{v[1-5]\}""")
         val SUBTITLE_REGEX = Regex(
             """["'](https?://[^"']+\.(?:vtt|srt))["']""",
@@ -632,6 +754,10 @@ class HayyaShootProvider : MainAPI() {
         val id: Int,
         val season: Int? = null,
         val episode: Int? = null
+    )
+
+    data class VsSrcResponse(
+        @JsonProperty("src") val src: String? = null
     )
 
     data class TmdbResponse(
