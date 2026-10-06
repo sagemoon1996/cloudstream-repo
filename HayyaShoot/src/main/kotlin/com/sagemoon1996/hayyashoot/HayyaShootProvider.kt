@@ -397,7 +397,7 @@ class HayyaShootProvider : MainAPI() {
             val s = media.season
             val e = media.episode
             listOf(
-                "https://vidsrc.sh/embed/tv?tmdb=${media.id}&season=$s&episode=$e&sub=ar",
+                "https://vidsrc.sh/embed/tv/${media.id}/$s/$e",
                 "https://vidsrc.me/embed/tv?tmdb=${media.id}&season=$s&episode=$e&sub=ar",
                 "https://vidsrc-embed.ru/embed/tv/${media.id}/$s/$e",
                 "https://vidsrc.xyz/embed/tv?tmdb=${media.id}&season=$s&episode=$e&sub=ar",
