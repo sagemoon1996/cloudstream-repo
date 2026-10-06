@@ -212,12 +212,12 @@ class HayyaShootProvider : MainAPI() {
             .distinctBy { it.url }
 
         // Debug only: a card that opens the last loadLinks trace as text
-        val diag = lastDiagnostic
+        // Always shown in debug mode: seeing "DIAG build-N" proves which build runs.
         val items =
-            if (debugMode && page == 1 && isMovie && diag != null) {
+            if (debugMode && page == 1 && isMovie) {
                 listOf(
                     newMovieSearchResponse(
-                        "DIAG - tap to read the last trace",
+                        "DIAG $buildTag - tap to read the last trace",
                         "$mainUrl/diag",
                         TvType.Movie
                     )
@@ -362,7 +362,7 @@ class HayyaShootProvider : MainAPI() {
 
     // Shown in the first DEBUG entry: if you do not see it, the app is still
     // running an OLD build of the plugin (bump `version` in build.gradle.kts).
-    private val buildTag = "build-13"
+    private val buildTag = "build-14"
 
     private class StepFailure(val step: String, val detail: String) :
         Exception("$step $detail")
