@@ -82,10 +82,10 @@
     },
     {
         "iconUrl": "https://hayyashoot.com/favicon.ico",
-        "fileHash": "sha256-a25cfbf8df9ffc3d01ccb205e078bdb2a8d62436cfbb864e60d61b6f12806581",
+        "fileHash": "sha256-04b126c3daebbdf440eccd785867a6835734f3b35cc514eb7352f5eac8ce059e",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
-        "fileSize": 61800,
+        "fileSize": 61804,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -95,7 +95,7 @@
             "Movie",
             "TvSeries"
         ],
-        "version": 1,
+        "version": 2,
         "internalName": "HayyaShoot",
         "description": "HayyaShoot Arabic movies and TV series provider",
         "url": "https://raw.githubusercontent.com/sagemoon1996/cloudstream-repo/builds/HayyaShoot.cs3",
