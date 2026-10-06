@@ -14,6 +14,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.URI
 import java.net.URLEncoder
 import kotlin.coroutines.cancellation.CancellationException
@@ -336,7 +337,7 @@ class HayyaShootProvider : MainAPI() {
 
     // Shown in the first DEBUG entry: if you do not see it, the app is still
     // running an OLD build of the plugin (bump `version` in build.gradle.kts).
-    private val buildTag = "build-7"
+    private val buildTag = "build-8"
 
     private class StepFailure(val step: String, val detail: String) :
         Exception("$step $detail")
@@ -395,12 +396,14 @@ class HayyaShootProvider : MainAPI() {
     // .m3u8 request the page's own player makes (null if none shows up).
     private suspend fun sniffM3u8(url: String, referer: String): String? =
         try {
-            val res = app.get(
-                url,
-                referer = referer,
-                interceptor = WebViewResolver(Regex("""\.m3u8"""))
-            )
-            res.url.takeIf { it.contains(".m3u8") }
+            withTimeoutOrNull(15_000L) {
+                val res = app.get(
+                    url,
+                    referer = referer,
+                    interceptor = WebViewResolver(Regex("""\.m3u8"""))
+                )
+                res.url.takeIf { it.contains(".m3u8") }
+            }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             logError(e)
@@ -484,7 +487,6 @@ class HayyaShootProvider : MainAPI() {
         // B) WebView: the real nested-iframe flow, then the player page alone
         if (allowWebView) {
             val sniffed = sniffM3u8(embedUrl, "$mainUrl/")
-                ?: playerUrl?.let { sniffM3u8(it, embedPageUrl) }
 
             if (sniffed != null) {
                 val referer = originOf(playerUrl ?: embedPageUrl)
@@ -499,11 +501,13 @@ class HayyaShootProvider : MainAPI() {
     // True only if the URL answers 2xx and really is an HLS playlist.
     private suspend fun isPlaylist(url: String, referer: String): Boolean =
         try {
-            val res = app.get(
-                url,
-                headers = mapOf("User-Agent" to userAgent, "Referer" to referer)
-            )
-            res.code in 200..299 && res.text.trimStart().startsWith("#EXTM3U")
+            withTimeoutOrNull(6_000L) {
+                val res = app.get(
+                    url,
+                    headers = mapOf("User-Agent" to userAgent, "Referer" to referer)
+                )
+                res.code in 200..299 && res.text.trimStart().startsWith("#EXTM3U")
+            } ?: false
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             false
@@ -624,79 +628,86 @@ class HayyaShootProvider : MainAPI() {
         )
 
         // Try each VidSrc host until one gives a stream
-        for ((index, embedUrl) in candidates.withIndex()) {
-            val host = Uri.parse(embedUrl).host ?: embedUrl
+        // Hard time budget: loadLinks must never spin forever
+        val completed = withTimeoutOrNull(40_000L) {
+            for ((index, embedUrl) in candidates.withIndex()) {
+                val host = Uri.parse(embedUrl).host ?: embedUrl
 
-            try {
-                val result = try {
-                    resolveVsSrc(embedUrl, allowWebView = index == 0)
+                try {
+                    val result = try {
+                        resolveVsSrc(embedUrl, allowWebView = index == 0)
+                    } catch (e: Exception) {
+                        if (e is CancellationException) throw e
+                        val why = if (e is StepFailure) "${e.step} ${e.detail}"
+                        else "${e::class.java.simpleName}: ${e.message}"
+                        failures.add("$host $why")
+                        Log.e("HayyaShoot", "vs_src chain failed: $why")
+                        resolveVidSrc(embedUrl)   // legacy cloudnestra chain
+                    }
+
+                    // Keep only playlists that really answer; if none does, still
+                    // offer them all (and explain in a DEBUG entry).
+                    val playable = result.streams.filter { isPlaylist(it, result.referer) }
+                    val toEmit = playable.ifEmpty { result.streams }
+
+                    Log.e("HayyaShoot", "streams=${result.streams.size} playable=${playable.size}")
+                    if (playable.isEmpty() && debugMode) {
+                        val hosts = result.streams
+                            .mapNotNull { Uri.parse(it).host }
+                            .distinct()
+                            .take(4)
+                            .joinToString(",")
+                        reportFailure(callback, "8-unreachable hosts=$hosts")
+                    }
+
+                    toEmit.forEachIndexed { index, streamUrl ->
+                        callback(
+                            newExtractorLink(
+                                source = name,
+                                name = if (toEmit.size > 1) "VidSrc ${index + 1}" else "VidSrc",
+                                url = streamUrl,
+                                type = ExtractorLinkType.M3U8
+                            ) {
+                                this.referer = result.referer
+                                this.quality = Qualities.Unknown.value
+                                this.headers = mapOf("User-Agent" to userAgent)
+                            }
+                        )
+                    }
+
+                    result.subtitles.forEach { subtitleUrl ->
+                        subtitleCallback(SubtitleFile("Arabic", subtitleUrl))
+                    }
+
+                    found = true
+                    Log.e("HayyaShoot", "OK host=$host streams=${result.streams.size} subs=${result.subtitles.size}")
+                    break
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
-                    val why = if (e is StepFailure) "${e.step} ${e.detail}"
-                    else "${e::class.java.simpleName}: ${e.message}"
-                    failures.add("$host $why")
-                    Log.e("HayyaShoot", "vs_src chain failed: $why")
-                    resolveVidSrc(embedUrl)   // legacy cloudnestra chain
+                    if (e is StepFailure) {
+                        failures.add("$host ${e.step} ${e.detail}")
+                    } else {
+                        logError(e)
+                        failures.add("$host exception ${e::class.java.simpleName}: ${e.message}")
+                    }
+                    Log.e("HayyaShoot", "FAIL ${failures.last()}")
                 }
-
-                // Keep only playlists that really answer; if none does, still
-                // offer them all (and explain in a DEBUG entry).
-                val playable = result.streams.filter { isPlaylist(it, result.referer) }
-                val toEmit = playable.ifEmpty { result.streams }
-
-                Log.e("HayyaShoot", "streams=${result.streams.size} playable=${playable.size}")
-                if (playable.isEmpty() && debugMode) {
-                    val hosts = result.streams
-                        .mapNotNull { Uri.parse(it).host }
-                        .distinct()
-                        .take(4)
-                        .joinToString(",")
-                    reportFailure(callback, "8-unreachable hosts=$hosts")
-                }
-
-                toEmit.forEachIndexed { index, streamUrl ->
-                    callback(
-                        newExtractorLink(
-                            source = name,
-                            name = if (toEmit.size > 1) "VidSrc ${index + 1}" else "VidSrc",
-                            url = streamUrl,
-                            type = ExtractorLinkType.M3U8
-                        ) {
-                            this.referer = result.referer
-                            this.quality = Qualities.Unknown.value
-                            this.headers = mapOf("User-Agent" to userAgent)
-                        }
-                    )
-                }
-
-                result.subtitles.forEach { subtitleUrl ->
-                    subtitleCallback(SubtitleFile("Arabic", subtitleUrl))
-                }
-
-                found = true
-                Log.e("HayyaShoot", "OK host=$host streams=${result.streams.size} subs=${result.subtitles.size}")
-                break
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                if (e is StepFailure) {
-                    failures.add("$host ${e.step} ${e.detail}")
-                } else {
-                    logError(e)
-                    failures.add("$host exception ${e::class.java.simpleName}: ${e.message}")
-                }
-                Log.e("HayyaShoot", "FAIL ${failures.last()}")
             }
+            true
         }
+        if (completed == null) failures.add("timeout-40s (still running, stopped)")
 
         // Last resort: CloudStream's built-in extractors on the first embed URL
         if (!found) {
             try {
-                found = loadExtractor(
-                    candidates.first(),
-                    "$mainUrl/",
-                    subtitleCallback,
-                    callback
-                )
+                found = withTimeoutOrNull(15_000L) {
+                    loadExtractor(
+                        candidates.first(),
+                        "$mainUrl/",
+                        subtitleCallback,
+                        callback
+                    )
+                } ?: false
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 logError(e)
