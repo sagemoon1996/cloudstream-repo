@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 cloudstream {
     language = "ar"
@@ -15,4 +15,8 @@ cloudstream {
     )
 
     iconUrl = "https://hayyashoot.com/favicon.ico"
+}
+
+dependencies {
+    implementation("io.github.charlietap.chasm:chasm:1.5.0")
 }
