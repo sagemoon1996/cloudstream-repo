@@ -822,36 +822,25 @@ class HayyaShootProvider : MainAPI() {
             """src=["']((?:https?:)?//[^"']*cloudnestra\.com/rcp/[^"']+)["']""",
             RegexOption.IGNORE_CASE
         )
-
         val PRORCP_REGEX = Regex("""/prorcp/([a-zA-Z0-9=+/]+)""")
         val PRORCP_PATH_REGEX = Regex("""/prorcp/[a-zA-Z0-9=+/]+""")
         val SRCRCP_PATH_REGEX = Regex("""/srcrcp/[a-zA-Z0-9=+/_-]+""")
-
         val IFRAME_REGEX = Regex(
             """<iframe[^>]+src=["']((?:https?:)?//[^"']+)["']""",
             RegexOption.IGNORE_CASE
         )
-
         val M3U8_REGEX = Regex("""https?://[^"'\s\\]+\.m3u8[^"'\s\\]*""")
-
-        // Seen in the real player (no .m3u8 extension):
-        // https://<host>/pl/H4sIAAAA...
         val PL_REGEX = Regex(
             """https?://[^"'\s\\]+/p[li]/H4s[il][^"'\s\\]*""",
             RegexOption.IGNORE_CASE
         )
-
-        // What the player really requests (network log):
-        // /pl/H4sI... and /pI/H4sI...
         val STREAM_URL_REGEX = Regex(
             """\.m3u8|/p[li]/H4s[il]""",
             RegexOption.IGNORE_CASE
         )
-
         val FILE_REGEX = Regex("""file:\s*["']([^"']+)["']""")
         val DATA_API_REGEX = Regex("""data-api=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
         val PLACEHOLDER_REGEX = Regex("""\{v[1-5]\}""")
-
         val SUBTITLE_REGEX = Regex(
             """["'](https?://[^"']+\.(?:vtt|srt))["']""",
             RegexOption.IGNORE_CASE
