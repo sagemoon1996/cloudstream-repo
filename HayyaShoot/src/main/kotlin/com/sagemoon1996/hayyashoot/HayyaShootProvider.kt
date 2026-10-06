@@ -32,7 +32,6 @@ class HayyaShootProvider : MainAPI() {
         TvType.TvSeries
     )
 
-    // Same sources as the original site: /movie/popular and /tv/popular
     override val mainPage = mainPageOf(
         "movie/popular" to "أفلام",
         "tv/popular" to "مسلسلات"
@@ -44,17 +43,12 @@ class HayyaShootProvider : MainAPI() {
     private val userAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0"
 
-    // Same headers as @definisi/vidsrc-scraper 2.0.2
     private val browserHeaders = mapOf(
         "User-Agent" to userAgent,
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language" to "en-US,en;q=0.5",
         "Accept-Encoding" to "identity"
     )
-
-    // ---------------------------------------------------------------
-    // TMDB token: read from the site at runtime, cached, never hardcoded
-    // ---------------------------------------------------------------
 
     private val tokenMutex = Mutex()
 
@@ -77,10 +71,8 @@ class HayyaShootProvider : MainAPI() {
     private suspend fun fetchAuthToken(): String? {
         val page = app.get("$mainUrl/movies/", headers = browserHeaders).text
 
-        // 1) inline <script> in the page
         extractToken(page)?.let { return it }
 
-        // 2) external JS files hosted on the site itself
         val scriptRegex = Regex(
             """<script[^>]+src=["']([^"']+)["']""",
             RegexOption.IGNORE_CASE
@@ -92,8 +84,12 @@ class HayyaShootProvider : MainAPI() {
             if (!host.endsWith("hayyashoot.com")) continue
 
             try {
-                extractToken(app.get(scriptUrl, headers = browserHeaders).text)
-                    ?.let { return it }
+                extractToken(
+                    app.get(
+                        scriptUrl,
+                        headers = browserHeaders
+                    ).text
+                )?.let { return it }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 logError(e)
@@ -103,21 +99,28 @@ class HayyaShootProvider : MainAPI() {
         return null
     }
 
-    private suspend fun getAuthToken(forceRefresh: Boolean = false): String {
+    private suspend fun getAuthToken(
+        forceRefresh: Boolean = false
+    ): String {
         if (!forceRefresh) cachedToken?.let { return it }
 
         return tokenMutex.withLock {
             if (!forceRefresh) cachedToken?.let { return@withLock it }
 
             val token = fetchAuthToken()
-                ?: throw ErrorLoadingException("HayyaShoot AUTH_TOKEN not found")
+                ?: throw ErrorLoadingException(
+                    "HayyaShoot AUTH_TOKEN not found"
+                )
 
             cachedToken = token
             token
         }
     }
 
-    private suspend fun requestTmdb(path: String, token: String) =
+    private suspend fun requestTmdb(
+        path: String,
+        token: String
+    ) =
         app.get(
             "https://api.themoviedb.org/3/$path",
             headers = mapOf(
@@ -128,23 +131,27 @@ class HayyaShootProvider : MainAPI() {
         )
 
     private suspend fun tmdbGet(path: String): String {
-        var response = requestTmdb(path, getAuthToken())
+        var response = requestTmdb(
+            path,
+            getAuthToken()
+        )
 
-        // Token rotated on the site -> refresh once and retry
         if (response.code == 401 || response.code == 403) {
-            response = requestTmdb(path, getAuthToken(forceRefresh = true))
+            response = requestTmdb(
+                path,
+                getAuthToken(forceRefresh = true)
+            )
         }
 
         return response.text
     }
 
-    // ---------------------------------------------------------------
-    // URL + card helpers (same URL format as the site)
-    // ---------------------------------------------------------------
-
     private fun slug(title: String): String =
         URLEncoder.encode(
-            title.replace(Regex("""[\s-]+"""), "-").trim('-'),
+            title.replace(
+                Regex("""[\s-]+"""),
+                "-"
+            ).trim('-'),
             "UTF-8"
         )
 
@@ -157,12 +164,19 @@ class HayyaShootProvider : MainAPI() {
     private fun yearOf(date: String?): Int? =
         date?.take(4)?.toIntOrNull()
 
-    private fun toSearchResponse(item: TmdbItem, isMovie: Boolean): SearchResponse? {
-        val itemTitle = (if (isMovie) item.title else item.name)
-            ?.takeIf { it.isNotBlank() }
-            ?: return null
+    private fun toSearchResponse(
+        item: TmdbItem,
+        isMovie: Boolean
+    ): SearchResponse? {
+        val itemTitle =
+            (if (isMovie) item.title else item.name)
+                ?.takeIf { it.isNotBlank() }
+                ?: return null
 
-        val poster = item.posterPath?.let { posterBase + it }
+        val poster =
+            item.posterPath?.let {
+                posterBase + it
+            }
 
         return if (isMovie) {
             newMovieSearchResponse(
@@ -185,36 +199,48 @@ class HayyaShootProvider : MainAPI() {
         }
     }
 
-    private suspend fun fetchList(path: String): TmdbResponse? =
+    private suspend fun fetchList(
+        path: String
+    ): TmdbResponse? =
         try {
-            parseJson<TmdbResponse>(tmdbGet(path))
+            parseJson<TmdbResponse>(
+                tmdbGet(path)
+            )
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             logError(e)
             null
         }
 
-    // ---------------------------------------------------------------
-    // Main page
-    // ---------------------------------------------------------------
-
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val isMovie = request.data.startsWith("movie")
+        val isMovie =
+            request.data.startsWith("movie")
 
-        val response = fetchList("${request.data}?language=ar-SA&page=$page")
+        val response =
+            fetchList(
+                "${request.data}?language=ar-SA&page=$page"
+            )
 
-        val baseItems = response?.results
-            .orEmpty()
-            .mapNotNull { toSearchResponse(it, isMovie) }
-            .distinctBy { it.url }
+        val baseItems =
+            response?.results
+                .orEmpty()
+                .mapNotNull {
+                    toSearchResponse(
+                        it,
+                        isMovie
+                    )
+                }
+                .distinctBy { it.url }
 
-        // Debug only: a card that opens the last loadLinks trace as text
-        // Always shown in debug mode: seeing "DIAG build-N" proves which build runs.
         val items =
-            if (debugMode && page == 1 && isMovie) {
+            if (
+                debugMode &&
+                page == 1 &&
+                isMovie
+            ) {
                 listOf(
                     newMovieSearchResponse(
                         "DIAG $buildTag - tap to read the last trace",
@@ -229,139 +255,292 @@ class HayyaShootProvider : MainAPI() {
         return newHomePageResponse(
             request.name,
             items,
-            hasNext = page < (response?.totalPages ?: 1)
+            hasNext =
+                page <
+                    (response?.totalPages ?: 1)
         )
     }
 
-    // ---------------------------------------------------------------
-    // Search (movies + TV in parallel)
-    // ---------------------------------------------------------------
-
-    override suspend fun search(query: String): List<SearchResponse> {
+    override suspend fun search(
+        query: String
+    ): List<SearchResponse> {
         val trimmed = query.trim()
         if (trimmed.isBlank()) return emptyList()
 
-        val q = URLEncoder.encode(trimmed, "UTF-8")
+        val q =
+            URLEncoder.encode(
+                trimmed,
+                "UTF-8"
+            )
 
         return coroutineScope {
-            val movies = async { fetchList("search/movie?query=$q&language=ar-SA&page=1") }
-            val shows = async { fetchList("search/tv?query=$q&language=ar-SA&page=1") }
+            val movies =
+                async {
+                    fetchList(
+                        "search/movie?query=$q&language=ar-SA&page=1"
+                    )
+                }
 
-            val movieResults = movies.await()?.results.orEmpty()
-                .mapNotNull { toSearchResponse(it, true) }
-            val showResults = shows.await()?.results.orEmpty()
-                .mapNotNull { toSearchResponse(it, false) }
+            val shows =
+                async {
+                    fetchList(
+                        "search/tv?query=$q&language=ar-SA&page=1"
+                    )
+                }
 
-            (movieResults + showResults).distinctBy { it.url }
+            val movieResults =
+                movies.await()
+                    ?.results
+                    .orEmpty()
+                    .mapNotNull {
+                        toSearchResponse(
+                            it,
+                            true
+                        )
+                    }
+
+            val showResults =
+                shows.await()
+                    ?.results
+                    .orEmpty()
+                    .mapNotNull {
+                        toSearchResponse(
+                            it,
+                            false
+                        )
+                    }
+
+            (movieResults + showResults)
+                .distinctBy { it.url }
         }
     }
 
-    // ---------------------------------------------------------------
-    // Load: details, seasons, episodes
-    // ---------------------------------------------------------------
+    override suspend fun load(
+        url: String
+    ): LoadResponse? {
 
-    override suspend fun load(url: String): LoadResponse? {
-        if (debugMode && url.endsWith("/diag")) {
+        if (
+            debugMode &&
+            url.endsWith("/diag")
+        ) {
             return newMovieLoadResponse(
                 "Diagnostics $buildTag",
                 url,
                 TvType.Movie,
                 "diag"
             ) {
-                this.plot = lastDiagnostic
-                    ?: "No trace yet. Play an episode, then refresh the home page."
+                this.plot =
+                    lastDiagnostic
+                        ?: "No trace yet. Play an episode, then refresh the home page."
             }
         }
 
         val uri = Uri.parse(url)
-        val movieId = uri.getQueryParameter("movie")?.toIntOrNull()
-        val tvId = uri.getQueryParameter("tv")?.toIntOrNull()
 
-        if (movieId != null) return loadMovie(url, movieId)
-        if (tvId != null) return loadTv(url, tvId)
+        val movieId =
+            uri.getQueryParameter("movie")
+                ?.toIntOrNull()
+
+        val tvId =
+            uri.getQueryParameter("tv")
+                ?.toIntOrNull()
+
+        if (movieId != null) {
+            return loadMovie(
+                url,
+                movieId
+            )
+        }
+
+        if (tvId != null) {
+            return loadTv(
+                url,
+                tvId
+            )
+        }
 
         return null
     }
 
-    private suspend fun loadMovie(url: String, id: Int): LoadResponse? {
-        val movie = parseJson<TmdbMovie>(tmdbGet("movie/$id?language=ar-SA"))
-        val title = movie.title?.takeIf { it.isNotBlank() } ?: return null
+    private suspend fun loadMovie(
+        url: String,
+        id: Int
+    ): LoadResponse? {
 
-        val data = HayyaMediaData(type = "movie", id = id).toJson()
+        val movie =
+            parseJson<TmdbMovie>(
+                tmdbGet(
+                    "movie/$id?language=ar-SA"
+                )
+            )
 
-        return newMovieLoadResponse(title, url, TvType.Movie, data) {
-            this.posterUrl = movie.posterPath?.let { posterBase + it }
-            this.backgroundPosterUrl = movie.backdropPath?.let { backdropBase + it }
-            this.plot = movie.overview
-            this.year = yearOf(movie.releaseDate)
+        val title =
+            movie.title
+                ?.takeIf { it.isNotBlank() }
+                ?: return null
+
+        val data =
+            HayyaMediaData(
+                type = "movie",
+                id = id
+            ).toJson()
+
+        return newMovieLoadResponse(
+            title,
+            url,
+            TvType.Movie,
+            data
+        ) {
+            this.posterUrl =
+                movie.posterPath
+                    ?.let {
+                        posterBase + it
+                    }
+
+            this.backgroundPosterUrl =
+                movie.backdropPath
+                    ?.let {
+                        backdropBase + it
+                    }
+
+            this.plot =
+                movie.overview
+
+            this.year =
+                yearOf(movie.releaseDate)
         }
     }
 
-    private suspend fun loadTv(url: String, id: Int): LoadResponse? {
-        val tv = parseJson<TmdbTv>(tmdbGet("tv/$id?language=ar-SA"))
-        val title = tv.name?.takeIf { it.isNotBlank() } ?: return null
+    private suspend fun loadTv(
+        url: String,
+        id: Int
+    ): LoadResponse? {
 
-        // Site logic: seasons.filter(season_number > 0); also skip empty seasons
-        val seasons = tv.seasons
-            .orEmpty()
-            .filter { it.seasonNumber > 0 && (it.episodeCount ?: 1) > 0 }
+        val tv =
+            parseJson<TmdbTv>(
+                tmdbGet(
+                    "tv/$id?language=ar-SA"
+                )
+            )
 
-        // All seasons fetched in parallel
-        val seasonData = coroutineScope {
-            seasons.map { season ->
-                async {
-                    try {
-                        season.seasonNumber to parseJson<TmdbSeason>(
-                            tmdbGet("tv/$id/season/${season.seasonNumber}?language=ar-SA")
-                        )
-                    } catch (e: Exception) {
-                        if (e is CancellationException) throw e
-                        logError(e)
-                        null
+        val title =
+            tv.name
+                ?.takeIf { it.isNotBlank() }
+                ?: return null
+
+        val seasons =
+            tv.seasons
+                .orEmpty()
+                .filter {
+                    it.seasonNumber > 0 &&
+                        (it.episodeCount ?: 1) > 0
+                }
+
+        val seasonData =
+            coroutineScope {
+                seasons.map { season ->
+                    async {
+                        try {
+                            season.seasonNumber to
+                                parseJson<TmdbSeason>(
+                                    tmdbGet(
+                                        "tv/$id/season/${season.seasonNumber}?language=ar-SA"
+                                    )
+                                )
+                        } catch (e: Exception) {
+                            if (e is CancellationException) {
+                                throw e
+                            }
+
+                            logError(e)
+                            null
+                        }
                     }
-                }
-            }.awaitAll()
-        }.filterNotNull().sortedBy { it.first }
-
-        val episodes = seasonData.flatMap { (seasonNumber, data) ->
-            data.episodes.orEmpty().map { ep ->
-                val epData = HayyaMediaData(
-                    type = "tv",
-                    id = id,
-                    season = seasonNumber,
-                    episode = ep.episodeNumber
-                ).toJson()
-
-                newEpisode(epData) {
-                    this.name = ep.name?.takeIf { it.isNotBlank() }
-                        ?: "الحلقة ${ep.episodeNumber}"
-                    this.season = seasonNumber
-                    this.episode = ep.episodeNumber
-                    this.description = ep.overview
-                    this.posterUrl = ep.stillPath?.let { posterBase + it }
-                }
+                }.awaitAll()
             }
-        }
+                .filterNotNull()
+                .sortedBy { it.first }
 
-        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-            this.posterUrl = tv.posterPath?.let { posterBase + it }
-            this.backgroundPosterUrl = tv.backdropPath?.let { backdropBase + it }
-            this.plot = tv.overview
-            this.year = yearOf(tv.firstAirDate)
+        val episodes =
+            seasonData.flatMap {
+                (seasonNumber, data) ->
+
+                data.episodes
+                    .orEmpty()
+                    .map { ep ->
+
+                        val epData =
+                            HayyaMediaData(
+                                type = "tv",
+                                id = id,
+                                season = seasonNumber,
+                                episode = ep.episodeNumber
+                            ).toJson()
+
+                        newEpisode(epData) {
+                            this.name =
+                                ep.name
+                                    ?.takeIf {
+                                        it.isNotBlank()
+                                    }
+                                    ?: "الحلقة ${ep.episodeNumber}"
+
+                            this.season =
+                                seasonNumber
+
+                            this.episode =
+                                ep.episodeNumber
+
+                            this.description =
+                                ep.overview
+
+                            this.posterUrl =
+                                ep.stillPath
+                                    ?.let {
+                                        posterBase + it
+                                    }
+                        }
+                    }
+            }
+
+        return newTvSeriesLoadResponse(
+            title,
+            url,
+            TvType.TvSeries,
+            episodes
+        ) {
+            this.posterUrl =
+                tv.posterPath
+                    ?.let {
+                        posterBase + it
+                    }
+
+            this.backgroundPosterUrl =
+                tv.backdropPath
+                    ?.let {
+                        backdropBase + it
+                    }
+
+            this.plot =
+                tv.overview
+
+            this.year =
+                yearOf(tv.firstAirDate)
         }
     }
 
     // ---------------------------------------------------------------
-    // loadLinks: Server 2 only = VidSrc
+    // Server 2 - VidSrc
     // ---------------------------------------------------------------
 
     private val debugMode = true
 
-    // New build marker
-    private val buildTag = "build-15"
+    private val buildTag = "build-16-clean"
 
-    private class StepFailure(val step: String, val detail: String) :
-        Exception("$step $detail")
+    private class StepFailure(
+        val step: String,
+        val detail: String
+    ) : Exception("$step $detail")
 
     private data class VidSrcResult(
         val streams: List<String>,
@@ -370,13 +549,24 @@ class HayyaShootProvider : MainAPI() {
     )
 
     private fun snippet(text: String) =
-        text.take(120).replace(Regex("""\s+"""), " ")
+        text.take(120)
+            .replace(
+                Regex("""\s+"""),
+                " "
+            )
 
     private suspend fun reportFailure(
         callback: (ExtractorLink) -> Unit,
         text: String
     ) {
-        val label = "DEBUG $text".replace(Regex("""\s+"""), " ").take(220)
+        val label =
+            "DEBUG $text"
+                .replace(
+                    Regex("""\s+"""),
+                    " "
+                )
+                .take(220)
+
         callback(
             newExtractorLink(
                 name,
@@ -384,16 +574,23 @@ class HayyaShootProvider : MainAPI() {
                 "https://debug.invalid/",
                 ExtractorLinkType.VIDEO
             ) {
-                this.quality = Qualities.Unknown.value
+                this.quality =
+                    Qualities.Unknown.value
             }
         )
     }
 
-    // Server 2 = VidSrc.
-    private fun embedCandidates(media: HayyaMediaData): List<String> {
-        val isTv = media.type == "tv" && media.season != null && media.episode != null
+    private fun embedCandidates(
+        media: HayyaMediaData
+    ): List<String> {
+
+        val isTv =
+            media.type == "tv" &&
+                media.season != null &&
+                media.episode != null
 
         return if (isTv) {
+
             val s = media.season
             val e = media.episode
 
@@ -404,6 +601,7 @@ class HayyaShootProvider : MainAPI() {
                 "https://vidsrc.net/embed/tv?tmdb=${media.id}&season=$s&episode=$e&sub=ar"
             )
         } else {
+
             listOf(
                 "https://vidsrc.me/embed/movie?tmdb=${media.id}&sub=ar",
                 "https://vidsrc-embed.ru/embed/movie/${media.id}",
@@ -413,394 +611,263 @@ class HayyaShootProvider : MainAPI() {
         }
     }
 
-    private suspend fun pickReferer(
-        streamUrl: String,
-        candidates: List<String>
+    private fun originOf(
+        url: String
     ): String {
-        val list = candidates.filter { it.isNotBlank() }.distinct()
-
-        for (candidate in list) {
-            val (ok, why) = playlistCheck(streamUrl, candidate)
-            trace("referer ${Uri.parse(candidate).host} -> $why")
-
-            if (ok) return candidate
-        }
-
-        return list.firstOrNull() ?: "$mainUrl/"
-    }
-
-    private fun originOf(url: String): String {
         val u = Uri.parse(url)
         return "${u.scheme}://${u.authority}/"
     }
 
-    // Loads the page in CloudStream's hidden WebView and captures
-    // the first real HLS/CloudOrchestra stream request.
+    /*
+     * IMPORTANT:
+     *
+     * The WebView must load the VidSrc embed itself.
+     * We do not open the CloudOrchestra URL as a separate
+     * normal HTTP request.
+     *
+     * The network logs already proved that the embedded
+     * VidSrc player reaches the real stream requests:
+     *
+     * /pl/H4s...
+     * /pI/H4s...
+     * *.m3u8
+     */
     private suspend fun sniffM3u8(
         url: String,
         referer: String,
-        timeoutMs: Long = 20_000L
+        timeoutMs: Long
     ): String? =
         try {
             withTimeoutOrNull(timeoutMs) {
-                val res = app.get(
-                    url,
-                    referer = referer,
-                    interceptor = WebViewResolver(STREAM_URL_REGEX)
-                )
 
-                val captured = res.url
+                val res =
+                    app.get(
+                        url,
+                        referer = referer,
+                        interceptor =
+                            WebViewResolver(
+                                STREAM_URL_REGEX
+                            )
+                    )
+
+                val captured =
+                    res.url
 
                 trace(
-                    "interceptor result host=${Uri.parse(captured).host} " +
-                        "match=${STREAM_URL_REGEX.containsMatchIn(captured)}"
+                    "webview result " +
+                        captured.take(220)
                 )
 
                 captured.takeIf {
-                    STREAM_URL_REGEX.containsMatchIn(it)
+                    STREAM_URL_REGEX
+                        .containsMatchIn(it)
                 }
             }
         } catch (e: Exception) {
-            if (e is CancellationException) throw e
+
+            if (e is CancellationException) {
+                throw e
+            }
+
             logError(e)
-            trace("sniff exception ${e::class.java.simpleName}: ${e.message}")
+
+            trace(
+                "webview exception " +
+                    "${e::class.java.simpleName}"
+            )
+
             null
         }
 
-    // Current VidSrc chain:
-    // embed -> data-api -> CloudOrchestra iframe -> generated stream.
+    /*
+     * VidSrc:
+     *
+     * embed
+     * -> data-api
+     * -> dynamically generated CloudOrchestra player
+     *
+     * We only use this to discover the player URL.
+     * The actual stream is captured from the embedded WebView.
+     */
     private suspend fun resolveVsSrc(
-        embedUrl: String,
-        allowWebView: Boolean
+        embedUrl: String
     ): VidSrcResult {
-        val embedRes = app.get(
-            embedUrl,
-            headers = browserHeaders + mapOf(
-                "Referer" to "$mainUrl/"
+
+        val embedRes =
+            app.get(
+                embedUrl,
+                headers =
+                    browserHeaders +
+                        mapOf(
+                            "Referer" to "$mainUrl/"
+                        )
             )
-        )
 
-        val embedHtml = embedRes.text
-        val embedPageUrl = embedRes.url.ifBlank { embedUrl }
+        val embedHtml =
+            embedRes.text
 
-        val dataApi = DATA_API_REGEX.find(embedHtml)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.replace("&amp;", "&")
+        val embedPageUrl =
+            embedRes.url
+                .ifBlank {
+                    embedUrl
+                }
+
+        val dataApi =
+            DATA_API_REGEX
+                .find(embedHtml)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.replace(
+                    "&amp;",
+                    "&"
+                )
 
         trace(
-            "embed HTTP ${embedRes.code} " +
-                "final=${Uri.parse(embedPageUrl).host} " +
+            "embed HTTP=${embedRes.code} " +
+                "host=${Uri.parse(embedPageUrl).host} " +
                 "data-api=${dataApi != null}"
         )
 
-        var playerUrl: String? = null
-        var reason = ""
-
         if (dataApi == null) {
-            reason =
-                "2-no-data-api HTTP ${embedRes.code} " +
-                    "len=${embedHtml.length} ${snippet(embedHtml)}"
-        } else {
-            val apiUrl = try {
-                URI(embedPageUrl).resolve(dataApi).toString()
-            } catch (e: Exception) {
+            throw StepFailure(
+                "no-data-api",
+                "HTTP ${embedRes.code} " +
+                    "len=${embedHtml.length}"
+            )
+        }
+
+        val apiUrl =
+            try {
+                URI(embedPageUrl)
+                    .resolve(dataApi)
+                    .toString()
+            } catch (_: Exception) {
                 dataApi
             }
 
-            val apiRes = app.get(
+        val apiRes =
+            app.get(
                 apiUrl,
-                headers = browserHeaders + mapOf(
-                    "Referer" to embedPageUrl,
-                    "Accept" to "application/json, text/plain, */*",
-                    "X-Requested-With" to "XMLHttpRequest"
-                )
+                headers =
+                    browserHeaders +
+                        mapOf(
+                            "Referer" to embedPageUrl,
+                            "Accept" to
+                                "application/json, text/plain, */*",
+                            "X-Requested-With" to
+                                "XMLHttpRequest"
+                        )
             )
 
-            playerUrl = try {
-                parseJson<VsSrcResponse>(apiRes.text)
-                    .src
-                    ?.replace("\\/", "/")
-                    ?.takeIf { it.startsWith("http") }
+        val playerUrl =
+            try {
+                parseJson<VsSrcResponse>(
+                    apiRes.text
+                ).src
+                    ?.replace(
+                        "\\/",
+                        "/"
+                    )
+                    ?.takeIf {
+                        it.startsWith("http")
+                    }
             } catch (e: Exception) {
-                if (e is CancellationException) throw e
+
+                if (e is CancellationException) {
+                    throw e
+                }
+
                 null
             }
 
-            if (playerUrl == null) {
-                reason =
-                    "3-vs_src HTTP ${apiRes.code} " +
-                        snippet(apiRes.text)
-            }
-        }
-
         trace(
-            "vs_src playerUrl=" +
-                "${playerUrl?.let { Uri.parse(it).host }} " +
-                reason.take(120)
+            "vs_src HTTP=${apiRes.code} " +
+                "player=${playerUrl?.take(160)}"
         )
 
-        if (allowWebView) {
-            var sniffed: String? = null
+        if (playerUrl.isNullOrBlank()) {
+            throw StepFailure(
+                "no-player",
+                "HTTP ${apiRes.code} " +
+                    snippet(apiRes.text)
+            )
+        }
 
-            /*
-             * B1:
-             * Open the dynamically generated CloudOrchestra player.
-             *
-             * We DO NOT open its URL manually.
-             * The WebView receives it with the VidSrc referer.
-             */
-            if (playerUrl != null) {
-                trace("B1 webview on player (35s)")
+        /*
+         * FIRST:
+         *
+         * Load the actual VidSrc embed in WebView.
+         *
+         * This is the important difference from the previous
+         * build: we do not detach CloudOrchestra from its iframe
+         * context.
+         */
+        trace(
+            "webview VidSrc embed"
+        )
 
-                sniffed = sniffM3u8(
-                    playerUrl,
-                    originOf(embedPageUrl),
-                    35_000L
-                )
+        val embedStream =
+            sniffM3u8(
+                embedUrl,
+                "$mainUrl/",
+                45_000L
+            )
 
-                trace("B1 result=${sniffed?.take(180)}")
+        if (!embedStream.isNullOrBlank()) {
 
-                if (sniffed == null) {
-                    reason += " webview-player-no-stream"
-                }
-            }
+            trace(
+                "embed stream HIT " +
+                    embedStream.take(180)
+            )
 
-            /*
-             * B2:
-             * Full VidSrc embedded flow.
-             */
-            if (sniffed == null) {
-                trace("B2 webview on embed (35s)")
+            return VidSrcResult(
+                streams =
+                    listOf(embedStream),
+                subtitles =
+                    emptyList(),
+                referer =
+                    originOf(embedPageUrl)
+            )
+        }
 
-                sniffed = sniffM3u8(
-                    embedUrl,
-                    "$mainUrl/",
-                    35_000L
-                )
+        /*
+         * SECOND:
+         *
+         * Only if the complete embedded VidSrc flow did not
+         * expose the stream, let WebView load the dynamically
+         * generated player with the VidSrc origin as referer.
+         */
+        trace(
+            "webview player fallback"
+        )
 
-                trace("B2 result=${sniffed?.take(180)}")
+        val playerStream =
+            sniffM3u8(
+                playerUrl,
+                originOf(embedPageUrl),
+                30_000L
+            )
 
-                if (sniffed == null) {
-                    reason += " webview-embed-no-stream"
-                }
-            }
+        if (!playerStream.isNullOrBlank()) {
 
-            /*
-             * IMPORTANT:
-             *
-             * Do NOT call playlistCheck() here.
-             *
-             * The URL was captured from the browser/player session.
-             * A separate HTTP request can lose the session/referer/cookies.
-             */
-            if (!sniffed.isNullOrBlank()) {
-                val referer = when {
-                    playerUrl != null ->
-                        originOf(playerUrl)
+            trace(
+                "player stream HIT " +
+                    playerStream.take(180)
+            )
 
-                    else ->
-                        originOf(embedPageUrl)
-                }
-
-                return VidSrcResult(
-                    streams = listOf(sniffed),
-                    subtitles = emptyList(),
-                    referer = referer
-                )
-            }
+            return VidSrcResult(
+                streams =
+                    listOf(playerStream),
+                subtitles =
+                    emptyList(),
+                referer =
+                    originOf(embedPageUrl)
+            )
         }
 
         throw StepFailure(
-            "vs_src-chain",
-            reason
-        )
-    }
-
-    private fun trace(msg: String) {
-        val line = "${System.currentTimeMillis() - traceStart}ms $msg"
-        traceLines.add(line)
-        Log.e("HayyaShoot", line)
-    }
-
-    private suspend fun playlistCheck(
-        url: String,
-        referer: String
-    ): Pair<Boolean, String> =
-        try {
-            withTimeoutOrNull(6_000L) {
-                val res = app.get(
-                    url,
-                    headers = mapOf(
-                        "User-Agent" to userAgent,
-                        "Referer" to referer
-                    )
-                )
-
-                val ok =
-                    res.code in 200..299 &&
-                        res.text.trimStart().startsWith("#EXTM3U")
-
-                ok to
-                    "HTTP ${res.code} len=${res.text.length} " +
-                        if (ok) {
-                            "PLAYLIST"
-                        } else {
-                            snippet(res.text)
-                        }
-            } ?: (false to "timeout 6s")
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            false to "exception ${e::class.java.simpleName}"
-        }
-
-    private suspend fun isPlaylist(
-        url: String,
-        referer: String
-    ): Boolean =
-        playlistCheck(url, referer).first
-
-    // Legacy CloudOrchestra/RCP resolver kept intact as a fallback helper.
-    private suspend fun resolveVidSrc(
-        embedUrl: String
-    ): VidSrcResult {
-        val embedRes = app.get(
-            embedUrl,
-            headers = browserHeaders + mapOf(
-                "Referer" to "$mainUrl/"
-            )
-        )
-
-        val embedHtml = embedRes.text
-
-        val embedPageUrl =
-            embedRes.url.ifBlank { embedUrl }
-
-        var rcpUrl =
-            RCP_REGEX.find(embedHtml)
-                ?.groupValues
-                ?.getOrNull(1)
-                ?: IFRAME_REGEX.find(embedHtml)
-                    ?.groupValues
-                    ?.getOrNull(1)
-                ?: throw StepFailure(
-                    "2-no-iframe",
-                    "HTTP ${embedRes.code} " +
-                        "len=${embedHtml.length} " +
-                        snippet(embedHtml)
-                )
-
-        if (rcpUrl.startsWith("//")) {
-            rcpUrl = "https:$rcpUrl"
-        } else if (rcpUrl.startsWith("/")) {
-            val pageUri = Uri.parse(embedPageUrl)
-            rcpUrl =
-                "${pageUri.scheme}://${pageUri.authority}$rcpUrl"
-        }
-
-        val rcpRes = app.get(
-            rcpUrl,
-            headers = browserHeaders + mapOf(
-                "Referer" to embedPageUrl
-            )
-        )
-
-        val rcpHtml = rcpRes.text
-
-        val prorcpPath =
-            PRORCP_PATH_REGEX.find(rcpHtml)?.value
-                ?: SRCRCP_PATH_REGEX.find(rcpHtml)?.value
-                ?: throw StepFailure(
-                    "4-no-prorcp",
-                    "HTTP ${rcpRes.code} " +
-                        "rcp=${Uri.parse(rcpUrl).host} " +
-                        "len=${rcpHtml.length} " +
-                        snippet(rcpHtml)
-                )
-
-        val rcpUri = Uri.parse(rcpUrl)
-        val rcpOrigin =
-            "${rcpUri.scheme}://${rcpUri.authority}"
-
-        val prorcpRes = app.get(
-            "$rcpOrigin$prorcpPath",
-            headers = browserHeaders + mapOf(
-                "Referer" to rcpUrl
-            )
-        )
-
-        val prorcpHtml = prorcpRes.text
-
-        val rawFile =
-            FILE_REGEX.find(prorcpHtml)
-                ?.groupValues
-                ?.getOrNull(1)
-                ?: M3U8_REGEX.find(
-                    prorcpHtml.replace("\\/", "/")
-                )?.value
-                ?: PL_REGEX.find(
-                    prorcpHtml.replace("\\/", "/")
-                )?.value
-                ?: throw StepFailure(
-                    "6-no-file",
-                    "HTTP ${prorcpRes.code} " +
-                        "len=${prorcpHtml.length} " +
-                        snippet(prorcpHtml)
-                )
-
-        val rcpRoot =
-            (rcpUri.host ?: "")
-                .split(".")
-                .takeLast(2)
-                .joinToString(".")
-
-        val placeholderDomains =
-            listOf(
-                rcpRoot,
-                "cloudnestra.com"
-            )
-                .filter { it.isNotBlank() }
-                .distinct()
-
-        val streams =
-            rawFile
-                .split(" or ")
-                .flatMap { alt ->
-                    placeholderDomains.map { domain ->
-                        alt.trim()
-                            .replace(
-                                PLACEHOLDER_REGEX,
-                                domain
-                            )
-                    }
-                }
-                .filter {
-                    it.startsWith("http")
-                }
-                .distinct()
-
-        if (streams.isEmpty()) {
-            throw StepFailure(
-                "7-bad-url",
-                rawFile.take(150)
-            )
-        }
-
-        val subtitles =
-            SUBTITLE_REGEX
-                .findAll(
-                    prorcpHtml.replace("\\/", "/")
-                )
-                .map {
-                    it.groupValues[1]
-                }
-                .distinct()
-                .toList()
-
-        return VidSrcResult(
-            streams,
-            subtitles,
-            "$rcpOrigin/"
+            "stream-not-captured",
+            "VidSrc WebView did not capture HLS"
         )
     }
 
@@ -814,22 +881,31 @@ class HayyaShootProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val media = try {
-            parseJson<HayyaMediaData>(data)
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
 
-            if (debugMode) {
-                reportFailure(
-                    callback,
-                    "0-bad-data ${data.take(80)}"
+        val media =
+            try {
+                parseJson<HayyaMediaData>(
+                    data
                 )
+            } catch (e: Exception) {
+
+                if (e is CancellationException) {
+                    throw e
+                }
+
+                if (debugMode) {
+                    reportFailure(
+                        callback,
+                        "0-bad-data ${data.take(80)}"
+                    )
+                }
+
+                return false
             }
 
-            return false
-        }
+        traceStart =
+            System.currentTimeMillis()
 
-        traceStart = System.currentTimeMillis()
         traceLines.clear()
 
         trace(
@@ -840,122 +916,98 @@ class HayyaShootProvider : MainAPI() {
                 "e=${media.episode}"
         )
 
-        val candidates = embedCandidates(media)
-        val failures = ArrayList<String>()
+        val candidates =
+            embedCandidates(media)
 
-        Log.e(
-            "HayyaShoot",
-            "loadLinks start " +
-                "type=${media.type} " +
-                "id=${media.id} " +
-                "s=${media.season} " +
-                "e=${media.episode}"
-        )
+        val failures =
+            ArrayList<String>()
 
-        /*
-         * Main path:
-         *
-         * VidSrc embed
-         * -> CloudOrchestra
-         * -> WebView
-         * -> captured /pl/... or /pI/... or .m3u8
-         *
-         * IMPORTANT:
-         * The captured URL is emitted immediately.
-         * We do NOT perform another HTTP playlistCheck().
-         */
         val completed =
-            withTimeoutOrNull(75_000L) {
+            withTimeoutOrNull(90_000L) {
 
-                for ((index, embedUrl) in candidates.withIndex()) {
+                for (
+                    (index, embedUrl)
+                    in candidates.withIndex()
+                ) {
+
                     val host =
                         Uri.parse(embedUrl).host
                             ?: embedUrl
 
                     try {
+
                         trace(
                             "TRY $host index=$index"
                         )
 
                         val result =
                             resolveVsSrc(
-                                embedUrl,
-                                allowWebView = true
+                                embedUrl
                             )
 
-                        if (result.streams.isEmpty()) {
-                            throw StepFailure(
-                                "empty-streams",
-                                host
-                            )
-                        }
+                        result.streams
+                            .forEachIndexed {
+                                streamIndex,
+                                streamUrl ->
 
-                        /*
-                         * Emit exactly what the WebView captured.
-                         *
-                         * No playlistCheck().
-                         * No second HTTP request.
-                         */
-                        result.streams.forEachIndexed {
-                            streamIndex,
-                            streamUrl ->
+                                callback(
+                                    newExtractorLink(
+                                        source = name,
+                                        name =
+                                            if (
+                                                result.streams.size > 1
+                                            ) {
+                                                "VidSrc ${streamIndex + 1}"
+                                            } else {
+                                                "VidSrc"
+                                            },
+                                        url = streamUrl,
+                                        type =
+                                            ExtractorLinkType.M3U8
+                                    ) {
+                                        this.referer =
+                                            result.referer
 
-                            trace(
-                                "EMIT stream " +
-                                    streamUrl.take(220)
-                            )
+                                        this.quality =
+                                            Qualities.Unknown.value
 
-                            callback(
-                                newExtractorLink(
-                                    source = name,
-                                    name =
-                                        if (result.streams.size > 1) {
-                                            "VidSrc ${streamIndex + 1}"
-                                        } else {
-                                            "VidSrc"
-                                        },
-                                    url = streamUrl,
-                                    type = ExtractorLinkType.M3U8
-                                ) {
-                                    this.referer =
-                                        result.referer
-
-                                    this.quality =
-                                        Qualities.Unknown.value
-
-                                    this.headers =
-                                        mapOf(
-                                            "User-Agent" to userAgent
-                                        )
-                                }
-                            )
-                        }
+                                        this.headers =
+                                            mapOf(
+                                                "User-Agent" to
+                                                    userAgent
+                                            )
+                                    }
+                                )
+                            }
 
                         result.subtitles.forEach {
-                            subtitleUrl ->
-
                             subtitleCallback(
                                 SubtitleFile(
                                     "Arabic",
-                                    subtitleUrl
+                                    it
                                 )
                             )
                         }
 
                         trace(
-                            "OK host=$host " +
-                                "streams=${result.streams.size} " +
-                                "subs=${result.subtitles.size}"
+                            "OK $host " +
+                                "streams=${result.streams.size}"
                         )
 
-                        true
+                        return@withTimeoutOrNull true
+
                     } catch (e: Exception) {
-                        if (e is CancellationException) {
+
+                        if (
+                            e is CancellationException
+                        ) {
                             throw e
                         }
 
                         val why =
-                            if (e is StepFailure) {
+                            if (
+                                e is StepFailure
+                            ) {
                                 "${e.step} ${e.detail}"
                             } else {
                                 logError(e)
@@ -971,80 +1023,84 @@ class HayyaShootProvider : MainAPI() {
                         trace(
                             "FAIL $host $why"
                         )
-
-                        false
-                    }.let { success ->
-                        if (success) {
-                            return@withTimeoutOrNull true
-                        }
                     }
                 }
 
                 false
+
             } ?: false
 
+        if (completed) {
+
+            lastDiagnostic =
+                traceLines
+                    .joinToString("\n")
+
+            return true
+        }
+
         /*
-         * Built-in CloudStream extractor fallback.
+         * Keep the original CloudStream extractor fallback.
          */
-        if (!completed) {
-            try {
-                trace(
-                    "BUILT-IN extractor"
-                )
+        try {
 
-                val extracted =
-                    withTimeoutOrNull(20_000L) {
-                        loadExtractor(
-                            candidates.first(),
-                            "$mainUrl/",
-                            subtitleCallback,
-                            callback
-                        )
-                    } ?: false
+            trace(
+                "BUILT-IN extractor"
+            )
 
-                if (extracted) {
-                    trace(
-                        "BUILT-IN HIT"
+            val extracted =
+                withTimeoutOrNull(
+                    20_000L
+                ) {
+                    loadExtractor(
+                        candidates.first(),
+                        "$mainUrl/",
+                        subtitleCallback,
+                        callback
                     )
+                } ?: false
 
-                    lastDiagnostic =
-                        traceLines.joinToString("\n")
-
-                    return true
-                }
+            if (extracted) {
 
                 trace(
-                    "BUILT-IN MISS"
-                )
-            } catch (e: Exception) {
-                if (e is CancellationException) {
-                    throw e
-                }
-
-                logError(e)
-
-                failures.add(
-                    "builtin " +
-                        "${e::class.java.simpleName}: " +
-                        e.message
+                    "BUILT-IN HIT"
                 )
 
-                trace(
-                    "BUILT-IN FAIL " +
-                        failures.last()
-                )
+                lastDiagnostic =
+                    traceLines
+                        .joinToString("\n")
+
+                return true
             }
+
+        } catch (e: Exception) {
+
+            if (e is CancellationException) {
+                throw e
+            }
+
+            logError(e)
+
+            failures.add(
+                "builtin " +
+                    "${e::class.java.simpleName}: " +
+                    e.message
+            )
         }
 
         if (debugMode) {
+
             if (failures.isEmpty()) {
+
                 reportFailure(
                     callback,
                     "$buildTag no-stream " +
                         "${media.type} " +
                         "id=${media.id}"
                 )
+
             } else {
+
                 failures
                     .take(4)
                     .forEach {
@@ -1062,6 +1118,7 @@ class HayyaShootProvider : MainAPI() {
 
         lastDiagnostic =
             buildString {
+
                 traceLines
                     .toList()
                     .forEach {
@@ -1070,6 +1127,7 @@ class HayyaShootProvider : MainAPI() {
                     }
 
                 if (failures.isNotEmpty()) {
+
                     append(
                         "--- failures ---\n"
                     )
@@ -1085,9 +1143,19 @@ class HayyaShootProvider : MainAPI() {
         return false
     }
 
-    // ---------------------------------------------------------------
-    // Regexes copied from scraper.js 2.0.2
-    // ---------------------------------------------------------------
+    private fun trace(
+        msg: String
+    ) {
+        val line =
+            "${System.currentTimeMillis() - traceStart}ms $msg"
+
+        traceLines.add(line)
+
+        Log.e(
+            "HayyaShoot",
+            line
+        )
+    }
 
     private companion object {
 
@@ -1103,72 +1171,22 @@ class HayyaShootProvider : MainAPI() {
                 ArrayList<String>()
             )
 
-        val RCP_REGEX = Regex(
-            """src=["']((?:https?:)?//[^"']*cloudnestra\.com/rcp/[^"']+)["']""",
-            RegexOption.IGNORE_CASE
-        )
-
-        val PRORCP_REGEX = Regex(
-            """/prorcp/([a-zA-Z0-9=+/]+)"""
-        )
-
-        val PRORCP_PATH_REGEX = Regex(
-            """/prorcp/[a-zA-Z0-9=+/]+"""
-        )
-
-        val SRCRCP_PATH_REGEX = Regex(
-            """/srcrcp/[a-zA-Z0-9=+/_-]+"""
-        )
-
-        val IFRAME_REGEX = Regex(
-            """<iframe[^>]+src=["']((?:https?:)?//[^"']+)["']""",
-            RegexOption.IGNORE_CASE
-        )
-
-        val M3U8_REGEX = Regex(
-            """https?://[^"'\s\\]+\.m3u8[^"'\s\\]*"""
-        )
-
-        val PL_REGEX = Regex(
-            """https?://[^"'\s\\]+/p[li]/H4s[il][^"'\s\\]*""",
-            RegexOption.IGNORE_CASE
-        )
+        val DATA_API_REGEX =
+            Regex(
+                """data-api=["']([^"']+)["']""",
+                RegexOption.IGNORE_CASE
+            )
 
         /*
-         * Real network requests observed from the player:
-         *
-         *   /pl/H4s...
-         *   /pI/H4s...
-         *
-         * Some requests may also end in .m3u8 with query parameters.
+         * The WebView capture must match the actual requests
+         * observed in the browser.
          */
-        val STREAM_URL_REGEX = Regex(
-            """(?:\.m3u8(?:\?[^"'\\\s]*)?|/p[li]/H4s[il][^"'\\\s]*)""",
-            RegexOption.IGNORE_CASE
-        )
-
-        val FILE_REGEX = Regex(
-            """file:\s*["']([^"']+)["']"""
-        )
-
-        val DATA_API_REGEX = Regex(
-            """data-api=["']([^"']+)["']""",
-            RegexOption.IGNORE_CASE
-        )
-
-        val PLACEHOLDER_REGEX = Regex(
-            """\{v[1-5]\}"""
-        )
-
-        val SUBTITLE_REGEX = Regex(
-            """["'](https?://[^"']+\.(?:vtt|srt))["']""",
-            RegexOption.IGNORE_CASE
-        )
+        val STREAM_URL_REGEX =
+            Regex(
+                """(?:https?://[^"'\\\s]+(?:\.m3u8(?:\?[^"'\\\s]*)?|/p[li]/H4s[il][^"'\\\s]*)|(?:/p[li]/H4s[il][^"'\\\s]*))""",
+                RegexOption.IGNORE_CASE
+            )
     }
-
-    // ---------------------------------------------------------------
-    // Data classes
-    // ---------------------------------------------------------------
 
     data class HayyaMediaData(
         val type: String,
