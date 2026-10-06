@@ -702,16 +702,10 @@ class HayyaShootProvider : MainAPI() {
                 val host = Uri.parse(embedUrl).host ?: embedUrl
 
                 try {
-                    val result = try {
-                        resolveVsSrc(embedUrl, allowWebView = index == 0)
-                    } catch (e: Exception) {
-                        if (e is CancellationException) throw e
-                        val why = if (e is StepFailure) "${e.step} ${e.detail}"
-                        else "${e::class.java.simpleName}: ${e.message}"
-                        failures.add("$host $why")
-                        Log.e("HayyaShoot", "vs_src chain failed: $why")
-                        resolveVidSrc(embedUrl)   // legacy cloudnestra chain
-                    }
+                    val result = resolveVsSrc(
+                        embedUrl,
+                        allowWebView = true
+                    )
 
                     // Keep only playlists that really answer; if none does, still
                     // offer them all (and explain in a DEBUG entry).
