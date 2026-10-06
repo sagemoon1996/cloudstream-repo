@@ -8,12 +8,9 @@ import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
-import io.github.charlietap.chasm.embedding.invoke
-import io.github.charlietap.chasm.embedding.instance
-import io.github.charlietap.chasm.embedding.module
+import io.github.charlietap.chasm.embedding.*
 import io.github.charlietap.chasm.embedding.shapes.expect
-import io.github.charlietap.chasm.embedding.store
-import io.github.charlietap.chasm.type.NumberValue
+import io.github.charlietap.chasm.type.Value
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -728,14 +725,11 @@ class HayyaShootProvider : MainAPI() {
 
                     val encrypted =
                         try {
-
                             Base64.decode(
                                 streamValue,
                                 Base64.DEFAULT
                             )
-
                         } catch (e: Exception) {
-
                             throw ErrorLoadingException(
                                 "VidSrc: invalid stream_urls"
                             )
@@ -748,18 +742,14 @@ class HayyaShootProvider : MainAPI() {
                             )
 
                     val wasmBytes =
-                        if (
-                            vs.has("wasm_url")
-                        ) {
+                        if (vs.has("wasm_url")) {
 
                             val wasmUrl =
                                 vs.optString(
                                     "wasm_url"
                                 )
 
-                            if (
-                                wasmUrl.isBlank()
-                            ) {
+                            if (wasmUrl.isBlank()) {
                                 throw ErrorLoadingException(
                                     "VidSrc: empty wasm_url"
                                 )
@@ -767,14 +757,10 @@ class HayyaShootProvider : MainAPI() {
 
                             app.get(
                                 wasmUrl,
-                                headers =
-                                    mapOf(
-                                        "User-Agent" to
-                                            userAgent
-                                    )
-                            )
-                                .body
-                                ?.bytes()
+                                headers = mapOf(
+                                    "User-Agent" to userAgent
+                                )
+                            ).body?.bytes()
                                 ?: throw ErrorLoadingException(
                                     "VidSrc: empty WASM"
                                 )
@@ -782,13 +768,9 @@ class HayyaShootProvider : MainAPI() {
                         } else {
 
                             val wasm =
-                                vs.optString(
-                                    "wasm"
-                                )
+                                vs.optString("wasm")
 
-                            if (
-                                wasm.isBlank()
-                            ) {
+                            if (wasm.isBlank()) {
                                 throw ErrorLoadingException(
                                     "VidSrc: missing wasm"
                                 )
@@ -800,12 +782,8 @@ class HayyaShootProvider : MainAPI() {
                             )
                         }
 
-                    // Chasm 1.5.0
-
                     val wasmModule =
-                        module(
-                            wasmBytes
-                        ).expect(
+                        module(wasmBytes).expect(
                             "VidSrc: failed to decode WASM"
                         )
 
@@ -837,7 +815,7 @@ class HayyaShootProvider : MainAPI() {
                             wasmInstance,
                             "alloc",
                             listOf(
-                                NumberValue.I32(
+                                Value.Number.I32(
                                     encrypted.size
                                 )
                             )
@@ -847,24 +825,21 @@ class HayyaShootProvider : MainAPI() {
 
                     val ptr =
                         (
-                            allocResult
-                                .firstOrNull()
-                                as? NumberValue.I32
+                            allocResult.firstOrNull()
+                                as? Value.Number.I32
                             )?.value
                             ?: throw ErrorLoadingException(
                                 "VidSrc: alloc returned no pointer"
                             )
 
-                    for (
-                        i in encrypted.indices
-                    ) {
-
-                        memory.writeByte(
-                            wasmStore,
-                            ptr + i,
-                            encrypted[i]
-                        )
-                    }
+                    writeBytes(
+                        wasmStore,
+                        memory,
+                        encrypted,
+                        0,
+                        encrypted.size,
+                        ptr
+                    )
 
                     val decryptResult =
                         invoke(
@@ -872,10 +847,8 @@ class HayyaShootProvider : MainAPI() {
                             wasmInstance,
                             "decrypt",
                             listOf(
-                                NumberValue.I32(
-                                    ptr
-                                ),
-                                NumberValue.I32(
+                                Value.Number.I32(ptr),
+                                Value.Number.I32(
                                     encrypted.size
                                 )
                             )
@@ -885,9 +858,8 @@ class HayyaShootProvider : MainAPI() {
 
                     val outLen =
                         (
-                            decryptResult
-                                .firstOrNull()
-                                as? NumberValue.I32
+                            decryptResult.firstOrNull()
+                                as? Value.Number.I32
                             )?.value
                             ?: throw ErrorLoadingException(
                                 "VidSrc: decrypt returned no length"
@@ -902,16 +874,14 @@ class HayyaShootProvider : MainAPI() {
                     val decoded =
                         ByteArray(outLen)
 
-                    for (
-                        i in 0 until outLen
-                    ) {
-
-                        decoded[i] =
-                            memory.readByte(
-                                wasmStore,
-                                ptr + 12 + i
-                            )
-                    }
+                    readBytes(
+                        wasmStore,
+                        memory,
+                        decoded,
+                        ptr + 12,
+                        outLen,
+                        0
+                    )
 
                     String(
                         decoded,
