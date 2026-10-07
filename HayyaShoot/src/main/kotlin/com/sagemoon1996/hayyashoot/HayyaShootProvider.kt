@@ -102,7 +102,9 @@ class HayyaShootProvider : MainAPI() {
 
                 val poster =
                     item.optString("poster_path")
-                        .takeIf { it.isNotBlank() }
+                        .takeIf {
+                            it.isNotBlank()
+                        }
                         ?.let {
                             "https://image.tmdb.org/t/p/w500$it"
                         }
@@ -176,7 +178,9 @@ class HayyaShootProvider : MainAPI() {
                 )
 
             (movieResults + seriesResults)
-                .distinctBy { it.url }
+                .distinctBy {
+                    it.url
+                }
         }
     }
 
@@ -221,7 +225,9 @@ class HayyaShootProvider : MainAPI() {
 
                 val poster =
                     item.optString("poster_path")
-                        .takeIf { it.isNotBlank() }
+                        .takeIf {
+                            it.isNotBlank()
+                        }
                         ?.let {
                             "https://image.tmdb.org/t/p/w500$it"
                         }
@@ -258,7 +264,8 @@ class HayyaShootProvider : MainAPI() {
         url: String
     ): LoadResponse? {
 
-        val uri = Uri.parse(url)
+        val uri =
+            Uri.parse(url)
 
         val id =
             uri.getQueryParameter("tv")
@@ -288,19 +295,25 @@ class HayyaShootProvider : MainAPI() {
         val title =
             json.optString("title")
                 .trim()
-                .takeIf { it.isNotBlank() }
+                .takeIf {
+                    it.isNotBlank()
+                }
                 ?: return null
 
         val poster =
             json.optString("poster_path")
-                .takeIf { it.isNotBlank() }
+                .takeIf {
+                    it.isNotBlank()
+                }
                 ?.let {
                     "https://image.tmdb.org/t/p/w500$it"
                 }
 
         val background =
             json.optString("backdrop_path")
-                .takeIf { it.isNotBlank() }
+                .takeIf {
+                    it.isNotBlank()
+                }
                 ?.let {
                     "https://image.tmdb.org/t/p/original$it"
                 }
@@ -308,7 +321,9 @@ class HayyaShootProvider : MainAPI() {
         val overview =
             json.optString("overview")
                 .trim()
-                .takeIf { it.isNotBlank() }
+                .takeIf {
+                    it.isNotBlank()
+                }
 
         val data =
             JSONObject()
@@ -339,19 +354,25 @@ class HayyaShootProvider : MainAPI() {
         val title =
             json.optString("name")
                 .trim()
-                .takeIf { it.isNotBlank() }
+                .takeIf {
+                    it.isNotBlank()
+                }
                 ?: return null
 
         val poster =
             json.optString("poster_path")
-                .takeIf { it.isNotBlank() }
+                .takeIf {
+                    it.isNotBlank()
+                }
                 ?.let {
                     "https://image.tmdb.org/t/p/w500$it"
                 }
 
         val background =
             json.optString("backdrop_path")
-                .takeIf { it.isNotBlank() }
+                .takeIf {
+                    it.isNotBlank()
+                }
                 ?.let {
                     "https://image.tmdb.org/t/p/original$it"
                 }
@@ -359,20 +380,26 @@ class HayyaShootProvider : MainAPI() {
         val overview =
             json.optString("overview")
                 .trim()
-                .takeIf { it.isNotBlank() }
+                .takeIf {
+                    it.isNotBlank()
+                }
 
         val seasons =
             json.optJSONArray("seasons")
-                ?: return newTvSeriesLoadResponse(
-                    name = title,
-                    url = "$mainUrl/series/?tv=$id",
-                    type = TvType.TvSeries,
-                    episodes = emptyList()
-                ) {
-                    posterUrl = poster
-                    backgroundPosterUrl = background
-                    plot = overview
-                }
+
+        if (seasons == null) {
+
+            return newTvSeriesLoadResponse(
+                name = title,
+                url = "$mainUrl/series/?tv=$id",
+                type = TvType.TvSeries,
+                episodes = emptyList()
+            ) {
+                posterUrl = poster
+                backgroundPosterUrl = background
+                plot = overview
+            }
+        }
 
         val validSeasons = buildList {
 
@@ -394,101 +421,111 @@ class HayyaShootProvider : MainAPI() {
             }
         }
 
-        val episodes = coroutineScope {
+        val episodes =
+            coroutineScope {
 
-            validSeasons.map { seasonNumber ->
+                validSeasons
+                    .map { seasonNumber ->
 
-                async {
+                        async {
 
-                    val seasonJson =
-                        tmdbGet(
-                            "/tv/$id/season/$seasonNumber"
-                        )
-
-                    val episodeArray =
-                        seasonJson?.optJSONArray(
-                            "episodes"
-                        )
-
-                    if (episodeArray == null) {
-                        emptyList()
-                    } else {
-
-                        buildList {
-
-                            for (
-                                i in 0 until episodeArray.length()
-                            ) {
-
-                                val episode =
-                                    episodeArray
-                                        .optJSONObject(i)
-                                        ?: continue
-
-                                val episodeNumber =
-                                    episode.optInt(
-                                        "episode_number",
-                                        -1
-                                    )
-
-                                if (episodeNumber <= 0) {
-                                    continue
-                                }
-
-                                val episodeName =
-                                    episode
-                                        .optString("name")
-                                        .trim()
-
-                                val still =
-                                    episode
-                                        .optString("still_path")
-                                        .takeIf {
-                                            it.isNotBlank()
-                                        }
-                                        ?.let {
-                                            "https://image.tmdb.org/t/p/w500$it"
-                                        }
-
-                                val description =
-                                    episode
-                                        .optString("overview")
-                                        .trim()
-                                        .takeIf {
-                                            it.isNotBlank()
-                                        }
-
-                                add(
-                                    newEpisode(
-                                        "$mainUrl/series/?tv=$id" +
-                                            "&s=$seasonNumber" +
-                                            "&e=$episodeNumber"
-                                    ) {
-                                        name =
-                                            episodeName.ifBlank {
-                                                "الحلقة $episodeNumber"
-                                            }
-
-                                        season =
-                                            seasonNumber
-
-                                        episode =
-                                            episodeNumber
-
-                                        posterUrl =
-                                            still
-
-                                        this.description =
-                                            description
-                                    }
+                            val seasonJson =
+                                tmdbGet(
+                                    "/tv/$id/season/$seasonNumber"
                                 )
+
+                            val episodeArray =
+                                seasonJson?.optJSONArray(
+                                    "episodes"
+                                )
+
+                            if (
+                                episodeArray == null
+                            ) {
+                                emptyList()
+                            } else {
+
+                                buildList {
+
+                                    for (
+                                        i in 0 until episodeArray.length()
+                                    ) {
+
+                                        val episode =
+                                            episodeArray
+                                                .optJSONObject(i)
+                                                ?: continue
+
+                                        val number =
+                                            episode.optInt(
+                                                "episode_number",
+                                                -1
+                                            )
+
+                                        if (number <= 0) {
+                                            continue
+                                        }
+
+                                        val episodeName =
+                                            episode
+                                                .optString("name")
+                                                .trim()
+
+                                        val still =
+                                            episode
+                                                .optString(
+                                                    "still_path"
+                                                )
+                                                .takeIf {
+                                                    it.isNotBlank()
+                                                }
+                                                ?.let {
+                                                    "https://image.tmdb.org/t/p/w500$it"
+                                                }
+
+                                        val description =
+                                            episode
+                                                .optString(
+                                                    "overview"
+                                                )
+                                                .trim()
+                                                .takeIf {
+                                                    it.isNotBlank()
+                                                }
+
+                                        add(
+                                            newEpisode(
+                                                "$mainUrl/series/?tv=$id" +
+                                                    "&s=$seasonNumber" +
+                                                    "&e=$number"
+                                            ) {
+
+                                                name =
+                                                    episodeName.ifBlank {
+                                                        "الحلقة $number"
+                                                    }
+
+                                                season =
+                                                    seasonNumber
+
+                                                episode =
+                                                    number
+
+                                                posterUrl =
+                                                    still
+
+                                                this.description =
+                                                    description
+                                            }
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
-                }
-            }.awaitAll()
-                .flatten()
-        }
+                    .awaitAll()
+                    .flatten()
+            }
 
         return newTvSeriesLoadResponse(
             name = title,
@@ -509,11 +546,12 @@ class HayyaShootProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
-        val item = try {
-            parseHayyaData(data)
-        } catch (_: Exception) {
-            return false
-        }
+        val item =
+            try {
+                parseHayyaData(data)
+            } catch (_: Exception) {
+                return false
+            }
 
         val embed =
             if (item.type == "movie") {
@@ -523,10 +561,12 @@ class HayyaShootProvider : MainAPI() {
             } else {
 
                 val season =
-                    item.season ?: return false
+                    item.season
+                        ?: return false
 
                 val episode =
-                    item.episode ?: return false
+                    item.episode
+                        ?: return false
 
                 "https://vidsrc.sh/embed/tv/" +
                     "${item.id}/$season/$episode"
@@ -540,15 +580,21 @@ class HayyaShootProvider : MainAPI() {
             subtitleCallback
         )
 
-        var found = false
+        var found =
+            false
 
         result.streams
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
+            .map {
+                it.trim()
+            }
+            .filter {
+                it.isNotBlank()
+            }
             .distinct()
             .forEachIndexed { index, streamUrl ->
 
-                found = true
+                found =
+                    true
 
                 callback(
                     newExtractorLink(
@@ -567,8 +613,11 @@ class HayyaShootProvider : MainAPI() {
                                 ExtractorLinkType.VIDEO
                             }
                     ) {
-                        referer = embed
-                        quality = Qualities.Unknown.value
+                        referer =
+                            embed
+
+                        quality =
+                            Qualities.Unknown.value
                     }
                 )
             }
@@ -584,20 +633,25 @@ class HayyaShootProvider : MainAPI() {
             JSONObject(data)
 
         return HayyaData(
-            id = json.getInt("id"),
+            id =
+                json.getInt("id"),
+
             season =
                 if (json.has("season")) {
                     json.optInt("season")
                 } else {
                     null
                 },
+
             episode =
                 if (json.has("episode")) {
                     json.optInt("episode")
                 } else {
                     null
                 },
-            type = json.getString("type")
+
+            type =
+                json.getString("type")
         )
     }
 
@@ -610,16 +664,23 @@ class HayyaShootProvider : MainAPI() {
 
                 val parts =
                     embed
-                        .substringAfter("/embed/tv/")
+                        .substringAfter(
+                            "/embed/tv/"
+                        )
                         .split("/")
 
                 if (parts.size < 3) {
                     return null
                 }
 
-                val id = parts[0]
-                val season = parts[1]
-                val episode = parts[2]
+                val id =
+                    parts[0]
+
+                val season =
+                    parts[1]
+
+                val episode =
+                    parts[2]
 
                 "https://data.vidsrc.sh/api.php" +
                     "?type=tv" +
@@ -643,44 +704,74 @@ class HayyaShootProvider : MainAPI() {
                     "&stream_urls"
             }
 
-        val script = """
+        val script =
+            """
             (async function() {
                 try {
-                    const api = ${JSONObject.quote(api)};
+                    const api =
+                        ${JSONObject.quote(api)};
 
-                    const response = await fetch(api, {
-                        credentials: "omit"
-                    });
+                    const response =
+                        await fetch(api, {
+                            credentials: "omit"
+                        });
 
-                    const raw = await response.text();
-                    const j = JSON.parse(raw);
+                    const raw =
+                        await response.text();
 
-                    const data = j.data || j;
-                    let encoded = data.stream_urls;
+                    const j =
+                        JSON.parse(raw);
+
+                    const data =
+                        j.data || j;
+
+                    let encoded =
+                        data.stream_urls;
 
                     if (!encoded) {
-                        throw new Error("stream_urls missing");
+                        throw new Error(
+                            "stream_urls missing"
+                        );
                     }
 
-                    if (typeof encoded !== "string") {
-                        encoded = JSON.stringify(encoded);
+                    if (
+                        typeof encoded !== "string"
+                    ) {
+                        encoded =
+                            JSON.stringify(
+                                encoded
+                            );
                     }
 
-                    const bin = atob(encoded);
-                    const enc = new Uint8Array(bin.length);
+                    const bin =
+                        atob(encoded);
 
-                    for (let i = 0; i < bin.length; i++) {
-                        enc[i] = bin.charCodeAt(i);
+                    const enc =
+                        new Uint8Array(
+                            bin.length
+                        );
+
+                    for (
+                        let i = 0;
+                        i < bin.length;
+                        i++
+                    ) {
+                        enc[i] =
+                            bin.charCodeAt(i);
                     }
 
-                    const vs = j.vs || data.vs;
+                    const vs =
+                        j.vs || data.vs;
 
                     if (!vs) {
-                        throw new Error("vs missing");
+                        throw new Error(
+                            "vs missing"
+                        );
                     }
 
                     const wasmUrl =
-                        vs.wasm_url || vs.wasm;
+                        vs.wasm_url ||
+                        vs.wasm;
 
                     if (!wasmUrl) {
                         throw new Error(
@@ -689,21 +780,29 @@ class HayyaShootProvider : MainAPI() {
                     }
 
                     const wasmResponse =
-                        await fetch(wasmUrl, {
-                            credentials: "omit"
-                        });
-
-                    const wasmBytes =
-                        await wasmResponse.arrayBuffer();
-
-                    const module =
-                        await WebAssembly.instantiate(
-                            wasmBytes,
-                            {}
+                        await fetch(
+                            wasmUrl,
+                            {
+                                credentials:
+                                    "omit"
+                            }
                         );
 
+                    const wasmBytes =
+                        await wasmResponse
+                            .arrayBuffer();
+
+                    const module =
+                        await WebAssembly
+                            .instantiate(
+                                wasmBytes,
+                                {}
+                            );
+
                     const ex =
-                        module.instance.exports;
+                        module
+                            .instance
+                            .exports;
 
                     if (
                         !ex.alloc ||
@@ -716,7 +815,9 @@ class HayyaShootProvider : MainAPI() {
                     }
 
                     const ptr =
-                        ex.alloc(enc.length);
+                        ex.alloc(
+                            enc.length
+                        );
 
                     new Uint8Array(
                         ex.memory.buffer,
@@ -744,15 +845,26 @@ class HayyaShootProvider : MainAPI() {
                     const streams =
                         decoded
                             .split("\\n")
-                            .map(x => x.trim())
-                            .filter(Boolean);
+                            .map(
+                                x => x.trim()
+                            )
+                            .filter(
+                                Boolean
+                            );
 
                     const finalStreams = [];
 
-                    for (const stream of streams) {
+                    for (
+                        const stream
+                        of streams
+                    ) {
+
                         try {
+
                             const u =
-                                new URL(stream);
+                                new URL(
+                                    stream
+                                );
 
                             const origin =
                                 u.origin;
@@ -762,16 +874,19 @@ class HayyaShootProvider : MainAPI() {
                                     origin +
                                     "/generate.php",
                                     {
-                                        credentials: "omit"
+                                        credentials:
+                                            "omit"
                                     }
                                 );
 
                             const genContent =
                                 await gen.text();
 
-                            let token = null;
+                            let token =
+                                null;
 
                             try {
+
                                 const gj =
                                     JSON.parse(
                                         genContent
@@ -781,27 +896,32 @@ class HayyaShootProvider : MainAPI() {
                                     gj.token ||
                                     gj.data?.token ||
                                     gj.result?.token;
+
                             } catch (_) {}
 
                             if (!token) {
+
                                 const m =
                                     genContent.match(
                                         /["']?token["']?\s*[:=]\s*["']([^"']+)["']/
                                     );
 
                                 if (m) {
-                                    token = m[1];
+                                    token =
+                                        m[1];
                                 }
                             }
 
                             if (!token) {
+
                                 const m =
                                     genContent.match(
                                         /[A-Za-z0-9_-]{20,}/
                                     );
 
                                 if (m) {
-                                    token = m[0];
+                                    token =
+                                        m[0];
                                 }
                             }
 
@@ -871,48 +991,62 @@ class HayyaShootProvider : MainAPI() {
                         );
                 }
             })();
-        """.trimIndent()
+            """.trimIndent()
 
         val resolver =
             WebViewResolver(
                 Regex("""hayya-result://"""),
-                userAgent = USER_AGENT,
-                script = script,
-                timeout = 35_000L
+                userAgent =
+                    USER_AGENT,
+                script =
+                    script,
+                timeout =
+                    35_000L
             )
 
         val result =
-            withTimeoutOrNull(40_000L) {
+            withTimeoutOrNull(
+                40_000L
+            ) {
                 resolver.resolveUsingWebView(
                     embed,
                     "$mainUrl/"
                 )
-            } ?: return null
+            }
+                ?: return null
 
         val hit =
             result.first?.url
                 ?: return null
 
         val hitUri =
-            Uri.parse(hit.toString())
+            Uri.parse(
+                hit.toString()
+            )
 
         if (
-            hitUri.scheme != "hayya-result"
+            hitUri.scheme !=
+            "hayya-result"
         ) {
             return null
         }
 
         if (
-            hitUri.host != "done"
+            hitUri.host !=
+            "done"
         ) {
             return null
         }
 
         val encoded =
-            hitUri.getQueryParameter("data")
+            hitUri.getQueryParameter(
+                "data"
+            )
                 ?: return null
 
-        return parseWasmResult(encoded)
+        return parseWasmResult(
+            encoded
+        )
     }
 
     private fun parseWasmResult(
@@ -925,7 +1059,9 @@ class HayyaShootProvider : MainAPI() {
                 JSONObject(encoded)
 
             val array =
-                json.optJSONArray("streams")
+                json.optJSONArray(
+                    "streams"
+                )
 
             val streams =
                 if (array != null) {
@@ -954,8 +1090,10 @@ class HayyaShootProvider : MainAPI() {
                 }
 
             WasmResult(
-                streams = streams,
-                subtitles = emptyList()
+                streams =
+                    streams,
+                subtitles =
+                    emptyList()
             )
 
         } catch (_: Exception) {
@@ -984,7 +1122,9 @@ class HayyaShootProvider : MainAPI() {
                     )
                 )
 
-            JSONObject(response.text)
+            JSONObject(
+                response.text
+            )
 
         } catch (_: Exception) {
             null
@@ -1021,9 +1161,12 @@ class HayyaShootProvider : MainAPI() {
                 var token =
                     patterns
                         .asSequence()
-                        .mapNotNull { regex ->
+                        .mapNotNull {
+                            regex ->
                             regex
-                                .find(htmlContent)
+                                .find(
+                                    htmlContent
+                                )
                                 ?.groupValues
                                 ?.getOrNull(1)
                         }
@@ -1038,38 +1181,53 @@ class HayyaShootProvider : MainAPI() {
                             """<script[^>]+src=["']([^"']+)["']""",
                             RegexOption.IGNORE_CASE
                         )
-                            .findAll(htmlContent)
+                            .findAll(
+                                htmlContent
+                            )
                             .map {
                                 it.groupValues[1]
                             }
                             .toList()
 
-                    for (src in scripts) {
+                    for (
+                        src in scripts
+                    ) {
 
                         val full =
                             if (
-                                src.startsWith("http")
+                                src.startsWith(
+                                    "http"
+                                )
                             ) {
                                 src
                             } else {
-                                URI(mainUrl)
-                                    .resolve(src)
+                                URI(
+                                    mainUrl
+                                )
+                                    .resolve(
+                                        src
+                                    )
                                     .toString()
                             }
 
                         val scriptContent =
-                            app.get(full).text
+                            app.get(
+                                full
+                            ).text
 
                         token =
                             patterns
                                 .asSequence()
-                                .mapNotNull { regex ->
+                                .mapNotNull {
+                                    regex ->
                                     regex
                                         .find(
                                             scriptContent
                                         )
                                         ?.groupValues
-                                        ?.getOrNull(1)
+                                        ?.getOrNull(
+                                            1
+                                        )
                                 }
                                 .firstOrNull()
 
@@ -1081,7 +1239,8 @@ class HayyaShootProvider : MainAPI() {
                     }
                 }
 
-                tmdbToken = token
+                tmdbToken =
+                    token
 
                 token
 
@@ -1103,8 +1262,8 @@ class HayyaShootProvider : MainAPI() {
 
         private const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 16) " +
-            "AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) " +
-            "Chrome/140.0 Mobile Safari/537.36"
+                "AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) " +
+                "Chrome/140.0 Mobile Safari/537.36"
     }
 }
