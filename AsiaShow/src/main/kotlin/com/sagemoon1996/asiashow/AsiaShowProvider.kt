@@ -731,6 +731,18 @@ class AsiaShowProvider : MainAPI() {
 
             try {
 
+                val isOkRu =
+                    serverUrl.contains(
+                        "ok.ru/",
+                        ignoreCase = true
+                    )
+
+                if (isOkRu) {
+                    println(
+                        "ASIA_OKRU_S1_URL=$serverUrl"
+                    )
+                }
+
                 val loaded =
                     loadExtractor(
                         url = serverUrl,
@@ -738,15 +750,43 @@ class AsiaShowProvider : MainAPI() {
                         subtitleCallback = subtitleCallback
                     ) { link ->
 
+                        if (isOkRu) {
+                            println(
+                                "ASIA_OKRU_S2_CALLBACK=" +
+                                    "name=${link.name};" +
+                                    "url=${link.url};" +
+                                    "type=${link.type};" +
+                                    "referer=${link.referer}"
+                            )
+                        }
+
                         foundLinks = true
                         callback(link)
                     }
+
+                if (isOkRu) {
+                    println(
+                        "ASIA_OKRU_S3_LOADEXTRACTOR=$loaded"
+                    )
+                }
 
                 if (loaded) {
                     foundLinks = true
                 }
 
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+
+                if (
+                    serverUrl.contains(
+                        "ok.ru/",
+                        ignoreCase = true
+                    )
+                ) {
+                    println(
+                        "ASIA_OKRU_ERROR=" +
+                            "${e::class.simpleName}: ${e.message}"
+                    )
+                }
             }
         }
 
