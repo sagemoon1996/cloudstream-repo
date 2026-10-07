@@ -1,7 +1,6 @@
 package com.sagemoon1996.hayyashoot
 
 import android.net.Uri
-import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.*
@@ -110,7 +109,10 @@ class HayyaShootProvider : MainAPI() {
 
         val data = tmdbRequest<TmdbSearch>(
             "/discover/$type?sort_by=popularity.desc&page=$page"
-        ) ?: return newHomePageResponse(request.name, emptyList())
+        ) ?: return newHomePageResponse(
+            request.name,
+            emptyList()
+        )
 
         val list = data.results.mapNotNull {
             makeSearch(it, isMovie)
@@ -151,7 +153,6 @@ class HayyaShootProvider : MainAPI() {
         movie: Boolean
     ): SearchResponse? {
 
-        // FIX: apply ?: to the whole conditional expression
         val title = (if (movie) item.title else item.name)
             ?: return null
 
@@ -165,7 +166,7 @@ class HayyaShootProvider : MainAPI() {
                 "$mainUrl/movies/?tv=${item.id}",
                 TvType.Movie
             ) {
-                this.posterUrl = poster
+                posterUrl = poster
             }
         } else {
             newTvSeriesSearchResponse(
@@ -173,7 +174,7 @@ class HayyaShootProvider : MainAPI() {
                 "$mainUrl/series/?tv=${item.id}",
                 TvType.TvSeries
             ) {
-                this.posterUrl = poster
+                posterUrl = poster
             }
         }
     }
@@ -183,9 +184,7 @@ class HayyaShootProvider : MainAPI() {
         val id = uri.getQueryParameter("tv")?.toIntOrNull()
             ?: return null
 
-        val isMovie = url.contains("/movies/")
-
-        return if (isMovie) {
+        return if (url.contains("/movies/")) {
             loadMovie(id)
         } else {
             loadTv(id)
@@ -211,14 +210,18 @@ class HayyaShootProvider : MainAPI() {
             posterUrl = movie.poster_path?.let {
                 "https://image.tmdb.org/t/p/w500$it"
             }
+
             backgroundPosterUrl = movie.backdrop_path?.let {
                 "https://image.tmdb.org/t/p/original$it"
             }
+
             plot = movie.overview
+
             year = movie.release_date
                 ?.takeIf { it.length >= 4 }
                 ?.substring(0, 4)
                 ?.toIntOrNull()
+
             rating = movie.vote_average?.times(10)
         }
     }
@@ -242,18 +245,19 @@ class HayyaShootProvider : MainAPI() {
 
                     details?.episodes.orEmpty().map { episode ->
                         newEpisode(
-                            "$mainUrl/series/?tv=$id&s=${season.season_number}&e=${episode.episode_number}",
-                            {
-                                name = episode.name
-                                episodeNumber = episode.episode_number
-                                seasonNumber = season.season_number
-                                description = episode.overview
-                                posterUrl = episode.still_path?.let {
-                                    "https://image.tmdb.org/t/p/w500$it"
-                                }
-                                airDate = episode.air_date
+                            "$mainUrl/series/?tv=$id&s=${season.season_number}&e=${episode.episode_number}"
+                        ) {
+                            name = episode.name
+                            episodeNumber = episode.episode_number
+                            seasonNumber = season.season_number
+                            description = episode.overview
+
+                            posterUrl = episode.still_path?.let {
+                                "https://image.tmdb.org/t/p/w500$it"
                             }
-                        )
+
+                            airDate = episode.air_date
+                        }
                     }
                 }
             }.awaitAll().flatten()
@@ -268,14 +272,18 @@ class HayyaShootProvider : MainAPI() {
             posterUrl = tv.poster_path?.let {
                 "https://image.tmdb.org/t/p/w500$it"
             }
+
             backgroundPosterUrl = tv.backdrop_path?.let {
                 "https://image.tmdb.org/t/p/original$it"
             }
+
             plot = tv.overview
+
             year = tv.first_air_date
                 ?.takeIf { it.length >= 4 }
                 ?.substring(0, 4)
                 ?.toIntOrNull()
+
             rating = tv.vote_average?.times(10)
         }
     }
@@ -288,7 +296,7 @@ class HayyaShootProvider : MainAPI() {
     ): Boolean {
 
         val item = try {
-            parseJson<HayyaData>(data)
+            parseHayyaData(data)
         } catch (_: Exception) {
             return false
         }
@@ -307,18 +315,20 @@ class HayyaShootProvider : MainAPI() {
         result.subtitles.forEach(subtitleCallback)
 
         result.streams.forEachIndexed { index, stream ->
-            val url = stream.trim()
+            val streamUrl = stream.trim()
 
-            if (url.isBlank()) return@forEachIndexed
+            if (streamUrl.isBlank()) {
+                return@forEachIndexed
+            }
 
             callback(
                 ExtractorLink(
                     source = name,
                     name = "VidSrc ${index + 1}",
-                    url = url,
+                    url = streamUrl,
                     referer = embed,
                     quality = Qualities.Unknown.value,
-                    isM3u8 = url.contains(".m3u8", true)
+                    isM3u8 = streamUrl.contains(".m3u8", true)
                 )
             )
         }
@@ -326,12 +336,36 @@ class HayyaShootProvider : MainAPI() {
         return result.streams.isNotEmpty()
     }
 
+    private fun parseHayyaData(data: String): HayyaData {
+        val json = JSONObject(data)
+
+        return HayyaData(
+            id = json.getInt("id"),
+            season = if (json.has("season")) {
+                json.optInt("season")
+            } else {
+                null
+            },
+            episode = if (json.has("episode")) {
+                json.optInt("episode")
+            } else {
+                null
+            },
+            type = json.getString("type")
+        )
+    }
+
     private suspend fun runWasm(embed: String): WasmResult? {
+
         val api = if (embed.contains("/tv/")) {
-            val parts = embed.substringAfter("/embed/tv/")
+
+            val parts = embed
+                .substringAfter("/embed/tv/")
                 .split("/")
 
-            if (parts.size < 3) return null
+            if (parts.size < 3) {
+                return null
+            }
 
             val id = parts[0]
             val season = parts[1]
@@ -343,8 +377,11 @@ class HayyaShootProvider : MainAPI() {
                     "&season=$season" +
                     "&episode=$episode" +
                     "&stream_urls"
+
         } else {
-            val id = embed.substringAfter("/embed/movie/")
+
+            val id = embed
+                .substringAfter("/embed/movie/")
                 .substringBefore("?")
 
             "https://data.vidsrc.sh/api.php" +
@@ -357,6 +394,7 @@ class HayyaShootProvider : MainAPI() {
             (async function() {
                 try {
                     const api = ${JSONObject.quote(api)};
+
                     const response = await fetch(api, {
                         credentials: "omit"
                     });
@@ -398,13 +436,25 @@ class HayyaShootProvider : MainAPI() {
                         credentials: "omit"
                     });
 
-                    const wasmBytes = await wasmResponse.arrayBuffer();
-                    const module = await WebAssembly.instantiate(wasmBytes, {});
+                    const wasmBytes =
+                        await wasmResponse.arrayBuffer();
+
+                    const module =
+                        await WebAssembly.instantiate(
+                            wasmBytes,
+                            {}
+                        );
 
                     const ex = module.instance.exports;
 
-                    if (!ex.alloc || !ex.decrypt || !ex.memory) {
-                        throw new Error("invalid wasm exports");
+                    if (
+                        !ex.alloc ||
+                        !ex.decrypt ||
+                        !ex.memory
+                    ) {
+                        throw new Error(
+                            "invalid wasm exports"
+                        );
                     }
 
                     const ptr = ex.alloc(enc.length);
@@ -415,7 +465,11 @@ class HayyaShootProvider : MainAPI() {
                         enc.length
                     ).set(enc);
 
-                    const outLen = ex.decrypt(ptr, enc.length);
+                    const outLen =
+                        ex.decrypt(
+                            ptr,
+                            enc.length
+                        );
 
                     const output = new Uint8Array(
                         ex.memory.buffer,
@@ -423,7 +477,8 @@ class HayyaShootProvider : MainAPI() {
                         outLen
                     );
 
-                    const decoded = new TextDecoder().decode(output);
+                    const decoded =
+                        new TextDecoder().decode(output);
 
                     const streams = decoded
                         .split("\\n")
@@ -444,12 +499,15 @@ class HayyaShootProvider : MainAPI() {
                                 }
                             );
 
-                            const genText = await gen.text();
+                            const genContent =
+                                await gen.text();
 
                             let token = null;
 
                             try {
-                                const gj = JSON.parse(genText);
+                                const gj =
+                                    JSON.parse(genContent);
+
                                 token =
                                     gj.token ||
                                     gj.data?.token ||
@@ -457,25 +515,35 @@ class HayyaShootProvider : MainAPI() {
                             } catch (_) {}
 
                             if (!token) {
-                                const m = genText.match(
-                                    /["']?token["']?\\s*[:=]\\s*["']([^"']+)["']/
-                                );
+                                const m =
+                                    genContent.match(
+                                        /["']?token["']?\s*[:=]\s*["']([^"']+)["']/
+                                    );
 
-                                if (m) token = m[1];
+                                if (m) {
+                                    token = m[1];
+                                }
                             }
 
                             if (!token) {
-                                const m = genText.match(
-                                    /[A-Za-z0-9_-]{20,}/
-                                );
+                                const m =
+                                    genContent.match(
+                                        /[A-Za-z0-9_-]{20,}/
+                                    );
 
-                                if (m) token = m[0];
+                                if (m) {
+                                    token = m[0];
+                                }
                             }
 
                             let finalUrl = stream;
 
                             if (token) {
-                                if (finalUrl.includes("__TOKEN__")) {
+                                if (
+                                    finalUrl.includes(
+                                        "__TOKEN__"
+                                    )
+                                ) {
                                     finalUrl =
                                         finalUrl.replace(
                                             "__TOKEN__",
@@ -483,13 +551,18 @@ class HayyaShootProvider : MainAPI() {
                                         );
                                 } else {
                                     finalUrl +=
-                                        (finalUrl.includes("?") ? "&" : "?") +
+                                        (
+                                            finalUrl.includes("?")
+                                                ? "&"
+                                                : "?"
+                                        ) +
                                         "token=" +
                                         encodeURIComponent(token);
                                 }
                             }
 
                             finalStreams.push(finalUrl);
+
                         } catch (_) {}
                     }
 
@@ -503,10 +576,15 @@ class HayyaShootProvider : MainAPI() {
                         );
 
                 } catch (e) {
+
                     location.href =
                         "hayya-result://error?msg=" +
                         encodeURIComponent(
-                            String(e && e.message ? e.message : e)
+                            String(
+                                e && e.message
+                                    ? e.message
+                                    : e
+                            )
                         );
                 }
             })();
@@ -526,14 +604,43 @@ class HayyaShootProvider : MainAPI() {
             )
         } ?: return null
 
-        val hit = result.first?.url ?: return null
-
-        val uri = Uri.parse(hit)
-        val encoded = uri.getQueryParameter("data")
+        val hit = result.first?.url
             ?: return null
 
+        // WebViewResolver returns HttpUrl here
+        val hitUri = Uri.parse(hit.toString())
+
+        val encoded = hitUri.getQueryParameter("data")
+            ?: return null
+
+        return parseWasmResult(encoded)
+    }
+
+    private fun parseWasmResult(encoded: String): WasmResult? {
         return try {
-            parseJson<WasmResult>(encoded)
+            val json = JSONObject(encoded)
+
+            val streamsArray =
+                json.optJSONArray("streams")
+
+            val streams = if (streamsArray != null) {
+                (0 until streamsArray.length())
+                    .mapNotNull {
+                        streamsArray.optString(it)
+                            .takeIf { value ->
+                                value.isNotBlank()
+                            }
+                    }
+            } else {
+                emptyList()
+            }
+
+            // Subtitles are currently not returned
+            // by the extraction script.
+            WasmResult(
+                streams = streams,
+                subtitles = emptyList()
+            )
         } catch (_: Exception) {
             null
         }
@@ -542,7 +649,9 @@ class HayyaShootProvider : MainAPI() {
     private suspend inline fun <reified T> tmdbRequest(
         path: String
     ): T? {
-        val token = getTmdbToken() ?: return null
+
+        val token = getTmdbToken()
+            ?: return null
 
         return try {
             app.get(
@@ -558,11 +667,17 @@ class HayyaShootProvider : MainAPI() {
     }
 
     private suspend fun getTmdbToken(): String? {
+
         tokenMutex.withLock {
-            tmdbToken?.let { return it }
+
+            tmdbToken?.let {
+                return it
+            }
 
             return try {
-                val html = app.get("$mainUrl/movies/").text()
+
+                val htmlContent =
+                    app.get("$mainUrl/movies/").text()
 
                 val patterns = listOf(
                     Regex(
@@ -577,39 +692,57 @@ class HayyaShootProvider : MainAPI() {
 
                 var token = patterns
                     .asSequence()
-                    .mapNotNull { it.find(html)?.groupValues?.getOrNull(1) }
+                    .mapNotNull {
+                        it.find(
+                            htmlContent
+                        )?.groupValues?.getOrNull(1)
+                    }
                     .firstOrNull()
 
                 if (token.isNullOrBlank()) {
+
                     val scripts = Regex(
                         """<script[^>]+src=["']([^"']+)["']""",
                         RegexOption.IGNORE_CASE
-                    ).findAll(html)
-                        .map { it.groupValues[1] }
+                    )
+                        .findAll(htmlContent)
+                        .map {
+                            it.groupValues[1]
+                        }
                         .toList()
 
                     for (src in scripts) {
-                        val full = if (src.startsWith("http")) {
-                            src
-                        } else {
-                            URI(mainUrl).resolve(src).toString()
-                        }
 
-                        val text = app.get(full).text()
+                        val full =
+                            if (src.startsWith("http")) {
+                                src
+                            } else {
+                                URI(mainUrl)
+                                    .resolve(src)
+                                    .toString()
+                            }
+
+                        val scriptContent =
+                            app.get(full).text()
 
                         token = patterns
                             .asSequence()
                             .mapNotNull {
-                                it.find(text)?.groupValues?.getOrNull(1)
+                                it.find(
+                                    scriptContent
+                                )?.groupValues?.getOrNull(1)
                             }
                             .firstOrNull()
 
-                        if (!token.isNullOrBlank()) break
+                        if (!token.isNullOrBlank()) {
+                            break
+                        }
                     }
                 }
 
                 tmdbToken = token
                 token
+
             } catch (_: Exception) {
                 null
             }
@@ -621,7 +754,9 @@ class HayyaShootProvider : MainAPI() {
 
     companion object {
         private const val USER_AGENT =
-            "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 " +
-                    "(KHTML, like Gecko) Chrome/140.0 Mobile Safari/537.36"
+            "Mozilla/5.0 (Linux; Android 16) " +
+                    "AppleWebKit/537.36 " +
+                    "(KHTML, like Gecko) " +
+                    "Chrome/140.0 Mobile Safari/537.36"
     }
 }
