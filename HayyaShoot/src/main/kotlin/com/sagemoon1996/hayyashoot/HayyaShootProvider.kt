@@ -390,7 +390,7 @@ class HayyaShootProvider : MainAPI() {
 
     // Shown in the first DEBUG entry: if you do not see it, the app is still
     // running an OLD build of the plugin (bump `version` in build.gradle.kts).
-    private val buildTag = "build-21"
+    private val buildTag = "build-22"
 
     private class StepFailure(val step: String, val detail: String) :
         Exception("$step $detail")
@@ -465,17 +465,24 @@ class HayyaShootProvider : MainAPI() {
     // .m3u8 request the page's own player makes (null if none shows up).
     // Replays the player's own protocol inside the player page and validates the
     // candidate playlist URLs it produces. Returns (playlistUrl, referer) or null.
-    private suspend fun extractViaWasm(playerUrl: String, referer: String): Pair<String, String>? {
-        trace("W1 wasm-extract in webview (30s)")
+    private suspend fun extractViaWasm(
+        playerUrl: String,
+        referer: String,
+        apiUrl: String
+    ): Pair<String, String>? {
+        // A 404 page of the player's own origin: same origin as the real player (CORS
+        // is allowed for it) but WITHOUT disable-devtool.js, which kills the real page.
+        val neutralUrl = originOf(playerUrl).trimEnd('/') + "/__hayya"
+        trace("W1 wasm-extract on ${neutralUrl.substringAfter("://")} (25s) api=${apiUrl.substringAfter("://").take(110)}")
         val hitUrl: String? = try {
-            withTimeoutOrNull(35_000L) {
+            withTimeoutOrNull(30_000L) {
                 val resolver = WebViewResolver(
                     Regex("""hayya\.invalid/r\?d="""),
                     userAgent = MOBILE_CHROME_UA,
-                    script = WASM_SCRIPT,
-                    timeout = 30_000L
+                    script = WASM_SCRIPT.replace("__API_URL__", apiUrl),
+                    timeout = 25_000L
                 )
-                val (hit, _) = resolver.resolveUsingWebView(playerUrl, referer)
+                val (hit, _) = resolver.resolveUsingWebView(neutralUrl, referer)
                 hit?.url?.toString()
             }
         } catch (e: Exception) {
@@ -623,7 +630,7 @@ class HayyaShootProvider : MainAPI() {
         )
 
         var found: String? = null
-        for (suffix in listOf("&stream_url", "")) {
+        for (suffix in listOf("&stream_urls", "")) {
             try {
                 val res = withTimeoutOrNull(8_000L) { app.get(base + suffix, headers = headers) }
                 if (res == null) {
@@ -863,7 +870,21 @@ class HayyaShootProvider : MainAPI() {
 
             // W1) replay the player's own protocol (api -> wasm decrypt -> generate.php)
             if (playerUrl != null) {
-                val w = extractViaWasm(playerUrl, originOf(embedPageUrl))
+                val eq = Uri.parse(embedUrl)
+                val tmdb = eq.getQueryParameter("tmdb")
+                val isTvEmbed = eq.path?.contains("/tv") == true
+                val apiUrl = if (tmdb != null) {
+                    buildString {
+                        append("https://data.vidsrc.sh/api.php?type=").append(if (isTvEmbed) "tv" else "movie")
+                        append("&tmdb=").append(tmdb)
+                        if (isTvEmbed) {
+                            append("&season=").append(eq.getQueryParameter("season") ?: "1")
+                            append("&episode=").append(eq.getQueryParameter("episode") ?: "1")
+                        }
+                        append("&stream_urls")
+                    }
+                } else null
+                val w = if (apiUrl != null) extractViaWasm(playerUrl, originOf(embedPageUrl), apiUrl) else null
                 if (w != null) {
                     return VidSrcResult(listOf(w.first), emptyList(), w.second)
                 }
@@ -926,7 +947,11 @@ class HayyaShootProvider : MainAPI() {
             withTimeoutOrNull(6_000L) {
                 val res = app.get(
                     url,
-                    headers = mapOf("User-Agent" to ua, "Referer" to referer)
+                    headers = mapOf(
+                        "User-Agent" to ua,
+                        "Referer" to referer,
+                        "Origin" to referer.trimEnd('/')
+                    )
                 )
                 val ok = res.code in 200..299 && res.text.trimStart().startsWith("#EXTM3U")
                 ok to "HTTP ${res.code} len=${res.text.length} ${if (ok) "PLAYLIST" else snippet(res.text)}"
@@ -1268,17 +1293,21 @@ class HayyaShootProvider : MainAPI() {
             "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
-        // Runs inside the cloudorchestra player page (same origin as the real player).
-        // Replays the player's own protocol, found in vsdec.js:
-        //   api.php?...&stream_urls=1 -> data.stream_urls (array, or base64 ChaCha20 string)
-        //   encrypted -> vs.wasm_url / vs.wasm -> WebAssembly {alloc, decrypt, memory}
-        //   alloc(n) -> write bytes -> decrypt(ptr, n) = outLen -> read at ptr+12 -> UTF-8 urls
-        //   then {host}/generate.php -> token -> final playlist URL
+        // Replays the player's own protocol (vsdec.js + player.js, read from the real
+        // player) inside a NEUTRAL page of the player's origin. The real player page
+        // cannot be used: disable-devtool.js kills it (location.replace("about:blank"))
+        // as soon as it believes devtools/WebView is open.
+        //   GET data.vidsrc.sh/api.php?type=..&tmdb=..[&season=..&episode=..]&stream_urls
+        //   data.stream_urls = array, or base64 (nonce||ChaCha20) when j.vs is present
+        //   WASM (vs.wasm_url / vs.wasm): alloc(n), write, decrypt(ptr, n) = outLen,
+        //   plaintext at ptr+12 = URLs separated by newlines
+        //   token: GET {streamHost}/generate.php -> parseToken; applyToken(url, token)
         // The result leaves the WebView as a request to https://hayya.invalid/r?d=<json>.
         const val WASM_SCRIPT = """
 (function () {
   if (window.__hayyaWasm) return;
   window.__hayyaWasm = 1;
+  var API = "__API_URL__";
   var log = [];
   function L(s) { try { log.push(String(s).slice(0, 320)); } catch (e) {} }
   function send(o) {
@@ -1289,79 +1318,82 @@ class HayyaShootProvider : MainAPI() {
     setTimeout(function () { try { location.href = u; } catch (e) {} }, 400);
   }
   function b64(s) {
-    var bin = atob(s.replace(/-/g, "+").replace(/_/g, "/"));
-    var out = new Uint8Array(bin.length);
+    var bin = atob(s), out = new Uint8Array(bin.length);
     for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
     return out;
   }
+  function parseToken(t) {
+    t = (t || "").trim();
+    try {
+      var j = JSON.parse(t);
+      if (typeof j === "string") return j;
+      if (j && typeof j === "object") return j.token || j.data || j.string || j.result || "";
+    } catch (e) {}
+    return t;
+  }
   (async function () {
     try {
-      var api = (window.CFG && window.CFG.metaApi) ? window.CFG.metaApi : null;
-      L("CFG.metaApi=" + api);
-      if (!api) return send({ ok: false });
-      var variants = ["&stream_urls=1", "&stream_urls=true", "&stream_urls"];
-      var j = null;
-      for (var i = 0; i < variants.length; i++) {
-        var r = await fetch(api + variants[i]);
-        var raw = await r.text();
-        L("api" + variants[i] + " HTTP " + r.status + " len=" + raw.length + " " + raw.slice(0, 200));
-        try { j = JSON.parse(raw); } catch (e) { j = null; }
-        if (j && j.data && j.data.stream_urls) break;
-      }
-      if (!j || !j.data || !j.data.stream_urls) return send({ ok: false });
-      var su = j.data.stream_urls;
-      var vs = j.vs || {};
+      L("page=" + location.href.slice(0, 80));
+      var r = await fetch(API, { credentials: "omit", headers: { accept: "application/json" } });
+      var raw = await r.text();
+      L("api HTTP " + r.status + " len=" + raw.length + " " + raw.slice(0, 240));
+      var j;
+      try { j = JSON.parse(raw); } catch (e) { L("api not json"); return send({ ok: false }); }
+      var su = (j && j.data) ? j.data.stream_urls : null;
+      var vs = (j && j.vs) ? j.vs : {};
       L("stream_urls=" + (Array.isArray(su) ? "array" : typeof su) + " vs keys=" + Object.keys(vs).join(","));
       var urls = [];
       if (Array.isArray(su)) {
-        urls = su.map(function (x) { return typeof x === "string" ? x : (x.url || x.file || JSON.stringify(x)); });
-      } else {
-        var enc = b64(su);
-        var wasmBytes;
+        urls = su.filter(Boolean);
+      } else if (typeof su === "string") {
+        var mod;
         if (vs.wasm_url) {
-          var wr = await fetch(vs.wasm_url);
-          wasmBytes = await wr.arrayBuffer();
-          L("wasm HTTP " + wr.status + " bytes=" + wasmBytes.byteLength);
+          var wr = await fetch(vs.wasm_url, { credentials: "omit" });
+          var buf = await wr.arrayBuffer();
+          L("wasm HTTP " + wr.status + " bytes=" + buf.byteLength);
+          mod = await WebAssembly.compile(buf);
         } else if (vs.wasm) {
-          wasmBytes = b64(vs.wasm).buffer;
+          mod = await WebAssembly.compile(b64(vs.wasm));
         } else {
           L("no wasm in vs");
           return send({ ok: false });
         }
-        var inst = await WebAssembly.instantiate(wasmBytes, {});
-        var ex = inst.instance.exports;
+        var inst = await WebAssembly.instantiate(mod, {});
+        var ex = inst.exports;
         L("wasm exports=" + Object.keys(ex).join(","));
+        var enc = b64(su);
         var ptr = ex.alloc(enc.length);
         new Uint8Array(ex.memory.buffer, ptr, enc.length).set(enc);
         var outLen = ex.decrypt(ptr, enc.length);
-        L("ptr=" + ptr + " outLen=" + outLen);
-        var text = new TextDecoder().decode(new Uint8Array(ex.memory.buffer, ptr + 12, outLen));
-        L("decoded=" + text.slice(0, 260));
-        urls = text.match(/https?:\/\/[^"'\s\\,\]\[]+/g) || [];
+        var txt = new TextDecoder().decode(new Uint8Array(ex.memory.buffer, ptr + 12, outLen));
+        L("ptr=" + ptr + " outLen=" + outLen + " decoded=" + txt.slice(0, 300));
+        urls = txt.split("\n").filter(function (x) { return x; });
+      } else {
+        return send({ ok: false });
       }
-      urls = urls.filter(function (u, i2) { return urls.indexOf(u) === i2; }).slice(0, 4);
-      L("urls=" + urls.length);
+      urls = urls.map(function (x) { return String(x).trim(); })
+        .filter(function (x, i, arr) { return x && arr.indexOf(x) === i; })
+        .slice(0, 4);
+      L("urls=" + urls.length + " first=" + (urls[0] || "").slice(0, 160));
       var cands = [];
       for (var k = 0; k < urls.length; k++) {
         var u0 = urls[k];
         var origin = "";
-        try { origin = new URL(u0).origin; } catch (e) {}
+        try { origin = new URL(u0.split("__TOKEN__").join("x")).origin; } catch (e) {}
+        var token = "";
         if (origin) {
           try {
-            var g = await fetch(origin + "/generate.php");
+            var g = await fetch(origin + "/generate.php", { credentials: "omit" });
             var gt = await g.text();
-            L("generate " + origin + " HTTP " + g.status + " " + gt.slice(0, 220));
-            var token = null;
-            try {
-              var gj = JSON.parse(gt);
-              token = (typeof gj === "string") ? gj : (gj.token || gj.t || (gj.data && gj.data.token) || null);
-            } catch (e) {
-              if (gt.length < 400 && gt.indexOf("<") < 0) token = gt.trim();
-            }
-            if (token) cands.push(u0 + (u0.indexOf("?") >= 0 ? "&" : "?") + "token=" + encodeURIComponent(token));
+            L("generate " + origin + " HTTP " + g.status + " " + gt.slice(0, 200));
+            if (g.ok) token = parseToken(gt);
           } catch (e) { L("generate error " + e); }
         }
-        cands.push(u0);
+        if (token) {
+          if (u0.indexOf("__TOKEN__") > -1) cands.push(u0.split("__TOKEN__").join(token));
+          else cands.push(u0 + (u0.indexOf("?") > -1 ? "&" : "?") + "token=" + token);
+        }
+        if (u0.indexOf("__TOKEN__") < 0) cands.push(u0);
       }
       send({ ok: true, urls: urls, cands: cands });
     } catch (e) {
