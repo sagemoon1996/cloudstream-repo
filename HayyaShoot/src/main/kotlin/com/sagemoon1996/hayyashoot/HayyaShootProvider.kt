@@ -181,6 +181,7 @@ class HayyaShootProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val uri = Uri.parse(url)
+
         val id = uri.getQueryParameter("tv")?.toIntOrNull()
             ?: return null
 
@@ -198,14 +199,16 @@ class HayyaShootProvider : MainAPI() {
 
         val title = movie.title ?: return null
 
+        val data = JSONObject()
+            .put("id", id)
+            .put("type", "movie")
+            .toString()
+
         return newMovieLoadResponse(
             title,
             "$mainUrl/movies/?tv=$id",
             TvType.Movie,
-            HayyaData(
-                id = id,
-                type = "movie"
-            ).toJson()
+            data
         ) {
             posterUrl = movie.poster_path?.let {
                 "https://image.tmdb.org/t/p/w500$it"
@@ -222,7 +225,7 @@ class HayyaShootProvider : MainAPI() {
                 ?.substring(0, 4)
                 ?.toIntOrNull()
 
-            rating = movie.vote_average?.times(10)
+            score = movie.vote_average
         }
     }
 
@@ -248,7 +251,7 @@ class HayyaShootProvider : MainAPI() {
                             "$mainUrl/series/?tv=$id&s=${season.season_number}&e=${episode.episode_number}"
                         ) {
                             name = episode.name
-                            episodeNumber = episode.episode_number
+                            number = episode.episode_number
                             seasonNumber = season.season_number
                             description = episode.overview
 
@@ -284,7 +287,7 @@ class HayyaShootProvider : MainAPI() {
                 ?.substring(0, 4)
                 ?.toIntOrNull()
 
-            rating = tv.vote_average?.times(10)
+            score = tv.vote_average
         }
     }
 
@@ -310,7 +313,8 @@ class HayyaShootProvider : MainAPI() {
             "https://vidsrc.sh/embed/tv/${item.id}/$season/$episode"
         }
 
-        val result = runWasm(embed) ?: return false
+        val result = runWasm(embed)
+            ?: return false
 
         result.subtitles.forEach(subtitleCallback)
 
@@ -561,7 +565,7 @@ class HayyaShootProvider : MainAPI() {
                                 }
                             }
 
-                            finalStreams.push(finalUrl);
+                            finalStreams.push(finalUrl)
 
                         } catch (_) {}
                     }
@@ -607,7 +611,6 @@ class HayyaShootProvider : MainAPI() {
         val hit = result.first?.url
             ?: return null
 
-        // WebViewResolver returns HttpUrl here
         val hitUri = Uri.parse(hit.toString())
 
         val encoded = hitUri.getQueryParameter("data")
@@ -616,27 +619,29 @@ class HayyaShootProvider : MainAPI() {
         return parseWasmResult(encoded)
     }
 
-    private fun parseWasmResult(encoded: String): WasmResult? {
+    private fun parseWasmResult(
+        encoded: String
+    ): WasmResult? {
         return try {
             val json = JSONObject(encoded)
 
             val streamsArray =
                 json.optJSONArray("streams")
 
-            val streams = if (streamsArray != null) {
-                (0 until streamsArray.length())
-                    .mapNotNull {
-                        streamsArray.optString(it)
-                            .takeIf { value ->
-                                value.isNotBlank()
-                            }
-                    }
-            } else {
-                emptyList()
-            }
+            val streams =
+                if (streamsArray != null) {
+                    (0 until streamsArray.length())
+                        .mapNotNull {
+                            streamsArray
+                                .optString(it)
+                                .takeIf { value ->
+                                    value.isNotBlank()
+                                }
+                        }
+                } else {
+                    emptyList()
+                }
 
-            // Subtitles are currently not returned
-            // by the extraction script.
             WasmResult(
                 streams = streams,
                 subtitles = emptyList()
