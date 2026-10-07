@@ -402,7 +402,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-23"
+    private val buildTag = "build-24"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -657,23 +657,32 @@ class HayyaShootProvider : MainAPI() {
         val referers = listOf(PLAYER_ORIGIN, "https://vidsrc.sh/", "$mainUrl/")
         var emitted = 0
         val unverified = ArrayList<Pair<String, String>>()
+        // generate.php answers "429 Too Many Requests" when it is called several times
+        // in a row, and all the URLs share one host: ask once per host, reuse the token.
+        val tokens = HashMap<String, String>()
 
         for ((i, u0) in urls.take(4).withIndex()) {
             val origin = originOf(u0.replace("__TOKEN__", "x"))
 
-            val gen = withTimeoutOrNull(8_000L) {
-                try {
-                    app.get(origin + "generate.php", headers = playerHeaders())
-                } catch (e: Exception) {
-                    if (e is CancellationException) throw e
-                    null
+            var token = tokens[origin] ?: ""
+            if (token.isNotBlank()) {
+                trace("S4 reuse the token of $origin (${token.length})")
+            } else {
+                val gen = withTimeoutOrNull(8_000L) {
+                    try {
+                        app.get(origin + "generate.php", headers = playerHeaders())
+                    } catch (e: Exception) {
+                        if (e is CancellationException) throw e
+                        null
+                    }
                 }
+                token = if (gen != null && gen.code in 200..299) parseToken(gen.text) else ""
+                trace(
+                    "S4 generate ${origin}generate.php HTTP ${gen?.code} token=${token.take(20)}(${token.length})" +
+                        if (token.isBlank()) " ${snippet(gen?.text ?: "")}" else ""
+                )
+                if (token.isNotBlank()) tokens[origin] = token
             }
-            val token = if (gen != null && gen.code in 200..299) parseToken(gen.text) else ""
-            trace(
-                "S4 generate ${origin}generate.php HTTP ${gen?.code} token=${token.take(20)}(${token.length})" +
-                    if (token.isBlank()) " ${snippet(gen?.text ?: "")}" else ""
-            )
 
             val candidates = listOfNotNull(
                 if (token.isNotBlank()) applyToken(u0, token) else null,
@@ -695,7 +704,7 @@ class HayyaShootProvider : MainAPI() {
                 if (verified) break
             }
             if (!verified && candidates.isNotEmpty()) unverified.add(candidates.first() to referers.first())
-            if (emitted >= 2) break
+            if (emitted >= 3) break
         }
 
         // Nothing could be verified: still let the player try the best guesses
