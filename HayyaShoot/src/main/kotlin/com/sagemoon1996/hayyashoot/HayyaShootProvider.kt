@@ -402,7 +402,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-24"
+    private val buildTag = "build-25"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -548,7 +548,7 @@ class HayyaShootProvider : MainAPI() {
     }
 
     // GET the stream API, decrypt data.stream_urls when needed, return the URLs.
-    private suspend fun fetchStreamUrls(apiUrl: String): List<String>? {
+    private suspend fun fetchStreamUrls(apiUrl: String, meta: MutableMap<String, String>): List<String>? {
         val res = withTimeoutOrNull(12_000L) { app.get(apiUrl, headers = playerHeaders()) }
         if (res == null) {
             trace("S1 api timeout")
@@ -564,6 +564,7 @@ class HayyaShootProvider : MainAPI() {
             return null
         }
 
+        json.optJSONObject("data")?.let { d -> meta["imdb"] = jstr(d, "imdb_id") }
         val su = json.optJSONObject("data")?.opt("stream_urls")
         val vs = json.optJSONObject("vs")
         trace("S1 stream_urls=${su?.javaClass?.simpleName} vs=${vs?.keys()?.asSequence()?.toList()}")
@@ -623,6 +624,134 @@ class HayyaShootProvider : MainAPI() {
         return url + (if (url.contains("?")) "&" else "?") + "token=" + token
     }
 
+    // ---------------------------------------------------------------
+    // Arabic subtitles: OpenSubtitles legacy REST (the same call the real player makes)
+    //   rest.opensubtitles.org/search/episode-E/imdbid-N/season-S/sublanguageid-ara
+    // The download link is a gzip of the .srt (maybe not UTF-8), but the player of
+    // CloudStream only loads http(s) subtitles as plain text: so the file is
+    // downloaded, gunzipped, converted to UTF-8 and served from 127.0.0.1.
+    // ---------------------------------------------------------------
+
+    private suspend fun downloadPlain(url: String): ByteArray? =
+        withContext(Dispatchers.IO) {
+            try {
+                val safe = if (url.startsWith("http://")) "https://" + url.removePrefix("http://") else url
+                val c = java.net.URL(safe).openConnection() as java.net.HttpURLConnection
+                c.instanceFollowRedirects = true
+                c.connectTimeout = 8_000
+                c.readTimeout = 10_000
+                c.setRequestProperty("User-Agent", "TemporaryUserAgent")
+                c.inputStream.use { it.readBytes() }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                trace("T3 download failed ${e::class.java.simpleName}: ${e.message?.take(80)}")
+                null
+            }
+        }
+
+    // gunzip if needed, drop the BOM, make sure the text is UTF-8
+    private fun toUtf8Srt(raw: ByteArray, declaredEncoding: String): ByteArray {
+        var b = raw
+        if (b.size > 2 && b[0] == 0x1f.toByte() && b[1] == 0x8b.toByte()) {
+            b = java.util.zip.GZIPInputStream(java.io.ByteArrayInputStream(b)).readBytes()
+        }
+        if (b.size >= 3 && b[0] == 0xEF.toByte() && b[1] == 0xBB.toByte() && b[2] == 0xBF.toByte()) {
+            b = b.copyOfRange(3, b.size)
+        }
+        val utf8 = Charsets.UTF_8.newDecoder()
+            .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+        val text = try {
+            utf8.decode(java.nio.ByteBuffer.wrap(b)).toString()
+        } catch (e: Exception) {
+            val cs = try {
+                java.nio.charset.Charset.forName(
+                    if (declaredEncoding.isBlank() || declaredEncoding.equals("utf-8", true)) "windows-1256"
+                    else declaredEncoding
+                )
+            } catch (e2: Exception) {
+                java.nio.charset.Charset.forName("windows-1256")
+            }
+            String(b, cs)
+        }
+        return text.toByteArray(Charsets.UTF_8)
+    }
+
+    private suspend fun addArabicSubtitles(
+        media: HayyaMediaData,
+        imdb: String?,
+        subtitleCallback: (SubtitleFile) -> Unit
+    ) {
+        val digits = imdb.orEmpty().filter { it.isDigit() }
+        if (digits.isBlank()) {
+            trace("T1 no imdb id in the API answer")
+            return
+        }
+        val isTv = media.type == "tv" && media.season != null && media.episode != null
+        val searchUrl = "https://rest.opensubtitles.org/search/" +
+            (if (isTv) "episode-${media.episode}/" else "") +
+            "imdbid-$digits/" +
+            (if (isTv) "season-${media.season}/" else "") +
+            "sublanguageid-ara"
+
+        val res = withTimeoutOrNull(10_000L) {
+            app.get(
+                searchUrl,
+                headers = mapOf(
+                    "User-Agent" to "TemporaryUserAgent",
+                    "X-User-Agent" to "TemporaryUserAgent",
+                    "Accept" to "application/json"
+                )
+            )
+        }
+        if (res == null) {
+            trace("T1 opensubtitles timeout")
+            return
+        }
+        val text = res.text
+        trace("T1 opensubtitles HTTP ${res.code} len=${text.length} ${searchUrl.substringAfter("search/")}")
+        val arr = try {
+            JSONArray(text)
+        } catch (e: Exception) {
+            trace("T1 not json: ${snippet(text)}")
+            return
+        }
+
+        val rows = (0 until arr.length())
+            .mapNotNull { arr.optJSONObject(it) }
+            .filter {
+                jstr(it, "SubLanguageID") == "ara" &&
+                    jstr(it, "SubFormat").equals("srt", true) &&
+                    jstr(it, "SubDownloadLink").isNotBlank()
+            }
+            .sortedByDescending { jstr(it, "SubDownloadsCnt").toIntOrNull() ?: 0 }
+            .take(3)
+        trace("T2 arabic srt found=${rows.size} of ${arr.length()}")
+
+        var n = 0
+        for (row in rows) {
+            val link = jstr(row, "SubDownloadLink")
+            val raw = downloadPlain(link)
+            if (raw == null || raw.isEmpty()) continue
+
+            val srt = try {
+                toUtf8Srt(raw, jstr(row, "SubEncoding"))
+            } catch (e: Exception) {
+                trace("T3 decode failed ${e::class.java.simpleName}")
+                continue
+            }
+
+            val id = (jstr(row, "IDSubtitleFile").ifBlank { "s$n" } + srt.size)
+                .filter { it.isLetterOrDigit() }
+            val served = LocalSubServer.publish(id, srt)
+            trace("T3 ${jstr(row, "SubFileName").take(48)} enc=${jstr(row, "SubEncoding")} bytes=${srt.size} -> ${served ?: "local server failed"}")
+            if (served != null) {
+                subtitleCallback(SubtitleFile(if (n == 0) "Arabic" else "Arabic ${n + 1}", served))
+                n++
+            }
+        }
+    }
+
     private suspend fun emitLink(
         callback: (ExtractorLink) -> Unit,
         url: String,
@@ -648,9 +777,11 @@ class HayyaShootProvider : MainAPI() {
 
     private suspend fun resolveStreams(
         media: HayyaMediaData,
+        subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val urls = fetchStreamUrls(streamApiUrl(media)) ?: return false
+        val meta = HashMap<String, String>()
+        val urls = fetchStreamUrls(streamApiUrl(media), meta) ?: return false
         trace("S3 ${urls.size} stream urls: " + urls.joinToString(" | ") { it.substringAfter("://").take(70) })
         if (urls.isEmpty()) return false
 
@@ -712,6 +843,18 @@ class HayyaShootProvider : MainAPI() {
             unverified.take(2).forEachIndexed { i, (u, ref) ->
                 emitLink(callback, u, ref, "VidSrc unverified ${i + 1}")
                 emitted++
+            }
+        }
+
+        // Arabic subtitles never decide if the video works: any failure is only traced
+        if (emitted > 0) {
+            try {
+                withTimeoutOrNull(20_000L) {
+                    addArabicSubtitles(media, meta["imdb"], subtitleCallback)
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                trace("T0 subtitles exception ${e::class.java.simpleName}: ${e.message?.take(80)}")
             }
         }
         return emitted > 0
@@ -798,7 +941,7 @@ class HayyaShootProvider : MainAPI() {
 
         var found = false
         try {
-            found = withTimeoutOrNull(60_000L) { resolveStreams(media, callback) }
+            found = withTimeoutOrNull(60_000L) { resolveStreams(media, subtitleCallback, callback) }
                 ?: run {
                     trace("timeout 60s")
                     false
@@ -954,4 +1097,79 @@ class HayyaShootProvider : MainAPI() {
         @JsonProperty("overview") val overview: String? = null,
         @JsonProperty("still_path") val stillPath: String? = null
     )
+}
+
+// Serves already converted subtitles (plain UTF-8 .srt) on 127.0.0.1 only.
+private object LocalSubServer {
+    private val store = HashMap<String, ByteArray>()
+
+    @Volatile
+    private var server: java.net.ServerSocket? = null
+
+    @Synchronized
+    fun publish(id: String, bytes: ByteArray): String? {
+        synchronized(store) {
+            if (store.size > 12) store.clear()
+            store[id] = bytes
+        }
+        val ss = server ?: try {
+            java.net.ServerSocket(0, 20, java.net.InetAddress.getByName("127.0.0.1")).also {
+                server = it
+                start(it)
+            }
+        } catch (e: Exception) {
+            return null
+        }
+        return "http://127.0.0.1:${ss.localPort}/s/$id.srt"
+    }
+
+    private fun start(ss: java.net.ServerSocket) {
+        val t = Thread {
+            while (!ss.isClosed) {
+                try {
+                    val c = ss.accept()
+                    val h = Thread { handle(c) }
+                    h.isDaemon = true
+                    h.start()
+                } catch (e: Exception) {
+                    if (ss.isClosed) break
+                }
+            }
+        }
+        t.isDaemon = true
+        t.name = "hayya-sub"
+        t.start()
+    }
+
+    private fun handle(c: java.net.Socket) {
+        try {
+            c.soTimeout = 5_000
+            val reader = c.getInputStream().bufferedReader(Charsets.ISO_8859_1)
+            val first = reader.readLine() ?: return
+            while (true) {
+                val l = reader.readLine() ?: break
+                if (l.isEmpty()) break
+            }
+            val id = Regex("""GET /s/([A-Za-z0-9]+)\.srt""").find(first)?.groupValues?.getOrNull(1)
+            val body = id?.let { synchronized(store) { store[it] } }
+            val out = c.getOutputStream()
+            if (body == null) {
+                out.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
+            } else {
+                out.write(
+                    ("HTTP/1.1 200 OK\r\nContent-Type: application/x-subrip; charset=utf-8\r\n" +
+                        "Content-Length: ${body.size}\r\nAccess-Control-Allow-Origin: *\r\n" +
+                        "Connection: close\r\n\r\n").toByteArray()
+                )
+                out.write(body)
+            }
+            out.flush()
+        } catch (_: Exception) {
+        } finally {
+            try {
+                c.close()
+            } catch (_: Exception) {
+            }
+        }
+    }
 }
