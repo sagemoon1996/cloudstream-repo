@@ -657,6 +657,70 @@ class AsiaShowProvider : MainAPI() {
         }
     }
 
+    private suspend fun loadOkRu(
+        serverUrl: String,
+        episodeUrl: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+
+        return try {
+
+            val document = app.get(
+                serverUrl,
+                referer = episodeUrl
+            ).document
+
+            val options =
+                document
+                    .selectFirst(
+                        "[data-module='OKVideo'][data-options]"
+                    )
+                    ?.attr("data-options")
+                    ?.trim()
+                    ?.takeIf {
+                        it.isNotBlank()
+                    }
+                    ?: return false
+
+            val root =
+                JSONObject(options)
+
+            val flashvars =
+                root.optJSONObject("flashvars")
+                    ?: return false
+
+            val metadata =
+                flashvars.optJSONObject("metadata")
+                    ?: return false
+
+            val hlsUrl =
+                metadata
+                    .optString("hlsManifestUrl")
+                    .trim()
+                    .takeIf {
+                        it.startsWith("http")
+                    }
+                    ?: return false
+
+            callback(
+                newExtractorLink(
+                    source = "OK.ru",
+                    name = "OK.ru",
+                    url = hlsUrl,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    referer = serverUrl
+                    quality = Qualities.Unknown.value
+                }
+            )
+
+            true
+
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -722,26 +786,36 @@ class AsiaShowProvider : MainAPI() {
             }
         }
 
+        val okRuUrls =
+            serverUrls.filter {
+                it.contains(
+                    "ok.ru/",
+                    ignoreCase = true
+                )
+            }
+
+        for (serverUrl in okRuUrls) {
+
+            if (
+                loadOkRu(
+                    serverUrl = serverUrl,
+                    episodeUrl = episodeUrl,
+                    callback = callback
+                )
+            ) {
+                foundLinks = true
+            }
+        }
+
         val otherUrls =
             serverUrls.filterNot {
-                ult4vidUrls.contains(it)
+                ult4vidUrls.contains(it) ||
+                    okRuUrls.contains(it)
             }
 
         for (serverUrl in otherUrls) {
 
             try {
-
-                val isOkRu =
-                    serverUrl.contains(
-                        "ok.ru/",
-                        ignoreCase = true
-                    )
-
-                if (isOkRu) {
-                    println(
-                        "ASIA_OKRU_S1_URL=$serverUrl"
-                    )
-                }
 
                 val loaded =
                     loadExtractor(
@@ -750,43 +824,15 @@ class AsiaShowProvider : MainAPI() {
                         subtitleCallback = subtitleCallback
                     ) { link ->
 
-                        if (isOkRu) {
-                            println(
-                                "ASIA_OKRU_S2_CALLBACK=" +
-                                    "name=${link.name};" +
-                                    "url=${link.url};" +
-                                    "type=${link.type};" +
-                                    "referer=${link.referer}"
-                            )
-                        }
-
                         foundLinks = true
                         callback(link)
                     }
-
-                if (isOkRu) {
-                    println(
-                        "ASIA_OKRU_S3_LOADEXTRACTOR=$loaded"
-                    )
-                }
 
                 if (loaded) {
                     foundLinks = true
                 }
 
-            } catch (e: Exception) {
-
-                if (
-                    serverUrl.contains(
-                        "ok.ru/",
-                        ignoreCase = true
-                    )
-                ) {
-                    println(
-                        "ASIA_OKRU_ERROR=" +
-                            "${e::class.simpleName}: ${e.message}"
-                    )
-                }
+            } catch (_: Exception) {
             }
         }
 
