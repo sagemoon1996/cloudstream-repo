@@ -15,6 +15,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import android.util.Base64
@@ -402,7 +403,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-25"
+    private val buildTag = "build-26"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -547,15 +548,113 @@ class HayyaShootProvider : MainAPI() {
         return jstr(json, "text")
     }
 
-    // GET the stream API, decrypt data.stream_urls when needed, return the URLs.
-    private suspend fun fetchStreamUrls(apiUrl: String, meta: MutableMap<String, String>): List<String>? {
-        val res = withTimeoutOrNull(12_000L) { app.get(apiUrl, headers = playerHeaders()) }
-        if (res == null) {
-            trace("S1 api timeout")
-            return null
+    private fun browserHints(): Map<String, String> = mapOf(
+        "Accept-Language" to "en-US,en;q=0.9",
+        "Sec-Fetch-Dest" to "empty",
+        "Sec-Fetch-Mode" to "cors",
+        "Sec-Fetch-Site" to "cross-site",
+        "sec-ch-ua" to "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"",
+        "sec-ch-ua-mobile" to "?1",
+        "sec-ch-ua-platform" to "\"Android\""
+    )
+
+    // What the browser does before the player asks for the streams:
+    // vidsrc.sh embed -> data-api (/vs_src.php) -> {"src": player url with a fresh vs=}
+    private suspend fun fetchPlayerUrl(media: HayyaMediaData): String? {
+        val isTv = media.type == "tv" && media.season != null && media.episode != null
+        val embed = if (isTv) {
+            "https://vidsrc.sh/embed/tv?tmdb=${media.id}&season=${media.season}&episode=${media.episode}&sub=ar"
+        } else {
+            "https://vidsrc.sh/embed/movie?tmdb=${media.id}&sub=ar"
         }
-        val body = res.text
-        trace("S1 api HTTP ${res.code} len=${body.length}")
+        val er = withTimeoutOrNull(10_000L) {
+            app.get(embed, headers = browserHeaders + mapOf("Referer" to "$mainUrl/"))
+        } ?: return null
+        val pageUrl = er.url.ifBlank { embed }
+        val api = Regex("""data-api=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+            .find(er.text)?.groupValues?.getOrNull(1)?.replace("&amp;", "&")
+            ?: return null
+        val pu = Uri.parse(pageUrl)
+        val origin = "${pu.scheme}://${pu.authority}"
+        val vsUrl = when {
+            api.startsWith("http") -> api
+            api.startsWith("/") -> origin + api
+            else -> "$origin/$api"
+        }
+        val vr = withTimeoutOrNull(10_000L) {
+            app.get(
+                vsUrl,
+                headers = mapOf(
+                    "User-Agent" to MOBILE_CHROME_UA,
+                    "Accept" to "application/json, text/plain, */*",
+                    "Referer" to pageUrl,
+                    "X-Requested-With" to "XMLHttpRequest"
+                )
+            )
+        } ?: return null
+        val src = Regex(""""src"\s*:\s*"([^"]+)"""").find(vr.text)
+            ?.groupValues?.getOrNull(1)?.replace("\\/", "/")
+        trace("S0 vs_src HTTP ${vr.code} src=${src?.substringAfter("://")?.take(60)}")
+        return src
+    }
+
+    // GET data.vidsrc.sh/api.php?...&stream_urls. It answered 200 once, then 403:
+    // try several header identities, then the full browser flow; trace every answer.
+    private suspend fun requestStreamApi(apiUrl: String, media: HayyaMediaData): String? {
+        suspend fun attempt(label: String, url: String, headers: Map<String, String>): String? {
+            val r = withTimeoutOrNull(12_000L) {
+                try {
+                    app.get(url, headers = headers)
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    null
+                }
+            }
+            if (r == null) {
+                trace("S1 [$label] timeout/exception")
+                return null
+            }
+            val t = r.text
+            trace("S1 [$label] HTTP ${r.code} len=${t.length} ${snippet(t)}")
+            return if (r.code in 200..299 && t.trimStart().startsWith("{")) t else null
+        }
+
+        val base = playerHeaders()
+        attempt("origin", apiUrl, base)?.let { return it }
+        delay(500)
+        attempt("hints", apiUrl, base + browserHints())?.let { return it }
+        delay(500)
+        attempt(
+            "vidsrc",
+            apiUrl,
+            base + browserHints() + mapOf("Referer" to "https://vidsrc.sh/", "Origin" to "https://vidsrc.sh")
+        )?.let { return it }
+        delay(500)
+        attempt("no-origin", apiUrl, (base + browserHints()) - "Origin")?.let { return it }
+
+        // Full browser flow: a fresh player url (with its vs= token) as the Referer
+        val playerUrl = fetchPlayerUrl(media)
+        if (playerUrl != null) {
+            val vsToken = Uri.parse(playerUrl).getQueryParameter("vs")
+            attempt("player-url", apiUrl, base + browserHints() + mapOf("Referer" to playerUrl))?.let { return it }
+            if (!vsToken.isNullOrBlank()) {
+                attempt(
+                    "player-url+vs",
+                    apiUrl + "&vs=" + vsToken,
+                    base + browserHints() + mapOf("Referer" to playerUrl)
+                )?.let { return it }
+            }
+        }
+        return null
+    }
+
+    // GET the stream API, decrypt data.stream_urls when needed, return the URLs.
+    private suspend fun fetchStreamUrls(
+        apiUrl: String,
+        media: HayyaMediaData,
+        meta: MutableMap<String, String>
+    ): List<String>? {
+        val body = requestStreamApi(apiUrl, media) ?: return null
 
         val json = try {
             JSONObject(body)
@@ -781,7 +880,7 @@ class HayyaShootProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val meta = HashMap<String, String>()
-        val urls = fetchStreamUrls(streamApiUrl(media), meta) ?: return false
+        val urls = fetchStreamUrls(streamApiUrl(media), media, meta) ?: return false
         trace("S3 ${urls.size} stream urls: " + urls.joinToString(" | ") { it.substringAfter("://").take(70) })
         if (urls.isEmpty()) return false
 
