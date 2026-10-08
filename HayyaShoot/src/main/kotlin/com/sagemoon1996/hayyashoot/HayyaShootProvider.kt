@@ -403,7 +403,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-26"
+    private val buildTag = "build-27"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -598,54 +598,182 @@ class HayyaShootProvider : MainAPI() {
         return src
     }
 
-    // GET data.vidsrc.sh/api.php?...&stream_urls. It answered 200 once, then 403:
-    // try several header identities, then the full browser flow; trace every answer.
-    private suspend fun requestStreamApi(apiUrl: String, media: HayyaMediaData): String? {
-        suspend fun attempt(label: String, url: String, headers: Map<String, String>): String? {
-            val r = withTimeoutOrNull(12_000L) {
-                try {
-                    app.get(url, headers = headers)
-                } catch (e: Exception) {
-                    if (e is CancellationException) throw e
-                    null
-                }
+    private fun compact(t: String) = t.replace(Regex("""\s+"""), " ")
+
+    // Prints the text around each keyword (the player's own code tells how the API is called)
+    private fun traceContexts(
+        label: String,
+        text: String,
+        kws: List<String>,
+        before: Int = 100,
+        after: Int = 260,
+        maxHits: Int = 3
+    ) {
+        val t = text.replace("\\/", "/")
+        for (kw in kws) {
+            var from = 0
+            var hits = 0
+            while (hits < maxHits) {
+                val i = t.indexOf(kw, from, ignoreCase = true)
+                if (i < 0) break
+                val a = (i - before).coerceAtLeast(0)
+                val b = (i + after).coerceAtMost(t.length)
+                trace("$label $kw@$i: ${compact(t.substring(a, b))}")
+                hits++
+                from = i + kw.length
             }
-            if (r == null) {
-                trace("S1 [$label] timeout/exception")
-                return null
+        }
+    }
+
+    // One API attempt. Returns the JSON body on success, null otherwise (always traced).
+    private suspend fun apiAttempt(label: String, url: String, headers: Map<String, String>): String? {
+        val r = withTimeoutOrNull(12_000L) {
+            try {
+                app.get(url, headers = headers)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                null
             }
-            val t = r.text
-            trace("S1 [$label] HTTP ${r.code} len=${t.length} ${snippet(t)}")
-            return if (r.code in 200..299 && t.trimStart().startsWith("{")) t else null
+        }
+        if (r == null) {
+            trace("S1 [$label] timeout/exception")
+            return null
+        }
+        val t = r.text
+        trace("S1 [$label] HTTP ${r.code} len=${t.length} ${snippet(t)}")
+        return if (r.code in 200..299 && t.trimStart().startsWith("{") && t.contains("stream_urls")) t else null
+    }
+
+    // The API started answering {"error":"invalid api token"} (HTTP 403) and the host
+    // allows about one request per second (429 otherwise). Follow what the browser does
+    // (embed -> vs_src -> outer page -> inner player page -> player.js), dump how the
+    // player calls the API, and try the token candidates that page offers.
+    private suspend fun probeApiToken(media: HayyaMediaData, apiUrl: String): String? {
+        val playerUrl = fetchPlayerUrl(media)
+        if (playerUrl == null) {
+            trace("P0 no player url")
+            return null
+        }
+        val hdr = mapOf(
+            "User-Agent" to MOBILE_CHROME_UA,
+            "Accept" to "text/html,application/xhtml+xml,*/*",
+            "Referer" to "https://vidsrc.sh/"
+        )
+
+        val outer = withTimeoutOrNull(10_000L) { app.get(playerUrl, headers = hdr) }
+        val oh = outer?.text ?: ""
+        trace("P1 outer HTTP ${outer?.code} len=${oh.length}")
+        val cfgAt = oh.indexOf("window.CFG")
+        if (cfgAt >= 0) trace("P1 CFG ${compact(oh.substring(cfgAt, (cfgAt + 520).coerceAtMost(oh.length)))}")
+        traceContexts("P1 html", oh, listOf("token", "api_key"), 80, 180, 3)
+
+        val innerRel = Regex(""""playerUrl"\s*:\s*"([^"]+)"""").find(oh)
+            ?.groupValues?.getOrNull(1)
+            ?.replace("\\u0026", "&")
+            ?.replace("\\/", "/")
+        if (innerRel == null) {
+            trace("P1 no inner player url")
+            return null
+        }
+        val innerUrl = try {
+            java.net.URI(playerUrl).resolve(innerRel).toString()
+        } catch (e: Exception) {
+            null
+        } ?: return null
+
+        val inner = withTimeoutOrNull(10_000L) {
+            app.get(innerUrl, headers = hdr + mapOf("Referer" to playerUrl))
+        }
+        val ih = inner?.text ?: ""
+        trace("P2 inner HTTP ${inner?.code} len=${ih.length}")
+        val cfg = Regex("""window\.CONFIG\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL)
+            .find(ih)?.groupValues?.getOrNull(1)
+        trace("P2 CONFIG ${cfg?.let { compact(it).take(1000) }}")
+        traceContexts("P2 html", ih, listOf("token", "api_key", "Authorization"), 80, 200, 4)
+
+        // The player's own code: how the stream API is called
+        val scripts = Regex("""src=["']([^"']+\.js[^"']*)["']""", RegexOption.IGNORE_CASE)
+            .findAll(ih)
+            .map { it.groupValues[1] }
+            .filter { it.contains("player.js", true) || it.contains("vsdec", true) }
+            .distinct()
+            .take(2)
+            .toList()
+        for (src in scripts) {
+            val abs = try {
+                java.net.URI(innerUrl).resolve(src).toString()
+            } catch (e: Exception) {
+                continue
+            }
+            val js = withTimeoutOrNull(10_000L) {
+                app.get(abs, headers = hdr + mapOf("Referer" to originOf(innerUrl))).text
+            }
+            val name = abs.substringBefore('?').substringAfterLast('/')
+            trace("P3 JS $name len=${js?.length}")
+            if (js == null) continue
+            if (name.contains("vsdec", true)) {
+                traceContexts("P3 $name", js, listOf("token", "headers", "fetch("), 100, 300, 3)
+            } else {
+                traceContexts(
+                    "P3 $name", js,
+                    listOf("token", "Authorization", "headers", "streamBase", "fetchStream", "api.php", "x-"),
+                    120, 340, 6
+                )
+            }
         }
 
-        val base = playerHeaders()
-        attempt("origin", apiUrl, base)?.let { return it }
-        delay(500)
-        attempt("hints", apiUrl, base + browserHints())?.let { return it }
-        delay(500)
-        attempt(
-            "vidsrc",
-            apiUrl,
-            base + browserHints() + mapOf("Referer" to "https://vidsrc.sh/", "Origin" to "https://vidsrc.sh")
-        )?.let { return it }
-        delay(500)
-        attempt("no-origin", apiUrl, (base + browserHints()) - "Origin")?.let { return it }
+        // Token candidates: CONFIG fields that look like a token/key, and the API host's generate.php
+        val cands = ArrayList<String>()
+        try {
+            if (cfg != null) {
+                val j = JSONObject(cfg)
+                for (k in j.keys()) {
+                    if (k.contains("token", true) || k.contains("key", true)) {
+                        val v = jstr(j, k)
+                        if (v.length > 6) cands.add(v)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+        }
+        delay(1200)
+        val gen = withTimeoutOrNull(8_000L) {
+            try {
+                app.get("https://data.vidsrc.sh/generate.php", headers = playerHeaders())
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                null
+            }
+        }
+        trace("P4 data.vidsrc.sh/generate.php HTTP ${gen?.code} ${snippet(gen?.text ?: "")}")
+        val genToken = if (gen != null && gen.code in 200..299) parseToken(gen.text) else ""
+        if (genToken.isNotBlank()) cands.add(genToken)
+        trace("P4 token candidates=${cands.size}")
 
-        // Full browser flow: a fresh player url (with its vs= token) as the Referer
-        val playerUrl = fetchPlayerUrl(media)
-        if (playerUrl != null) {
-            val vsToken = Uri.parse(playerUrl).getQueryParameter("vs")
-            attempt("player-url", apiUrl, base + browserHints() + mapOf("Referer" to playerUrl))?.let { return it }
-            if (!vsToken.isNullOrBlank()) {
-                attempt(
-                    "player-url+vs",
-                    apiUrl + "&vs=" + vsToken,
-                    base + browserHints() + mapOf("Referer" to playerUrl)
-                )?.let { return it }
+        val base = playerHeaders() + mapOf("Referer" to originOf(innerUrl))
+        for (tok in cands.take(2)) {
+            val tries = listOf(
+                Triple("token=", "$apiUrl&token=$tok", base),
+                Triple("api_token=", "$apiUrl&api_token=$tok", base),
+                Triple("x-api-token", apiUrl, base + mapOf("X-Api-Token" to tok)),
+                Triple("bearer", apiUrl, base + mapOf("Authorization" to "Bearer $tok"))
+            )
+            for ((label, u, h) in tries) {
+                delay(1200)
+                apiAttempt("tok:$label", u, h)?.let { return it }
             }
         }
         return null
+    }
+
+    // GET data.vidsrc.sh/api.php?...&stream_urls (returns the JSON body)
+    private suspend fun requestStreamApi(apiUrl: String, media: HayyaMediaData): String? {
+        val base = playerHeaders()
+        apiAttempt("origin", apiUrl, base)?.let { return it }
+        delay(1200)
+        apiAttempt("hints", apiUrl, base + browserHints())?.let { return it }
+        delay(1200)
+        return probeApiToken(media, apiUrl)
     }
 
     // GET the stream API, decrypt data.stream_urls when needed, return the URLs.
