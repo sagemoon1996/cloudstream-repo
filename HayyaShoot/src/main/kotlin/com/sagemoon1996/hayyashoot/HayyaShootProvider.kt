@@ -403,7 +403,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-27"
+    private val buildTag = "build-28"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -644,11 +644,12 @@ class HayyaShootProvider : MainAPI() {
         return if (r.code in 200..299 && t.trimStart().startsWith("{") && t.contains("stream_urls")) t else null
     }
 
-    // The API started answering {"error":"invalid api token"} (HTTP 403) and the host
-    // allows about one request per second (429 otherwise). Follow what the browser does
-    // (embed -> vs_src -> outer page -> inner player page -> player.js), dump how the
-    // player calls the API, and try the token candidates that page offers.
-    private suspend fun probeApiToken(media: HayyaMediaData, apiUrl: String): String? {
+    // data.vidsrc.sh/api.php now answers {"error":"invalid api token"} without a token.
+    // player.js: "single-use stream_urls API token (CONFIG.apiToken), minted server-side
+    // at player-page render and embedded in window.CONFIG". So, like the browser:
+    //   vidsrc.sh embed -> vs_src.php -> outer page -> inner player page -> CONFIG.apiToken
+    //   -> api.php?...&stream_urls&api_token=<token>   (verified: HTTP 200)
+    private suspend fun fetchViaBrowserFlow(media: HayyaMediaData, apiUrl: String): String? {
         val playerUrl = fetchPlayerUrl(media)
         if (playerUrl == null) {
             trace("P0 no player url")
@@ -663,16 +664,13 @@ class HayyaShootProvider : MainAPI() {
         val outer = withTimeoutOrNull(10_000L) { app.get(playerUrl, headers = hdr) }
         val oh = outer?.text ?: ""
         trace("P1 outer HTTP ${outer?.code} len=${oh.length}")
-        val cfgAt = oh.indexOf("window.CFG")
-        if (cfgAt >= 0) trace("P1 CFG ${compact(oh.substring(cfgAt, (cfgAt + 520).coerceAtMost(oh.length)))}")
-        traceContexts("P1 html", oh, listOf("token", "api_key"), 80, 180, 3)
 
         val innerRel = Regex(""""playerUrl"\s*:\s*"([^"]+)"""").find(oh)
             ?.groupValues?.getOrNull(1)
             ?.replace("\\u0026", "&")
             ?.replace("\\/", "/")
         if (innerRel == null) {
-            trace("P1 no inner player url")
+            trace("P1 no inner player url: ${snippet(oh)}")
             return null
         }
         val innerUrl = try {
@@ -685,95 +683,53 @@ class HayyaShootProvider : MainAPI() {
             app.get(innerUrl, headers = hdr + mapOf("Referer" to playerUrl))
         }
         val ih = inner?.text ?: ""
-        trace("P2 inner HTTP ${inner?.code} len=${ih.length}")
-        val cfg = Regex("""window\.CONFIG\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL)
-            .find(ih)?.groupValues?.getOrNull(1)
-        trace("P2 CONFIG ${cfg?.let { compact(it).take(1000) }}")
-        traceContexts("P2 html", ih, listOf("token", "api_key", "Authorization"), 80, 200, 4)
-
-        // The player's own code: how the stream API is called
-        val scripts = Regex("""src=["']([^"']+\.js[^"']*)["']""", RegexOption.IGNORE_CASE)
-            .findAll(ih)
-            .map { it.groupValues[1] }
-            .filter { it.contains("player.js", true) || it.contains("vsdec", true) }
-            .distinct()
-            .take(2)
-            .toList()
-        for (src in scripts) {
-            val abs = try {
-                java.net.URI(innerUrl).resolve(src).toString()
-            } catch (e: Exception) {
-                continue
-            }
-            val js = withTimeoutOrNull(10_000L) {
-                app.get(abs, headers = hdr + mapOf("Referer" to originOf(innerUrl))).text
-            }
-            val name = abs.substringBefore('?').substringAfterLast('/')
-            trace("P3 JS $name len=${js?.length}")
-            if (js == null) continue
-            if (name.contains("vsdec", true)) {
-                traceContexts("P3 $name", js, listOf("token", "headers", "fetch("), 100, 300, 3)
-            } else {
-                traceContexts(
-                    "P3 $name", js,
-                    listOf("token", "Authorization", "headers", "streamBase", "fetchStream", "api.php", "x-"),
-                    120, 340, 6
-                )
-            }
+        val token = Regex(""""apiToken"\s*:\s*"([^"]+)"""").find(ih)?.groupValues?.getOrNull(1)
+        trace("P2 inner HTTP ${inner?.code} len=${ih.length} apiToken=${token?.length}")
+        if (token.isNullOrBlank()) {
+            traceContexts("P2 html", ih, listOf("token", "CONFIG"), 60, 220, 3)
+            return null
         }
 
-        // Token candidates: CONFIG fields that look like a token/key, and the API host's generate.php
-        val cands = ArrayList<String>()
-        try {
-            if (cfg != null) {
-                val j = JSONObject(cfg)
-                for (k in j.keys()) {
-                    if (k.contains("token", true) || k.contains("key", true)) {
-                        val v = jstr(j, k)
-                        if (v.length > 6) cands.add(v)
+        val body = apiAttempt(
+            "api_token",
+            "$apiUrl&api_token=$token",
+            playerHeaders() + mapOf("Referer" to originOf(innerUrl))
+        )
+
+        // Once per app session: how the player asks for foreign-language subtitles
+        if (debugMode && !subsDumped) {
+            subsDumped = true
+            try {
+                val subSrc = Regex("""src=["']([^"']+subtitles[^"']*\.js[^"']*)["']""", RegexOption.IGNORE_CASE)
+                    .find(ih)?.groupValues?.getOrNull(1)
+                if (subSrc != null) {
+                    val abs = java.net.URI(innerUrl).resolve(subSrc).toString()
+                    val js = withTimeoutOrNull(10_000L) {
+                        app.get(abs, headers = hdr + mapOf("Referer" to originOf(innerUrl))).text
+                    }
+                    trace("P5 subtitles.js len=${js?.length}")
+                    if (js != null) {
+                        traceContexts(
+                            "P5 subs", js,
+                            listOf("cache.php", "cacheBase", "SubDownloadLink", ".gz", "wyzie", "sublanguageid", "vtt"),
+                            120, 420, 3
+                        )
                     }
                 }
-            }
-        } catch (e: Exception) {
-        }
-        delay(1200)
-        val gen = withTimeoutOrNull(8_000L) {
-            try {
-                app.get("https://data.vidsrc.sh/generate.php", headers = playerHeaders())
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
-                null
+                trace("P5 subtitles dump failed ${e::class.java.simpleName}")
             }
         }
-        trace("P4 data.vidsrc.sh/generate.php HTTP ${gen?.code} ${snippet(gen?.text ?: "")}")
-        val genToken = if (gen != null && gen.code in 200..299) parseToken(gen.text) else ""
-        if (genToken.isNotBlank()) cands.add(genToken)
-        trace("P4 token candidates=${cands.size}")
-
-        val base = playerHeaders() + mapOf("Referer" to originOf(innerUrl))
-        for (tok in cands.take(2)) {
-            val tries = listOf(
-                Triple("token=", "$apiUrl&token=$tok", base),
-                Triple("api_token=", "$apiUrl&api_token=$tok", base),
-                Triple("x-api-token", apiUrl, base + mapOf("X-Api-Token" to tok)),
-                Triple("bearer", apiUrl, base + mapOf("Authorization" to "Bearer $tok"))
-            )
-            for ((label, u, h) in tries) {
-                delay(1200)
-                apiAttempt("tok:$label", u, h)?.let { return it }
-            }
-        }
-        return null
+        return body
     }
 
     // GET data.vidsrc.sh/api.php?...&stream_urls (returns the JSON body)
     private suspend fun requestStreamApi(apiUrl: String, media: HayyaMediaData): String? {
-        val base = playerHeaders()
-        apiAttempt("origin", apiUrl, base)?.let { return it }
+        fetchViaBrowserFlow(media, apiUrl)?.let { return it }
+        // Old behaviour (no token needed), in case the site relaxes the check again
         delay(1200)
-        apiAttempt("hints", apiUrl, base + browserHints())?.let { return it }
-        delay(1200)
-        return probeApiToken(media, apiUrl)
+        return apiAttempt("origin", apiUrl, playerHeaders())
     }
 
     // GET the stream API, decrypt data.stream_urls when needed, return the URLs.
@@ -868,7 +824,17 @@ class HayyaShootProvider : MainAPI() {
                 c.connectTimeout = 8_000
                 c.readTimeout = 10_000
                 c.setRequestProperty("User-Agent", "TemporaryUserAgent")
-                c.inputStream.use { it.readBytes() }
+                val code = c.responseCode
+                val type = c.contentType
+                val bytes = (if (code in 200..299) c.inputStream else c.errorStream)?.use { it.readBytes() }
+                    ?: ByteArray(0)
+                val gz = bytes.size > 2 && bytes[0] == 0x1f.toByte() && bytes[1] == 0x8b.toByte()
+                trace(
+                    "T3 download HTTP $code type=$type bytes=${bytes.size} gzip=$gz " +
+                        "host=${java.net.URL(safe).host} " +
+                        (if (!gz) "head=${snippet(String(bytes.copyOf(minOf(bytes.size, 120)), Charsets.ISO_8859_1))}" else "")
+                )
+                if (code in 200..299) bytes else null
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 trace("T3 download failed ${e::class.java.simpleName}: ${e.message?.take(80)}")
@@ -965,6 +931,14 @@ class HayyaShootProvider : MainAPI() {
                 toUtf8Srt(raw, jstr(row, "SubEncoding"))
             } catch (e: Exception) {
                 trace("T3 decode failed ${e::class.java.simpleName}")
+                continue
+            }
+
+            // A real subtitle has many "-->" cues. Anything else (quota/ad/error text) is dropped.
+            val srtText = String(srt, Charsets.UTF_8)
+            val cues = Regex("-->").findAll(srtText).count()
+            if (cues < 5) {
+                trace("T3 not a real srt (cues=$cues) head=${snippet(srtText)}")
                 continue
             }
 
@@ -1196,6 +1170,9 @@ class HayyaShootProvider : MainAPI() {
 
         @Volatile
         var traceStart: Long = 0L
+
+        @Volatile
+        var subsDumped: Boolean = false
 
         val traceLines: MutableList<String> =
             java.util.Collections.synchronizedList(ArrayList<String>())
