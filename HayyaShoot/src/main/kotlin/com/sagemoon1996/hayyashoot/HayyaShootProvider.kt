@@ -403,7 +403,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-30"
+    private val buildTag = "build-31"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -1009,6 +1009,14 @@ class HayyaShootProvider : MainAPI() {
                     // TV players often decode subtitles as a legacy Arabic code page
                     // (setting "Subtitle encoding"): offer the same text in Windows-1256 too.
                     try {
+                        // UTF-8 with a BOM: charset auto-detectors (default setting on many
+                        // TVs) cannot mistake it for a legacy Arabic code page.
+                        val bom = byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte())
+                        val servedBom = LocalSubServer.publish(id + "b", bom + srt, "utf-8")
+                        if (servedBom != null) {
+                            subtitleCallback(SubtitleFile("Arabic (UTF-8 BOM)", servedBom))
+                            trace("T3 extra variant utf-8 BOM -> $servedBom")
+                        }
                         val cp = java.nio.charset.Charset.forName("windows-1256")
                         val served2 = LocalSubServer.publish(id + "w", srtText.toByteArray(cp), "windows-1256")
                         if (served2 != null) {
