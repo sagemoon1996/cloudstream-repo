@@ -403,7 +403,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-31"
+    private val buildTag = "build-32"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -1022,6 +1022,15 @@ class HayyaShootProvider : MainAPI() {
                         if (served2 != null) {
                             subtitleCallback(SubtitleFile("Arabic (CP1256)", served2))
                             trace("T3 extra variant windows-1256 -> $served2")
+                        }
+                        // UTF-8 Arabic read as ISO-8859-6 turns every letter into the heavy
+                        // letters "ظ" / "ع" (lead bytes 0xD8 / 0xD9), the look reported on the TV:
+                        // so give the TV the text already encoded as ISO-8859-6.
+                        val iso = java.nio.charset.Charset.forName("ISO-8859-6")
+                        val served3 = LocalSubServer.publish(id + "i", srtText.toByteArray(iso), "iso-8859-6")
+                        if (served3 != null) {
+                            subtitleCallback(SubtitleFile("Arabic (ISO-8859-6)", served3))
+                            trace("T3 extra variant iso-8859-6 -> $served3")
                         }
                     } catch (e: Exception) {
                         trace("T3 cp1256 variant failed ${e::class.java.simpleName}")
