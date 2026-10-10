@@ -403,7 +403,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-35"
+    private val buildTag = "build-37"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -564,6 +564,29 @@ class HayyaShootProvider : MainAPI() {
 
     // What the browser does before the player asks for the streams:
     // vidsrc.sh embed -> data-api (/vs_src.php) -> {"src": player url with a fresh vs=}
+    // VidSrc is flaky at times (HTTP 504 or no answer within the delay, seen in the DIAG):
+    // try a couple of times before giving up on a step.
+    private suspend fun <T> retryGet(
+        label: String,
+        tries: Int,
+        block: suspend () -> T?,
+        good: (T) -> Boolean
+    ): T? {
+        var last: T? = null
+        for (i in 1..tries) {
+            last = try {
+                block()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                null
+            }
+            if (last != null && good(last)) return last
+            trace("R $label try $i/$tries failed")
+            if (i < tries) delay(1_000L)
+        }
+        return last
+    }
+
     private suspend fun fetchPlayerUrl(
         media: HayyaMediaData,
         idKey: String = "tmdb",
@@ -575,9 +598,11 @@ class HayyaShootProvider : MainAPI() {
         } else {
             "https://vidsrc.sh/embed/movie?$idKey=$idVal&sub=ar"
         }
-        val er = withTimeoutOrNull(10_000L) {
-            app.get(embed, headers = browserHeaders + mapOf("Referer" to "$mainUrl/"))
-        } ?: return null
+        val er = retryGet(
+            "embed", 2,
+            { withTimeoutOrNull(9_000L) { app.get(embed, headers = browserHeaders + mapOf("Referer" to "$mainUrl/")) } },
+            { it.code in 200..299 }
+        ) ?: return null
         val pageUrl = er.url.ifBlank { embed }
         val api = Regex("""data-api=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
             .find(er.text)?.groupValues?.getOrNull(1)?.replace("&amp;", "&")
@@ -589,17 +614,23 @@ class HayyaShootProvider : MainAPI() {
             api.startsWith("/") -> origin + api
             else -> "$origin/$api"
         }
-        val vr = withTimeoutOrNull(10_000L) {
-            app.get(
-                vsUrl,
-                headers = mapOf(
-                    "User-Agent" to MOBILE_CHROME_UA,
-                    "Accept" to "application/json, text/plain, */*",
-                    "Referer" to pageUrl,
-                    "X-Requested-With" to "XMLHttpRequest"
-                )
-            )
-        } ?: return null
+        val vr = retryGet(
+            "vs_src", 2,
+            {
+                withTimeoutOrNull(9_000L) {
+                    app.get(
+                        vsUrl,
+                        headers = mapOf(
+                            "User-Agent" to MOBILE_CHROME_UA,
+                            "Accept" to "application/json, text/plain, */*",
+                            "Referer" to pageUrl,
+                            "X-Requested-With" to "XMLHttpRequest"
+                        )
+                    )
+                }
+            },
+            { it.code in 200..299 }
+        ) ?: return null
         val src = Regex(""""src"\s*:\s*"([^"]+)"""").find(vr.text)
             ?.groupValues?.getOrNull(1)?.replace("\\/", "/")
         trace("S0 vs_src HTTP ${vr.code} src=${src?.substringAfter("://")?.take(60)}")
@@ -674,7 +705,11 @@ class HayyaShootProvider : MainAPI() {
             "Referer" to "https://vidsrc.sh/"
         )
 
-        val outer = withTimeoutOrNull(10_000L) { app.get(playerUrl, headers = hdr) }
+        val outer = retryGet(
+            "outer", 2,
+            { withTimeoutOrNull(9_000L) { app.get(playerUrl, headers = hdr) } },
+            { it.code in 200..299 }
+        )
         val oh = outer?.text ?: ""
         trace("P1 outer HTTP ${outer?.code} len=${oh.length}")
 
@@ -692,9 +727,11 @@ class HayyaShootProvider : MainAPI() {
             null
         } ?: return null
 
-        val inner = withTimeoutOrNull(10_000L) {
-            app.get(innerUrl, headers = hdr + mapOf("Referer" to playerUrl))
-        }
+        val inner = retryGet(
+            "inner", 2,
+            { withTimeoutOrNull(9_000L) { app.get(innerUrl, headers = hdr + mapOf("Referer" to playerUrl)) } },
+            { it.code in 200..299 }
+        )
         val ih = inner?.text ?: ""
         val token = Regex(""""apiToken"\s*:\s*"([^"]+)"""").find(ih)?.groupValues?.getOrNull(1)
         trace("P2 inner HTTP ${inner?.code} len=${ih.length} apiToken=${token?.length}")
@@ -1044,59 +1081,17 @@ class HayyaShootProvider : MainAPI() {
             val raw = downloadPlain(link)
             if (raw == null || raw.isEmpty()) continue
 
-            val srt = try {
-                toUtf8Srt(raw, jstr(row, "SubEncoding"))
-            } catch (e: Exception) {
-                trace("T3 decode failed ${e::class.java.simpleName}")
-                continue
-            }
-
-            // A real subtitle has many "-->" cues. Anything else (quota/ad/error text) is dropped.
-            val srtText = String(srt, Charsets.UTF_8)
-            val cues = Regex("-->").findAll(srtText).count()
-            if (cues < 5) {
-                trace("T3 not a real srt (cues=$cues) head=${snippet(srtText)}")
-                continue
-            }
-
-            // Some files tagged "ara" on OpenSubtitles are Persian (seen on the TV: "چ", "گ",
-            // missing "ی"). Persian uses پ چ ژ گ ک ی; Arabic uses ك ي: drop Persian files.
-            var arabicLetters = 0
-            var persianOnly = 0
-            for (ch in srtText) {
-                if (ch in '\u0621'..'\u064A' || ch in '\u0671'..'\u06D3') arabicLetters++
-                if (ch == '\u067E' || ch == '\u0686' || ch == '\u0698' ||
-                    ch == '\u06AF' || ch == '\u06A9' || ch == '\u06CC'
-                ) persianOnly++
-            }
-            val persianRatio = if (arabicLetters > 0) persianOnly.toDouble() / arabicLetters else 0.0
-            if (arabicLetters < 100 || persianRatio > 0.02) {
-                trace(
-                    "T3 skipped ${jstr(row, "SubFileName").take(40)}: not Arabic " +
-                        "(arabic letters=$arabicLetters persian-only=$persianOnly ratio=${"%.3f".format(persianRatio)})"
+            if (serveArabicSrt(
+                    raw,
+                    jstr(row, "SubEncoding"),
+                    jstr(row, "SubFileName").take(48),
+                    jstr(row, "IDSubtitleFile").ifBlank { "s$n" },
+                    n,
+                    subtitleCallback
                 )
-                continue
+            ) {
+                n++
             }
-
-            val id = (jstr(row, "IDSubtitleFile").ifBlank { "s$n" } + srt.size)
-                .filter { it.isLetterOrDigit() }
-            val label = if (n == 0) "Arabic" else "Arabic ${n + 1}"
-
-            // UTF-8: phones. The TV of the user decodes subtitles as Windows-1256 (its
-            // "Subtitle encoding" setting), and showed this variant correctly.
-            val served = LocalSubServer.publish(id, srt)
-            trace("T3 ${jstr(row, "SubFileName").take(48)} enc=${jstr(row, "SubEncoding")} bytes=${srt.size} persian=${"%.3f".format(persianRatio)} -> ${served ?: "local server failed"}")
-            if (served != null) subtitleCallback(SubtitleFile(label, served))
-
-            try {
-                val cp = java.nio.charset.Charset.forName("windows-1256")
-                val served2 = LocalSubServer.publish(id + "w", srtText.toByteArray(cp), "windows-1256")
-                if (served2 != null) subtitleCallback(SubtitleFile("$label (CP1256)", served2))
-            } catch (e: Exception) {
-                trace("T3 cp1256 variant failed ${e::class.java.simpleName}")
-            }
-
-            if (served != null) n++
         }
 
         // Other sources, only when OpenSubtitles gave nothing (or only one file)
@@ -1159,14 +1154,106 @@ class HayyaShootProvider : MainAPI() {
         val served = LocalSubServer.publish(id, srt) ?: return false
         subtitleCallback(SubtitleFile(label, served))
         trace("T3 $fileLabel bytes=${srt.size} -> $served")
-        try {
-            val cp = java.nio.charset.Charset.forName("windows-1256")
+        val cp = try {
+            java.nio.charset.Charset.forName("windows-1256")
+        } catch (e: Exception) {
+            null
+        }
+        if (cp != null) {
             val served2 = LocalSubServer.publish(id + "w", srtText.toByteArray(cp), "windows-1256")
             if (served2 != null) subtitleCallback(SubtitleFile("$label (CP1256)", served2))
-        } catch (e: Exception) {
-            trace("T3 cp1256 variant failed ${e::class.java.simpleName}")
+        }
+
+        // Does the subtitle end where the video ends? A file made for another frame rate
+        // (25 fps vs 23.976 fps) is 4.3% shorter/longer and drifts: offer a stretched copy.
+        val dur = lastVideoDuration
+        if (dur != null && dur > 120) {
+            val subEnd = lastCueEndSeconds(srtText)
+            val ratio = if (subEnd > 30) dur / subEnd else 0.0
+            val factor = when {
+                ratio in 1.025..1.065 -> 25.0 / 23.976
+                ratio in 0.935..0.975 -> 23.976 / 25.0
+                else -> 1.0
+            }
+            trace(
+                "T8 sync $fileLabel: video=${dur.toInt()}s subtitle-ends=${subEnd.toInt()}s " +
+                    "ratio=${"%.3f".format(ratio)} factor=${"%.5f".format(factor)}"
+            )
+            if (factor != 1.0) {
+                val scaled = scaleSrtTimes(srtText, factor)
+                val s1 = LocalSubServer.publish(id + "s", scaled.toByteArray(Charsets.UTF_8))
+                if (s1 != null) subtitleCallback(SubtitleFile("$label (sync)", s1))
+                if (cp != null) {
+                    val s2 = LocalSubServer.publish(id + "sw", scaled.toByteArray(cp), "windows-1256")
+                    if (s2 != null) subtitleCallback(SubtitleFile("$label (sync CP1256)", s2))
+                }
+            }
         }
         return true
+    }
+
+    // Total duration of an HLS stream: sum of #EXTINF of its (first) media playlist
+    private suspend fun hlsDuration(url: String, referer: String): Double? {
+        suspend fun fetch(u: String): String? = withTimeoutOrNull(8_000L) {
+            try {
+                app.get(
+                    u,
+                    headers = mapOf(
+                        "User-Agent" to MOBILE_CHROME_UA,
+                        "Referer" to referer,
+                        "Origin" to referer.trimEnd('/')
+                    )
+                ).text
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                null
+            }
+        }
+
+        val master = fetch(url) ?: return null
+        var media = master
+        if (!master.contains("#EXTINF")) {
+            val line = master.lines().firstOrNull { it.isNotBlank() && !it.startsWith("#") } ?: return null
+            val mediaUrl = try {
+                java.net.URI(url).resolve(line.trim()).toString()
+            } catch (e: Exception) {
+                return null
+            }
+            media = fetch(mediaUrl) ?: return null
+        }
+        val total = Regex("""#EXTINF:([0-9.]+)""").findAll(media)
+            .fold(0.0) { acc, m -> acc + (m.groupValues[1].toDoubleOrNull() ?: 0.0) }
+        return if (total > 0) total else null
+    }
+
+    // End time (seconds) of the last cue of an .srt
+    private fun lastCueEndSeconds(text: String): Double {
+        var best = 0.0
+        Regex("""-->\s*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})""").findAll(text).forEach { m ->
+            val g = m.groupValues
+            val t = g[1].toInt() * 3600 + g[2].toInt() * 60 + g[3].toInt() +
+                g[4].padEnd(3, '0').toInt() / 1000.0
+            if (t > best) best = t
+        }
+        return best
+    }
+
+    // Multiplies every cue time by f (only on the "00:00:01,000 --> 00:00:03,000" lines)
+    private fun scaleSrtTimes(text: String, f: Double): String {
+        val time = Regex("""(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})""")
+        return text.lines().joinToString("\n") { line ->
+            if (!line.contains("-->")) line
+            else time.replace(line) { m ->
+                val g = m.groupValues
+                val sec = (g[1].toInt() * 3600 + g[2].toInt() * 60 + g[3].toInt() +
+                    g[4].padEnd(3, '0').toInt() / 1000.0) * f
+                val ms = Math.round(sec * 1000)
+                String.format(
+                    java.util.Locale.US, "%02d:%02d:%02d,%03d",
+                    ms / 3_600_000, (ms / 60_000) % 60, (ms / 1000) % 60, ms % 1000
+                )
+            }
+        }
     }
 
     private fun cleanShowTitle(title: String?): String =
@@ -1444,6 +1531,8 @@ class HayyaShootProvider : MainAPI() {
 
         val referers = listOf(PLAYER_ORIGIN, "https://vidsrc.sh/", "$mainUrl/")
         var emitted = 0
+        var firstUrl: String? = null
+        var firstRef = ""
         val unverified = ArrayList<Pair<String, String>>()
         // generate.php answers "429 Too Many Requests" when it is called several times
         // in a row, and all the URLs share one host: ask once per host, reuse the token.
@@ -1484,6 +1573,10 @@ class HayyaShootProvider : MainAPI() {
                     trace("S5 #${i + 1} ${if (cand == u0) "plain" else "token"} ref=${Uri.parse(ref).host} -> $why")
                     if (good) {
                         emitLink(callback, cand, ref, "VidSrc ${emitted + 1}")
+                        if (emitted == 0) {
+                            firstUrl = cand
+                            firstRef = ref
+                        }
                         emitted++
                         verified = true
                         break
@@ -1505,6 +1598,16 @@ class HayyaShootProvider : MainAPI() {
 
         // Arabic subtitles never decide if the video works: any failure is only traced
         if (emitted > 0) {
+            val fu = firstUrl
+            lastVideoDuration = if (fu != null) {
+                try {
+                    hlsDuration(fu, firstRef)
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    null
+                }
+            } else null
+            trace("T8 video duration=${lastVideoDuration?.toInt()}s")
             try {
                 withTimeoutOrNull(35_000L) {
                     addArabicSubtitles(media, meta["imdb"], meta["title"], subtitleCallback)
@@ -1629,6 +1732,10 @@ class HayyaShootProvider : MainAPI() {
 
         @Volatile
         var subsDumped: Boolean = false
+
+        // Duration (seconds) of the video being played, from its HLS playlist
+        @Volatile
+        var lastVideoDuration: Double? = null
 
         val traceLines: MutableList<String> =
             java.util.Collections.synchronizedList(ArrayList<String>())
@@ -1832,4 +1939,3 @@ private object LocalSubServer {
             }
         }
     }
-}
