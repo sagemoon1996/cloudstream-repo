@@ -1939,3 +1939,5 @@ private object LocalSubServer {
             }
         }
     }
+}
+// ===== END OF FILE (HayyaShootProvider.kt, build-37): if you do not see this line, the paste was cut =====
