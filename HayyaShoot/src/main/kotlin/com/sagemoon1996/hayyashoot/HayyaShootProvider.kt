@@ -301,8 +301,7 @@ class HayyaShootProvider : MainAPI() {
                 TvType.Movie,
                 "diag"
             ) {
-                this.plot = traceLines.toList().joinToString("\n").ifBlank { lastDiagnostic }
-                    ?: "No trace yet. Play an episode, then refresh the home page."
+                this.plot = diagText()
             }
         }
 
@@ -403,7 +402,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-38"
+    private val buildTag = "build-39"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -638,6 +637,22 @@ class HayyaShootProvider : MainAPI() {
     }
 
     private fun compact(t: String) = t.replace(Regex("""\s+"""), " ")
+
+    // DIAG page text: a two-line verdict first (readable on a TV), then the live trace
+    private fun diagText(): String {
+        val lines = traceLines.toList()
+        if (lines.isEmpty()) {
+            return lastDiagnostic ?: "No trace yet. Play an episode, then refresh the home page."
+        }
+        val end = lines.lastOrNull { it.contains("end found=") }
+        val problem = lines.firstOrNull {
+            Regex("""404|timeout|exception|failed|no player|no stream|no usable|HTTP [45]\d\d|not on""", RegexOption.IGNORE_CASE)
+                .containsMatchIn(it)
+        }
+        return "RESULT: ${end?.substringAfter("ms ") ?: "still running"}\n" +
+            "FIRST PROBLEM: ${problem?.take(150) ?: "none"}\n" +
+            "------\n" + lines.joinToString("\n")
+    }
 
     // Prints the text around each keyword (the player's own code tells how the API is called)
     private fun traceContexts(
@@ -1003,7 +1018,60 @@ class HayyaShootProvider : MainAPI() {
             text.toByteArray(Charsets.UTF_8)
     }
 
+    // The TV decodes subtitles as Windows-1256 (confirmed on the TV): only that copy is offered,
+    // and only the two most complete files, instead of a long list of variants.
+    private val tvOnly = true
+    private val subPool = java.util.Collections.synchronizedList(ArrayList<SubCand>())
+
     private suspend fun addArabicSubtitles(
+        media: HayyaMediaData,
+        imdb: String?,
+        title: String?,
+        subtitleCallback: (SubtitleFile) -> Unit
+    ) {
+        subPool.clear()
+        try {
+            collectArabicSubtitles(media, imdb, title, subtitleCallback)
+        } finally {
+            // runs even when the time budget cancels the search: serve what was found
+            publishBestSubtitles(subtitleCallback)
+        }
+    }
+
+    // Ranks the candidates by how completely they cover the video, publishes the best two
+    private fun publishBestSubtitles(subtitleCallback: (SubtitleFile) -> Unit) {
+        val ranked = synchronized(subPool) { subPool.sortedByDescending { it.score } }
+        if (ranked.isEmpty()) {
+            trace("T9 no usable Arabic subtitle")
+            return
+        }
+        val cp = try {
+            java.nio.charset.Charset.forName("windows-1256")
+        } catch (e: Exception) {
+            null
+        }
+        val dur = lastVideoDuration
+        for ((i, c) in ranked.take(2).withIndex()) {
+            val label = if (i == 0) "Arabic" else "Arabic 2"
+            val useCp = tvOnly && cp != null
+            val bytes = if (useCp) c.text.toByteArray(cp!!) else c.text.toByteArray(Charsets.UTF_8)
+            val id = "b$i" + c.text.length + c.cues
+            val url = LocalSubServer.publish(id, bytes, if (useCp) "windows-1256" else "utf-8") ?: continue
+            subtitleCallback(SubtitleFile(label, url))
+            val cov = if (dur != null && dur > 120) "%.0f%%".format(c.lastEnd / dur * 100) else "?"
+            trace("T9 $label = ${c.label} cues=${c.cues} ends=${c.lastEnd.toInt()}s of ${dur?.toInt()}s ($cov) -> $url")
+            if (i == 0 && dur != null && dur > 120 && c.lastEnd / dur < 0.6) {
+                trace("T9 warning: even the best subtitle covers only $cov of the video")
+            }
+        }
+        if (!tvOnly) {
+            val first = ranked.first()
+            LocalSubServer.publish("u0" + first.text.length, first.text.toByteArray(Charsets.UTF_8))
+                ?.let { subtitleCallback(SubtitleFile("Arabic (UTF-8)", it)) }
+        }
+    }
+
+    private suspend fun collectArabicSubtitles(
         media: HayyaMediaData,
         imdb: String?,
         title: String?,
@@ -1076,7 +1144,7 @@ class HayyaShootProvider : MainAPI() {
 
         var n = 0
         for (row in rows) {
-            if (n >= 2) break
+            if (n >= 4) break
 
             val link = jstr(row, "SubDownloadLink")
             val raw = downloadPlain(link)
@@ -1150,55 +1218,39 @@ class HayyaShootProvider : MainAPI() {
             trace("T3 skipped $fileLabel: not Arabic (arabic letters=$arabicLetters persian-only=$persianOnly)")
             return false
         }
-        val id = (seed + srt.size).filter { it.isLetterOrDigit() }
-        val label = if (n == 0) "Arabic" else "Arabic ${n + 1}"
-        val served = LocalSubServer.publish(id, srt) ?: return false
-        subtitleCallback(SubtitleFile(label, served))
-        trace("T3 $fileLabel bytes=${srt.size} -> $served")
-        val cp = try {
-            java.nio.charset.Charset.forName("windows-1256")
-        } catch (e: Exception) {
-            null
-        }
-        if (cp != null) {
-            val served2 = LocalSubServer.publish(id + "w", srtText.toByteArray(cp), "windows-1256")
-            if (served2 != null) subtitleCallback(SubtitleFile("$label (CP1256)", served2))
-        }
-        // WebVTT copy: UTF-8 by definition, and some players treat it differently from .srt
-        try {
-            val vtt = "WEBVTT\n\n" + srtText.removePrefix("\uFEFF").trimStart()
-                .replace(Regex("""(\d{2}:\d{2}:\d{2}),(\d{3})"""), "$1.$2")
-            val sv = LocalSubServer.publish(id + "v", vtt.toByteArray(Charsets.UTF_8), "utf-8", "vtt")
-            if (sv != null) subtitleCallback(SubtitleFile("$label (VTT)", sv))
-        } catch (e: Exception) {
-            trace("T3 vtt variant failed ${e::class.java.simpleName}")
-        }
-
-        // Does the subtitle end where the video ends? A file made for another frame rate
-        // (25 fps vs 23.976 fps) is 4.3% shorter/longer and drifts: offer a stretched copy.
+        // Timing: a file made for another frame rate (25 vs 23.976 fps) is 4.3% shorter/longer
+        // than the video and drifts: stretch it so that it ends where the video ends.
+        var text = srtText.removePrefix("\uFEFF")
+        var lastEnd = lastCueEndSeconds(text)
         val dur = lastVideoDuration
-        if (dur != null && dur > 120) {
-            val subEnd = lastCueEndSeconds(srtText)
-            val ratio = if (subEnd > 30) dur / subEnd else 0.0
+        if (dur != null && dur > 120 && lastEnd > 30) {
+            val ratio = dur / lastEnd
             val factor = when {
                 ratio in 1.025..1.065 -> 25.0 / 23.976
                 ratio in 0.935..0.975 -> 23.976 / 25.0
                 else -> 1.0
             }
             trace(
-                "T8 sync $fileLabel: video=${dur.toInt()}s subtitle-ends=${subEnd.toInt()}s " +
+                "T8 sync $fileLabel: video=${dur.toInt()}s subtitle-ends=${lastEnd.toInt()}s " +
                     "ratio=${"%.3f".format(ratio)} factor=${"%.5f".format(factor)}"
             )
             if (factor != 1.0) {
-                val scaled = scaleSrtTimes(srtText, factor)
-                val s1 = LocalSubServer.publish(id + "s", scaled.toByteArray(Charsets.UTF_8))
-                if (s1 != null) subtitleCallback(SubtitleFile("$label (sync)", s1))
-                if (cp != null) {
-                    val s2 = LocalSubServer.publish(id + "sw", scaled.toByteArray(cp), "windows-1256")
-                    if (s2 != null) subtitleCallback(SubtitleFile("$label (sync CP1256)", s2))
-                }
+                text = scaleSrtTimes(text, factor)
+                lastEnd *= factor
             }
         }
+
+        // Score: closeness to a full-length subtitle (dialogue stops before the credits, so
+        // ~95% is the target) plus the number of cues; without the duration, only the cues.
+        val known = dur != null && dur > 120
+        val cov = if (known) lastEnd / dur!! else 0.0
+        val score = if (known) {
+            (1.0 - kotlin.math.abs(cov - 0.95).coerceAtMost(1.0)) * 100.0 + minOf(cues, 1500) / 30.0
+        } else {
+            minOf(cues, 1500) / 10.0
+        }
+        subPool.add(SubCand(fileLabel, text, cues, lastEnd, score))
+        trace("T4 candidate $fileLabel cues=$cues ends=${lastEnd.toInt()}s coverage=${"%.2f".format(cov)} score=${score.toInt()}")
         return true
     }
 
@@ -1876,6 +1928,15 @@ class HayyaShootProvider : MainAPI() {
     )
 }
 
+// One validated Arabic subtitle waiting to be ranked.
+private class SubCand(
+    val label: String,
+    val text: String,
+    val cues: Int,
+    val lastEnd: Double,
+    val score: Double
+)
+
 // Serves already converted subtitles (.srt / .vtt) on 127.0.0.1 only.
 private object LocalSubServer {
     // "<id>.<ext>" -> (bytes, charset). Oldest entries are evicted one by one: the old code
@@ -1988,4 +2049,4 @@ private object LocalSubServer {
         }
     }
 }
-// ===== END OF FILE (HayyaShootProvider.kt, build-38): if you do not see this line, the paste was cut =====
+// ===== END OF FILE (HayyaShootProvider.kt, build-39): if you do not see this line, the paste was cut =====
