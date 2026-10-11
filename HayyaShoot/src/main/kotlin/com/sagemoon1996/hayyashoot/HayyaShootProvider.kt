@@ -301,7 +301,7 @@ class HayyaShootProvider : MainAPI() {
                 TvType.Movie,
                 "diag"
             ) {
-                this.plot = lastDiagnostic
+                this.plot = traceLines.toList().joinToString("\n").ifBlank { lastDiagnostic }
                     ?: "No trace yet. Play an episode, then refresh the home page."
             }
         }
@@ -403,7 +403,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-37"
+    private val buildTag = "build-38"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -1009,6 +1009,7 @@ class HayyaShootProvider : MainAPI() {
         title: String?,
         subtitleCallback: (SubtitleFile) -> Unit
     ) {
+        LocalSubServer.log = { msg -> trace(msg) }
         val digits = imdb.orEmpty().filter { it.isDigit() }
         val isTv = media.type == "tv" && media.season != null && media.episode != null
         val epPart = if (isTv) "episode-${media.episode}/" else ""
@@ -1162,6 +1163,15 @@ class HayyaShootProvider : MainAPI() {
         if (cp != null) {
             val served2 = LocalSubServer.publish(id + "w", srtText.toByteArray(cp), "windows-1256")
             if (served2 != null) subtitleCallback(SubtitleFile("$label (CP1256)", served2))
+        }
+        // WebVTT copy: UTF-8 by definition, and some players treat it differently from .srt
+        try {
+            val vtt = "WEBVTT\n\n" + srtText.removePrefix("\uFEFF").trimStart()
+                .replace(Regex("""(\d{2}:\d{2}:\d{2}),(\d{3})"""), "$1.$2")
+            val sv = LocalSubServer.publish(id + "v", vtt.toByteArray(Charsets.UTF_8), "utf-8", "vtt")
+            if (sv != null) subtitleCallback(SubtitleFile("$label (VTT)", sv))
+        } catch (e: Exception) {
+            trace("T3 vtt variant failed ${e::class.java.simpleName}")
         }
 
         // Does the subtitle end where the video ends? A file made for another frame rate
@@ -1866,18 +1876,26 @@ class HayyaShootProvider : MainAPI() {
     )
 }
 
-// Serves already converted subtitles (plain .srt) on 127.0.0.1 only.
+// Serves already converted subtitles (.srt / .vtt) on 127.0.0.1 only.
 private object LocalSubServer {
-    private val store = HashMap<String, Pair<ByteArray, String>>()
+    // "<id>.<ext>" -> (bytes, charset). Oldest entries are evicted one by one: the old code
+    // cleared EVERYTHING after 12 entries, which could delete the subtitles of the current play.
+    private val store = LinkedHashMap<String, Pair<ByteArray, String>>()
+
+    @Volatile
+    var log: ((String) -> Unit)? = null
 
     @Volatile
     private var server: java.net.ServerSocket? = null
 
     @Synchronized
-    fun publish(id: String, bytes: ByteArray, charset: String = "utf-8"): String? {
+    fun publish(id: String, bytes: ByteArray, charset: String = "utf-8", ext: String = "srt"): String? {
         synchronized(store) {
-            if (store.size > 12) store.clear()
-            store[id] = bytes to charset
+            store.remove("$id.$ext")
+            store["$id.$ext"] = bytes to charset
+            while (store.size > 40) {
+                store.remove(store.keys.first())
+            }
         }
         val ss = server ?: try {
             java.net.ServerSocket(0, 20, java.net.InetAddress.getByName("127.0.0.1")).also {
@@ -1887,7 +1905,7 @@ private object LocalSubServer {
         } catch (e: Exception) {
             return null
         }
-        return "http://127.0.0.1:${ss.localPort}/s/$id.srt"
+        return "http://127.0.0.1:${ss.localPort}/s/$id.$ext"
     }
 
     private fun start(ss: java.net.ServerSocket) {
@@ -1913,25 +1931,55 @@ private object LocalSubServer {
             c.soTimeout = 5_000
             val reader = c.getInputStream().bufferedReader(Charsets.ISO_8859_1)
             val first = reader.readLine() ?: return
+            var range: String? = null
+            var ua = ""
             while (true) {
                 val l = reader.readLine() ?: break
                 if (l.isEmpty()) break
+                val low = l.lowercase()
+                if (low.startsWith("range:")) range = l.substringAfter(":").trim()
+                if (low.startsWith("user-agent:")) ua = l.substringAfter(":").trim()
             }
-            val id = Regex("""GET /s/([A-Za-z0-9]+)\.srt""").find(first)?.groupValues?.getOrNull(1)
-            val entry = id?.let { synchronized(store) { store[it] } }
+            val m = Regex("""GET /s/([A-Za-z0-9]+)\.(srt|vtt)""").find(first)
+            val key = m?.let { "${it.groupValues[1]}.${it.groupValues[2]}" }
+            val entry = key?.let { synchronized(store) { store[it] } }
             val out = c.getOutputStream()
             if (entry == null) {
+                log?.invoke("SRV 404 ${first.take(60)}")
                 out.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
             } else {
-                out.write(
-                    ("HTTP/1.1 200 OK\r\nContent-Type: application/x-subrip; charset=${entry.second}\r\n" +
-                        "Content-Length: ${entry.first.size}\r\nAccess-Control-Allow-Origin: *\r\n" +
-                        "Connection: close\r\n\r\n").toByteArray()
-                )
-                out.write(entry.first)
+                val body = entry.first
+                val type = if ((key ?: "").endsWith(".vtt")) "text/vtt" else "application/x-subrip"
+                var from = 0
+                var to = body.size - 1
+                var partial = false
+                val rm = range?.let { Regex("""bytes=(\d*)-(\d*)""").find(it) }
+                if (rm != null) {
+                    val a = rm.groupValues[1].toIntOrNull()
+                    val b2 = rm.groupValues[2].toIntOrNull()
+                    if (a != null) {
+                        from = a.coerceIn(0, body.size)
+                        to = (b2 ?: (body.size - 1)).coerceIn(from, body.size - 1)
+                        partial = true
+                    } else if (b2 != null) {
+                        from = (body.size - b2).coerceAtLeast(0)
+                        partial = true
+                    }
+                }
+                val len = if (body.isEmpty() || from > to) 0 else to - from + 1
+                val head = StringBuilder()
+                head.append(if (partial) "HTTP/1.1 206 Partial Content\r\n" else "HTTP/1.1 200 OK\r\n")
+                head.append("Content-Type: $type; charset=${entry.second}\r\n")
+                head.append("Content-Length: $len\r\nAccept-Ranges: bytes\r\n")
+                if (partial) head.append("Content-Range: bytes $from-$to/${body.size}\r\n")
+                head.append("Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n")
+                out.write(head.toString().toByteArray())
+                if (len > 0) out.write(body, from, len)
+                log?.invoke("SRV ${if (partial) 206 else 200} $key sent=$len/${body.size} range=$range ua=${ua.take(36)}")
             }
             out.flush()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            log?.invoke("SRV error ${e::class.java.simpleName}: ${e.message?.take(60)}")
         } finally {
             try {
                 c.close()
@@ -1940,4 +1988,4 @@ private object LocalSubServer {
         }
     }
 }
-// ===== END OF FILE (HayyaShootProvider.kt, build-37): if you do not see this line, the paste was cut =====
+// ===== END OF FILE (HayyaShootProvider.kt, build-38): if you do not see this line, the paste was cut =====
