@@ -319,7 +319,7 @@ class HayyaShootProvider : MainAPI() {
         val movie = parseJson<TmdbMovie>(tmdbGet("movie/$id?language=ar-SA"))
         val title = movie.title?.takeIf { it.isNotBlank() } ?: return null
 
-        val data = HayyaMediaData(type = "movie", id = id).toJson()
+        val data = HayyaMediaData(type = "movie", id = id, title = title, altTitle = movie.originalTitle).toJson()
 
         return newMovieLoadResponse(title, url, TvType.Movie, data) {
             this.posterUrl = movie.posterPath?.let { posterBase + it }
@@ -361,7 +361,9 @@ class HayyaShootProvider : MainAPI() {
                     type = "tv",
                     id = id,
                     season = seasonNumber,
-                    episode = ep.episodeNumber
+                    episode = ep.episodeNumber,
+                    title = title,
+                    altTitle = tv.originalName
                 ).toJson()
 
                 newEpisode(epData) {
@@ -402,7 +404,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-39"
+    private val buildTag = "build-41"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -855,6 +857,7 @@ class HayyaShootProvider : MainAPI() {
         json.optJSONObject("data")?.let { d ->
             meta["imdb"] = jstr(d, "imdb_id")
             meta["title"] = jstr(d, "title")
+            meta["file"] = jstr(d, "file_name")
         }
         val su = json.optJSONObject("data")?.opt("stream_urls")
         val vs = json.optJSONObject("vs")
@@ -1018,6 +1021,32 @@ class HayyaShootProvider : MainAPI() {
             text.toByteArray(Charsets.UTF_8)
     }
 
+    private fun parseHms(t: String): Double {
+        val p = t.split(":")
+        if (p.size != 3) return 0.0
+        return (p[0].toDoubleOrNull() ?: 0.0) * 3600 + (p[1].toDoubleOrNull() ?: 0.0) * 60 + (p[2].toDoubleOrNull() ?: 0.0)
+    }
+
+    // Which OpenSubtitles file fits THIS video best? Same release name (WEB/BluRay/group...),
+    // last timestamp close to the length of the video, then popularity.
+    private fun rowScore(row: JSONObject, fileName: String?): Double {
+        val words = { t: String -> Regex("[a-z0-9]{2,}").findAll(t.lowercase()).map { it.value }.toSet() }
+        val v = words(fileName.orEmpty())
+        val r = words(jstr(row, "MovieReleaseName") + " " + jstr(row, "SubFileName"))
+        val sim = if (v.isEmpty()) 0.0 else v.intersect(r).size.toDouble() / v.size
+        val dur = lastVideoDuration
+        val last = parseHms(jstr(row, "SubLastTS"))
+        val cov = if (dur != null && dur > 120 && last > 0) {
+            1.0 - kotlin.math.abs(last / dur - 0.95).coerceAtMost(1.0)
+        } else 0.0
+        val dl = (jstr(row, "SubDownloadsCnt").toIntOrNull() ?: 0).coerceAtMost(5000) / 5000.0
+        return sim * 60 + cov * 40 + dl * 10
+    }
+
+    // "ara" first; when no usable Arabic file exists, "eng" (English)
+    @Volatile
+    private var subLang = "ara"
+
     // The TV decodes subtitles as Windows-1256 (confirmed on the TV): only that copy is offered,
     // and only the two most complete files, instead of a long list of variants.
     private val tvOnly = true
@@ -1027,11 +1056,18 @@ class HayyaShootProvider : MainAPI() {
         media: HayyaMediaData,
         imdb: String?,
         title: String?,
+        fileName: String?,
         subtitleCallback: (SubtitleFile) -> Unit
     ) {
         subPool.clear()
+        subLang = "ara"
         try {
-            collectArabicSubtitles(media, imdb, title, subtitleCallback)
+            collectArabicSubtitles(media, imdb, title, fileName, subtitleCallback)
+            if (subPool.isEmpty()) {
+                trace("T6 no usable Arabic subtitle: English instead")
+                subLang = "eng"
+                collectArabicSubtitles(media, imdb, title, fileName, subtitleCallback)
+            }
         } finally {
             // runs even when the time budget cancels the search: serve what was found
             publishBestSubtitles(subtitleCallback)
@@ -1052,7 +1088,8 @@ class HayyaShootProvider : MainAPI() {
         }
         val dur = lastVideoDuration
         for ((i, c) in ranked.take(2).withIndex()) {
-            val label = if (i == 0) "Arabic" else "Arabic 2"
+            val base = if (subLang == "ara") "Arabic" else "English"
+            val label = if (i == 0) base else "$base 2"
             val useCp = tvOnly && cp != null
             val bytes = if (useCp) c.text.toByteArray(cp!!) else c.text.toByteArray(Charsets.UTF_8)
             val id = "b$i" + c.text.length + c.cues
@@ -1075,6 +1112,7 @@ class HayyaShootProvider : MainAPI() {
         media: HayyaMediaData,
         imdb: String?,
         title: String?,
+        fileName: String?,
         subtitleCallback: (SubtitleFile) -> Unit
     ) {
         LocalSubServer.log = { msg -> trace(msg) }
@@ -1090,10 +1128,10 @@ class HayyaShootProvider : MainAPI() {
         // 1) by IMDb id (what the real player does), 2) by title when 1) has no Arabic file.
         // The legacy API wants its parameters in alphabetical order.
         val searches = ArrayList<String>()
-        if (digits.isNotBlank()) searches.add("${epPart}imdbid-$digits/${seasonPart}sublanguageid-ara")
+        if (digits.isNotBlank()) searches.add("${epPart}imdbid-$digits/${seasonPart}sublanguageid-$subLang")
         if (cleanTitle.isNotBlank()) {
             val q = java.net.URLEncoder.encode(cleanTitle, "UTF-8").replace("+", "%20")
-            searches.add("${epPart}query-$q/${seasonPart}sublanguageid-ara")
+            searches.add("${epPart}query-$q/${seasonPart}sublanguageid-$subLang")
         }
         if (searches.isEmpty()) {
             trace("T1 no imdb id and no title in the API answer")
@@ -1129,11 +1167,11 @@ class HayyaShootProvider : MainAPI() {
             val found = (0 until arr.length())
                 .mapNotNull { arr.optJSONObject(it) }
                 .filter {
-                    jstr(it, "SubLanguageID") == "ara" &&
+                    jstr(it, "SubLanguageID") == subLang &&
                         jstr(it, "SubFormat").equals("srt", true) &&
                         jstr(it, "SubDownloadLink").isNotBlank()
                 }
-                .sortedByDescending { jstr(it, "SubDownloadsCnt").toIntOrNull() ?: 0 }
+                .sortedByDescending { rowScore(it, fileName) }
                 .take(6)
             trace("T2 arabic srt found=${found.size} of ${arr.length()} (${if (path.contains("imdbid-")) "imdb" else "title"} search)")
             if (found.isNotEmpty()) {
@@ -1156,7 +1194,8 @@ class HayyaShootProvider : MainAPI() {
                     jstr(row, "SubFileName").take(48),
                     jstr(row, "IDSubtitleFile").ifBlank { "s$n" },
                     n,
-                    subtitleCallback
+                    subtitleCallback,
+                    jstr(row, "MovieFPS").toDoubleOrNull()
                 )
             ) {
                 n++
@@ -1164,7 +1203,7 @@ class HayyaShootProvider : MainAPI() {
         }
 
         // Other sources, only when OpenSubtitles gave nothing (or only one file)
-        if (n < 2) {
+        if (n < 2 && subLang == "ara") {
             try {
                 n = fromPodnapisi(media, title, n, subtitleCallback)
             } catch (e: Exception) {
@@ -1172,7 +1211,7 @@ class HayyaShootProvider : MainAPI() {
                 trace("T5 podnapisi exception ${e::class.java.simpleName}: ${e.message?.take(80)}")
             }
         }
-        if (n < 2 && isTv) {
+        if (n < 2 && isTv && subLang == "ara") {
             try {
                 n = fromTvSubtitles(media, title, n, subtitleCallback)
             } catch (e: Exception) {
@@ -1191,7 +1230,8 @@ class HayyaShootProvider : MainAPI() {
         fileLabel: String,
         seed: String,
         n: Int,
-        subtitleCallback: (SubtitleFile) -> Unit
+        subtitleCallback: (SubtitleFile) -> Unit,
+        fps: Double? = null
     ): Boolean {
         val srt = try {
             toUtf8Srt(raw, enc)
@@ -1214,9 +1254,16 @@ class HayyaShootProvider : MainAPI() {
             ) persianOnly++
         }
         val persianRatio = if (arabicLetters > 0) persianOnly.toDouble() / arabicLetters else 0.0
-        if (arabicLetters < 100 || persianRatio > 0.02) {
+        if (subLang == "ara" && (arabicLetters < 100 || persianRatio > 0.02)) {
             trace("T3 skipped $fileLabel: not Arabic (arabic letters=$arabicLetters persian-only=$persianOnly)")
             return false
+        }
+        if (subLang != "ara") {
+            val latin = srtText.count { it in 'a'..'z' || it in 'A'..'Z' }
+            if (latin < 200) {
+                trace("T3 skipped $fileLabel: not English (latin letters=$latin)")
+                return false
+            }
         }
         // Timing: a file made for another frame rate (25 vs 23.976 fps) is 4.3% shorter/longer
         // than the video and drifts: stretch it so that it ends where the video ends.
@@ -1225,9 +1272,11 @@ class HayyaShootProvider : MainAPI() {
         val dur = lastVideoDuration
         if (dur != null && dur > 120 && lastEnd > 30) {
             val ratio = dur / lastEnd
+            // Only a file that SAYS it was made at 25 fps is stretched. The old rule (any 3-6%
+            // gap) also hit normal subtitles, whose last line comes before the credits, and
+            // made them drift away from the dialogue.
             val factor = when {
-                ratio in 1.025..1.065 -> 25.0 / 23.976
-                ratio in 0.935..0.975 -> 23.976 / 25.0
+                fps != null && fps in 24.9..25.1 && ratio in 1.03..1.06 -> 25.0 / 23.976
                 else -> 1.0
             }
             trace(
@@ -1491,22 +1540,49 @@ class HayyaShootProvider : MainAPI() {
         val q = if (isTv) "type=tv&id=${media.id}&s=${media.season}&e=${media.episode}" else "type=movie&id=${media.id}"
         trace("V1 VidSrc has nothing -> Server 1: get_embed.php?$q")
 
-        val r = withTimeoutOrNull(10_000L) {
+        // The first call returned the site's home page (HTML) instead of JSON: the page's own
+        // JS calls it with the cookies of the page and as an XHR. Do the same, on both paths.
+        val pageUrl = "$mainUrl/movies/?${if (isTv) "tv" else "movie"}=${media.id}"
+        val warm = withTimeoutOrNull(10_000L) {
             try {
-                app.get(
-                    "$mainUrl/get_embed.php?$q",
-                    headers = browserHeaders + mapOf(
-                        "Referer" to "$mainUrl/movies/",
-                        "Accept" to "application/json, text/plain, */*"
-                    )
-                )
+                app.get(pageUrl, headers = browserHeaders)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 null
             }
         }
-        val body = r?.text ?: ""
-        trace("V1 get_embed HTTP ${r?.code} len=${body.length} ${snippet(body)}")
+        val cookies = warm?.cookies ?: emptyMap()
+        trace("V1 site page HTTP ${warm?.code} cookies=${cookies.keys}")
+
+        var body = ""
+        for (path in listOf("/get_embed.php", "/movies/get_embed.php")) {
+            val r = withTimeoutOrNull(10_000L) {
+                try {
+                    app.get(
+                        "$mainUrl$path?$q",
+                        headers = mapOf(
+                            "User-Agent" to MOBILE_CHROME_UA,
+                            "Accept" to "application/json, text/plain, */*",
+                            "Referer" to pageUrl,
+                            "X-Requested-With" to "XMLHttpRequest",
+                            "Sec-Fetch-Dest" to "empty",
+                            "Sec-Fetch-Mode" to "cors",
+                            "Sec-Fetch-Site" to "same-origin"
+                        ),
+                        cookies = cookies
+                    )
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    null
+                }
+            }
+            val b = r?.text ?: ""
+            trace("V1 $path HTTP ${r?.code} len=${b.length} ${snippet(b)}")
+            if (b.trimStart().startsWith("{")) {
+                body = b
+                break
+            }
+        }
         val fromSite = try {
             jstr(JSONObject(body), "embed_url")
         } catch (e: Exception) {
@@ -1672,7 +1748,7 @@ class HayyaShootProvider : MainAPI() {
             trace("T8 video duration=${lastVideoDuration?.toInt()}s")
             try {
                 withTimeoutOrNull(35_000L) {
-                    addArabicSubtitles(media, meta["imdb"], meta["title"], subtitleCallback)
+                    addArabicSubtitles(media, meta["imdb"], meta["title"], meta["file"], subtitleCallback)
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
@@ -1740,6 +1816,81 @@ class HayyaShootProvider : MainAPI() {
         return emitted > 0
     }
 
+    private fun titleSim(a: String, b: String): Double {
+        val words = { t: String -> Regex("""[\p{L}\p{N}]+""").findAll(t.lowercase()).map { it.value }.toSet() }
+        val x = words(a)
+        val y = words(b)
+        if (x.isEmpty() || y.isEmpty()) return 0.0
+        return x.intersect(y).size.toDouble() / x.union(y).size
+    }
+
+    private suspend fun fetchEnglishTitle(media: HayyaMediaData): String? =
+        try {
+            val kind = if (media.type == "tv") "tv" else "movie"
+            val j = JSONObject(tmdbGet("$kind/${media.id}?language=en-US"))
+            jstr(j, if (kind == "tv") "name" else "title").ifBlank { null }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            null
+        }
+
+    // VidSrc (and the site's Server 1) do not have every title, e.g. Thai / Asian shows.
+    // Other plugins of the same user do: ask the installed ones, as the app itself would.
+    private suspend fun tryOtherProviders(
+        media: HayyaMediaData,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val wanted = listOf("ourdrama", "takkiadrama", "asiashow", "aradrama", "fivetv")
+        val others = APIHolder.allProviders.filter { api ->
+            api !== this && wanted.any { api.name.contains(it, ignoreCase = true) }
+        }
+        trace("X0 other plugins installed: ${others.joinToString { it.name }.ifBlank { "none" }}")
+        if (others.isEmpty()) return false
+
+        val queries = listOfNotNull(fetchEnglishTitle(media), media.title, media.altTitle)
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+        trace("X0 titles: ${queries.joinToString(" | ") { it.take(40) }}")
+        if (queries.isEmpty()) return false
+
+        for (api in others) {
+            for (q in queries) {
+                try {
+                    val results = withTimeoutOrNull(12_000L) { api.search(q) } ?: continue
+                    val best = results.maxByOrNull { titleSim(q, it.name) } ?: continue
+                    val sim = titleSim(q, best.name)
+                    trace("X1 ${api.name} search \"${q.take(30)}\" -> ${best.name.take(40)} sim=${"%.2f".format(sim)}")
+                    if (sim < 0.6) continue
+
+                    val resp = withTimeoutOrNull(15_000L) { api.load(best.url) } ?: continue
+                    val data: String? = when (resp) {
+                        is TvSeriesLoadResponse -> resp.episodes.firstOrNull { e ->
+                            e.episode == media.episode && (e.season == null || e.season == media.season)
+                        }?.data
+                        is MovieLoadResponse -> resp.dataUrl
+                        else -> null
+                    }
+                    if (data == null) {
+                        trace("X1 ${api.name}: no matching episode/movie in ${resp.javaClass.simpleName}")
+                        continue
+                    }
+                    val ok = withTimeoutOrNull(25_000L) {
+                        api.loadLinks(data, isCasting, subtitleCallback, callback)
+                    } ?: false
+                    trace("X2 ${api.name} loadLinks -> $ok")
+                    if (ok) return true
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    trace("X1 ${api.name} exception ${e::class.java.simpleName}: ${e.message?.take(70)}")
+                }
+            }
+        }
+        return false
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -1772,6 +1923,17 @@ class HayyaShootProvider : MainAPI() {
             if (e is CancellationException) throw e
             logError(e)
             trace("exception ${e::class.java.simpleName}: ${e.message?.take(120)}")
+        }
+
+        if (!found) {
+            try {
+                found = withTimeoutOrNull(45_000L) {
+                    tryOtherProviders(media, isCasting, subtitleCallback, callback)
+                } ?: false
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                trace("X9 exception ${e::class.java.simpleName}: ${e.message?.take(100)}")
+            }
         }
 
         trace("end found=$found")
@@ -1869,7 +2031,9 @@ class HayyaShootProvider : MainAPI() {
         val type: String,
         val id: Int,
         val season: Int? = null,
-        val episode: Int? = null
+        val episode: Int? = null,
+        val title: String? = null,
+        val altTitle: String? = null
     )
 
     data class VsSrcResponse(
@@ -1893,6 +2057,7 @@ class HayyaShootProvider : MainAPI() {
     data class TmdbMovie(
         @JsonProperty("id") val id: Int,
         @JsonProperty("title") val title: String? = null,
+        @JsonProperty("original_title") val originalTitle: String? = null,
         @JsonProperty("overview") val overview: String? = null,
         @JsonProperty("poster_path") val posterPath: String? = null,
         @JsonProperty("backdrop_path") val backdropPath: String? = null,
@@ -1903,6 +2068,7 @@ class HayyaShootProvider : MainAPI() {
     data class TmdbTv(
         @JsonProperty("id") val id: Int,
         @JsonProperty("name") val name: String? = null,
+        @JsonProperty("original_name") val originalName: String? = null,
         @JsonProperty("overview") val overview: String? = null,
         @JsonProperty("poster_path") val posterPath: String? = null,
         @JsonProperty("backdrop_path") val backdropPath: String? = null,
@@ -2049,4 +2215,4 @@ private object LocalSubServer {
         }
     }
 }
-// ===== END OF FILE (HayyaShootProvider.kt, build-39): if you do not see this line, the paste was cut =====
+// ===== END OF FILE (HayyaShootProvider.kt, build-41): if you do not see this line, the paste was cut =====
