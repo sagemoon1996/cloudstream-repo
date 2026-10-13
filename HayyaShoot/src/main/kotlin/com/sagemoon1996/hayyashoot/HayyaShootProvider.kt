@@ -404,7 +404,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-41"
+    private val buildTag = "build-42"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -1663,7 +1663,7 @@ class HayyaShootProvider : MainAPI() {
     ): Boolean {
         val meta = HashMap<String, String>()
         val urls = fetchStreamUrls(streamApiUrl(media), media, meta)
-            ?: return tryServer1(media, subtitleCallback, callback)
+            ?: return false
         trace("S3 ${urls.size} stream urls: " + urls.joinToString(" | ") { it.substringAfter("://").take(70) })
         if (urls.isEmpty()) return false
 
@@ -1933,6 +1933,18 @@ class HayyaShootProvider : MainAPI() {
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 trace("X9 exception ${e::class.java.simpleName}: ${e.message?.take(100)}")
+            }
+        }
+
+        // Last resort: the site's own "Server 1" (slow and unverified, so it comes last)
+        if (!found) {
+            try {
+                found = withTimeoutOrNull(40_000L) {
+                    tryServer1(media, subtitleCallback, callback)
+                } ?: false
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                trace("V9 exception ${e::class.java.simpleName}: ${e.message?.take(100)}")
             }
         }
 
@@ -2215,4 +2227,4 @@ private object LocalSubServer {
         }
     }
 }
-// ===== END OF FILE (HayyaShootProvider.kt, build-41): if you do not see this line, the paste was cut =====
+// ===== END OF FILE (HayyaShootProvider.kt, build-42): if you do not see this line, the paste was cut =====
