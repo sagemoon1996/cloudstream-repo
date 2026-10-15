@@ -404,7 +404,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-42"
+    private val buildTag = "build-44"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -651,8 +651,21 @@ class HayyaShootProvider : MainAPI() {
             Regex("""404|timeout|exception|failed|no player|no stream|no usable|HTTP [45]\d\d|not on""", RegexOption.IGNORE_CASE)
                 .containsMatchIn(it)
         }
-        return "RESULT: ${end?.substringAfter("ms ") ?: "still running"}\n" +
+        // Everything needed to understand a failure, in the first lines (one photo of the TV)
+        val s1 = lines.firstOrNull { it.contains(" S1 ") }
+        val s5 = lines.lastOrNull { it.contains(" S5 ") }
+        val alt = lines.firstOrNull { it.contains(" X1 ") || it.contains(" V1 ") }
+        val subs = lines.lastOrNull { it.contains(" T9 ") }
+        val ok = lines.count { it.contains("PLAYLIST") }
+        val unverified = lines.any { it.contains("unverified") }
+        return "BUILD $buildTag\n" +
+            "RESULT: ${end?.substringAfter("ms ") ?: "still running"}\n" +
             "FIRST PROBLEM: ${problem?.take(150) ?: "none"}\n" +
+            "VIDEO API: ${s1?.substringAfter("ms ")?.take(110) ?: "-"}\n" +
+            "PLAYLISTS OK: $ok${if (unverified) " (a link that could NOT be verified was offered: it may fail with HTTP error 2004)" else ""}\n" +
+            "LAST CHECK: ${s5?.substringAfter("ms ")?.take(130) ?: "-"}\n" +
+            "OTHER SOURCES: ${alt?.substringAfter("ms ")?.take(110) ?: "-"}\n" +
+            "SUBTITLES: ${subs?.substringAfter("ms ")?.take(130) ?: "-"}\n" +
             "------\n" + lines.joinToString("\n")
     }
 
@@ -1029,6 +1042,47 @@ class HayyaShootProvider : MainAPI() {
 
     // Which OpenSubtitles file fits THIS video best? Same release name (WEB/BluRay/group...),
     // last timestamp close to the length of the video, then popularity.
+    private fun stripZeros(s: String) = s.filter { it.isDigit() }.trimStart('0')
+
+    // A file tagged with another show/episode (a "01. End Of The Curse.srt" for Golden Girls
+    // S1E1) is the "subtitle unrelated to the content": keep only files whose metadata says
+    // exactly this season/episode (or this movie), and which are not far too short.
+    private fun rowMatches(
+        row: JSONObject,
+        media: HayyaMediaData,
+        digits: String,
+        cleanTitle: String,
+        byTitle: Boolean
+    ): Boolean {
+        val isTv = media.type == "tv" && media.season != null && media.episode != null
+        val kind = jstr(row, "MovieKind")
+        if (isTv) {
+            if (kind.isNotBlank() && !kind.equals("episode", true)) return false
+            val s = jstr(row, "SeriesSeason").toIntOrNull()
+            val e = jstr(row, "SeriesEpisode").toIntOrNull()
+            if (s != null && s != 0 && s != media.season) return false
+            if (e != null && e != 0 && e != media.episode) return false
+            val parent = stripZeros(jstr(row, "SeriesIMDBParent"))
+            if (digits.isNotBlank() && parent.isNotBlank() && parent != stripZeros(digits)) return false
+        } else {
+            if (kind.isNotBlank() && !kind.equals("movie", true)) return false
+            val id = stripZeros(jstr(row, "IDMovieImdb"))
+            if (digits.isNotBlank() && id.isNotBlank() && id != stripZeros(digits)) return false
+        }
+        if (byTitle && cleanTitle.isNotBlank()) {
+            val name = jstr(row, "MovieName")
+            if (name.isNotBlank()) {
+                // episodes are named: "Series title" Episode title
+                val series = Regex("^\"(.+?)\"").find(name)?.groupValues?.getOrNull(1) ?: name
+                if (titleSim(cleanTitle, series) < 0.5) return false
+            }
+        }
+        val dur = lastVideoDuration
+        val last = parseHms(jstr(row, "SubLastTS"))
+        if (dur != null && dur > 120 && last > 0 && last / dur < 0.75) return false
+        return true
+    }
+
     private fun rowScore(row: JSONObject, fileName: String?): Double {
         val words = { t: String -> Regex("[a-z0-9]{2,}").findAll(t.lowercase()).map { it.value }.toSet() }
         val v = words(fileName.orEmpty())
@@ -1076,9 +1130,15 @@ class HayyaShootProvider : MainAPI() {
 
     // Ranks the candidates by how completely they cover the video, publishes the best two
     private fun publishBestSubtitles(subtitleCallback: (SubtitleFile) -> Unit) {
-        val ranked = synchronized(subPool) { subPool.sortedByDescending { it.score } }
+        val all = synchronized(subPool) { subPool.sortedByDescending { it.score } }
+        val durNow = lastVideoDuration
+        // a subtitle that stops long before the video ends is worse than none
+        val ranked = if (durNow != null && durNow > 120) all.filter { it.lastEnd / durNow >= 0.80 } else all
+        if (all.isNotEmpty() && ranked.isEmpty()) {
+            trace("T9 ${all.size} candidates, all cover less than 80% of the video: none offered")
+        }
         if (ranked.isEmpty()) {
-            trace("T9 no usable Arabic subtitle")
+            trace("T9 no usable subtitle")
             return
         }
         val cp = try {
@@ -1164,16 +1224,19 @@ class HayyaShootProvider : MainAPI() {
                 trace("T1 not json: ${snippet(text)}")
                 continue
             }
-            val found = (0 until arr.length())
+            val byTitle = path.contains("query-")
+            val usable = (0 until arr.length())
                 .mapNotNull { arr.optJSONObject(it) }
                 .filter {
                     jstr(it, "SubLanguageID") == subLang &&
                         jstr(it, "SubFormat").equals("srt", true) &&
                         jstr(it, "SubDownloadLink").isNotBlank()
                 }
+            val exact = usable.filter { rowMatches(it, media, digits, cleanTitle, byTitle) }
+            val found = exact
                 .sortedByDescending { rowScore(it, fileName) }
                 .take(6)
-            trace("T2 arabic srt found=${found.size} of ${arr.length()} (${if (path.contains("imdbid-")) "imdb" else "title"} search)")
+            trace("T2 $subLang srt: ${usable.size} files, ${exact.size} match this exact episode/movie, using ${found.size} (${if (byTitle) "title" else "imdb"} search)")
             if (found.isNotEmpty()) {
                 rows = found
                 break
@@ -1726,7 +1789,9 @@ class HayyaShootProvider : MainAPI() {
             if (emitted >= 3) break
         }
 
-        // Nothing could be verified: still let the player try the best guesses
+        // Nothing could be verified: still let the player try the best guesses, but do not
+        // count them as success, so the other methods still run (error 2004 on the TV)
+        val verifiedCount = emitted
         if (emitted == 0) {
             unverified.take(2).forEachIndexed { i, (u, ref) ->
                 emitLink(callback, u, ref, "VidSrc unverified ${i + 1}")
@@ -1755,7 +1820,7 @@ class HayyaShootProvider : MainAPI() {
                 trace("T0 subtitles exception ${e::class.java.simpleName}: ${e.message?.take(80)}")
             }
         }
-        return emitted > 0
+        return verifiedCount > 0
     }
 
     // Plays a playlist URL given by hand. The playlist is hotlink-protected, so every
@@ -2227,4 +2292,4 @@ private object LocalSubServer {
         }
     }
 }
-// ===== END OF FILE (HayyaShootProvider.kt, build-42): if you do not see this line, the paste was cut =====
+// ===== END OF FILE (HayyaShootProvider.kt, build-44): if you do not see this line, the paste was cut =====
