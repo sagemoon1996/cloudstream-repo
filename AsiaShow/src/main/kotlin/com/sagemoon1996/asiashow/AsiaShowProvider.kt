@@ -1,25 +1,13 @@
-
 package com.sagemoon1996.asiashow
 
-import android.annotation.SuppressLint
-import android.content.Context
-import android.webkit.CookieManager
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
-import okhttp3.Interceptor
-import okhttp3.Response
 import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
 import java.net.URLEncoder
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 
 class AsiaShowProvider : MainAPI() {
 
@@ -327,93 +315,29 @@ class AsiaShowProvider : MainAPI() {
             )
         }
 
-        return try {
-            // اختبار تشخيصي: طلب الصفحة الرئيسية دون cfKiller.
-            val response = app.get(
-                request.data,
-                referer = mainUrl
-            )
+        val document = app.get(
+            request.data,
+            referer = mainUrl,
+            interceptor = cfKiller
+        ).document
 
-            val document = response.document
-            val html = response.text
-
-            val seriesLinks = document.select(
-                "a[href*='/series/']"
-            ).size
-
-            val movieLinks = document.select(
-                "a[href*='/movies/']"
-            ).size
-
-            val episodeLinks = document.select(
-                "a[href*='/episodes/']"
-            ).size
-
-            val etkCards = document.select(
-                ".etk-card-link"
-            ).size
-
-            val normalizedRequestData = try {
-                URLDecoder.decode(request.data, "UTF-8")
-            } catch (_: Exception) {
-                request.data
-            }
-
-            val isLatest =
-                request.name.contains("الحلقات") ||
-                    normalizedRequestData.contains("الحلقات") ||
-                    request.data.contains(
-                        "%D8%A3%D8%AE%D8%B1-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A7%D8%AA",
-                        ignoreCase = true
-                    )
-
-            val items = if (isLatest) {
-                parseLatestEpisodes(document)
-            } else {
-                parseContentCards(document)
-            }
-
-            if (items.isNotEmpty()) {
-                newHomePageResponse(
-                    request.name,
-                    items,
-                    hasNext = false
-                )
-            } else {
-                val diagnostic =
-                    "DIAG HTTP=${response.code} " +
-                    "HTML=${html.length} " +
-                    "Series=$seriesLinks " +
-                    "Movies=$movieLinks " +
-                    "Episodes=$episodeLinks " +
-                    "ETK=$etkCards " +
-                    "Latest=$isLatest"
-
-                newHomePageResponse(
-                    request.name,
-                    listOf(
-                        newMovieSearchResponse(
-                            name = diagnostic,
-                            url = mainUrl,
-                            type = TvType.Movie
-                        )
-                    ),
-                    hasNext = false
-                )
-            }
-        } catch (e: Exception) {
-            newHomePageResponse(
-                request.name,
-                listOf(
-                    newMovieSearchResponse(
-                        name = "DIAG ERROR: ${e.javaClass.simpleName}",
-                        url = mainUrl,
-                        type = TvType.Movie
-                    )
-                ),
-                hasNext = false
-            )
+        val isLatest = try {
+            URLDecoder.decode(request.data, "UTF-8").contains("الحلقات")
+        } catch (_: Exception) {
+            false
         }
+
+        val items = if (isLatest) {
+            parseLatestEpisodes(document)
+        } else {
+            parseContentCards(document)
+        }
+
+        return newHomePageResponse(
+            request.name,
+            items,
+            hasNext = false
+        )
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -749,148 +673,5 @@ class AsiaShowProvider : MainAPI() {
         }
 
         return foundLinks
-    }
-}
-
-class CloudflareKiller(
-    private val getContext: () -> Context? = {
-        try {
-            val cls = Class.forName("com.lagradost.cloudstream3.MainActivity")
-            val field = cls.getDeclaredField("activity")
-            field.isAccessible = true
-            field.get(null) as? Context
-        } catch (_: Exception) {
-            null
-        }
-    }
-) : Interceptor {
-
-    private val cookies = mutableMapOf<String, String>()
-
-    private val challengeMarkers = listOf(
-        "challenges.cloudflare.com",
-        "/cdn-cgi/challenge-platform/",
-        "jschl_vc",
-        "cf_chl_",
-        "Just a moment",
-        "security verification"
-    )
-
-    @SuppressLint("SetJavaScriptEnabled")
-    override fun intercept(chain: Interceptor.Chain): Response {
-        val request = chain.request()
-        val host = request.url.host
-
-        val savedCookies = synchronized(cookies) {
-            cookies[host]
-        }
-
-        val requestWithCookies =
-            if (
-                !savedCookies.isNullOrBlank() &&
-                request.header("Cookie").isNullOrBlank()
-            ) {
-                request.newBuilder()
-                    .header("Cookie", savedCookies)
-                    .build()
-            } else {
-                request
-            }
-
-        val response = chain.proceed(requestWithCookies)
-
-        val isChallenge = try {
-            val peek = response.peekBody(512 * 1024).string()
-            challengeMarkers.any {
-                peek.contains(it, ignoreCase = true)
-            }
-        } catch (_: Exception) {
-            false
-        }
-
-        if (!isChallenge) {
-            return response
-        }
-
-        response.close()
-
-        var cookieString = ""
-        val context = getContext()
-
-        if (context != null) {
-            runBlocking {
-                val latch = CountDownLatch(1)
-                var webView: WebView? = null
-
-                try {
-                    withContext(Dispatchers.Main) {
-                        val view = WebView(context)
-                        webView = view
-
-                        view.settings.javaScriptEnabled = true
-                        view.settings.domStorageEnabled = true
-
-                        val cookieManager = CookieManager.getInstance()
-                        cookieManager.setAcceptCookie(true)
-                        cookieManager.setAcceptThirdPartyCookies(view, true)
-
-                        view.webViewClient = object : WebViewClient() {
-                            override fun onPageFinished(
-                                view: WebView,
-                                pageUrl: String
-                            ) {
-                                view.postDelayed({
-                                    try {
-                                        cookieString =
-                                            cookieManager.getCookie(pageUrl).orEmpty()
-                                    } catch (_: Exception) {
-                                        cookieString = ""
-                                    } finally {
-                                        latch.countDown()
-                                    }
-                                }, 4000)
-                            }
-                        }
-
-                        view.loadUrl(request.url.toString())
-                    }
-
-                    withContext(Dispatchers.IO) {
-                        latch.await(40, TimeUnit.SECONDS)
-                    }
-                } finally {
-                    withContext(Dispatchers.Main) {
-                        try {
-                            webView?.stopLoading()
-                            webView?.destroy()
-                        } catch (_: Exception) {
-                        }
-                    }
-                }
-            }
-        }
-
-        if (cookieString.isNotBlank()) {
-            synchronized(cookies) {
-                cookies[host] = cookieString
-            }
-        }
-
-        val finalCookies = cookieString.ifBlank {
-            synchronized(cookies) {
-                cookies[host]
-            }.orEmpty()
-        }
-
-        val retryRequest =
-            if (finalCookies.isNotBlank()) {
-                request.newBuilder()
-                    .header("Cookie", finalCookies)
-                    .build()
-            } else {
-                requestWithCookies
-            }
-
-        return chain.proceed(retryRequest)
     }
 }
