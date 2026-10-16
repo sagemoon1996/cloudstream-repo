@@ -1,3 +1,4 @@
+
 package com.sagemoon1996.asiashow
 
 import android.annotation.SuppressLint
@@ -327,10 +328,10 @@ class AsiaShowProvider : MainAPI() {
         }
 
         return try {
+            // اختبار تشخيصي: طلب الصفحة الرئيسية دون cfKiller.
             val response = app.get(
                 request.data,
-                referer = mainUrl,
-                interceptor = cfKiller
+                referer = mainUrl
             )
 
             val document = response.document
@@ -822,15 +823,12 @@ class CloudflareKiller(
                 var webView: WebView? = null
 
                 try {
-                    // Create and start WebView on the main thread.
-                    // Do not wait on the main thread.
                     withContext(Dispatchers.Main) {
                         val view = WebView(context)
                         webView = view
 
-                        val settings = view.settings
-                        settings.javaScriptEnabled = true
-                        settings.domStorageEnabled = true
+                        view.settings.javaScriptEnabled = true
+                        view.settings.domStorageEnabled = true
 
                         val cookieManager = CookieManager.getInstance()
                         cookieManager.setAcceptCookie(true)
@@ -848,8 +846,6 @@ class CloudflareKiller(
                                     } catch (_: Exception) {
                                         cookieString = ""
                                     } finally {
-                                        // Always release the waiting thread,
-                                        // even if no cookies were returned.
                                         latch.countDown()
                                     }
                                 }, 4000)
@@ -859,12 +855,10 @@ class CloudflareKiller(
                         view.loadUrl(request.url.toString())
                     }
 
-                    // Wait on a background dispatcher, not Dispatchers.Main.
                     withContext(Dispatchers.IO) {
                         latch.await(40, TimeUnit.SECONDS)
                     }
                 } finally {
-                    // Clean up WebView on the main thread.
                     withContext(Dispatchers.Main) {
                         try {
                             webView?.stopLoading()
@@ -883,17 +877,19 @@ class CloudflareKiller(
         }
 
         val finalCookies = cookieString.ifBlank {
-            synchronized(cookies) { cookies[host] }.orEmpty()
+            synchronized(cookies) {
+                cookies[host]
+            }.orEmpty()
         }
 
-        // If no cookies were obtained, retry without adding an empty Cookie header.
-        val retryRequest = if (finalCookies.isNotBlank()) {
-            request.newBuilder()
-                .header("Cookie", finalCookies)
-                .build()
-        } else {
-            requestWithCookies
-        }
+        val retryRequest =
+            if (finalCookies.isNotBlank()) {
+                request.newBuilder()
+                    .header("Cookie", finalCookies)
+                    .build()
+            } else {
+                requestWithCookies
+            }
 
         return chain.proceed(retryRequest)
     }
