@@ -21,7 +21,7 @@ class AsiaShowProvider : MainAPI() {
         TvType.Movie
     )
 
-    // ✅ جديد: مهاجم Cloudflare — يحل التحدي ويخزن الكوكيز
+    // ✅ CloudflareKiller معرّف تحت في نفس الملف
     private val cfKiller = CloudflareKiller()
 
     override val mainPage = mainPageOf(
@@ -235,7 +235,10 @@ class AsiaShowProvider : MainAPI() {
 
         val seriesSlug =
             episodeSlug.replace(
-                Regex("""-(?:الحلقة|حلقة|episode|ep)-?\d+$""", RegexOption.IGNORE_CASE),
+                Regex(
+                    """-(?:الحلقة|حلقة|episode|ep)-?\d+$""",
+                    RegexOption.IGNORE_CASE
+                ),
                 ""
             )
 
@@ -311,7 +314,6 @@ class AsiaShowProvider : MainAPI() {
             )
         }
 
-        // ✅ interceptor هنا
         val document = app.get(
             request.data,
             referer = mainUrl,
@@ -384,7 +386,6 @@ class AsiaShowProvider : MainAPI() {
 
         return try {
 
-            // ✅ interceptor هنا
             val response = app.get(
                 url,
                 referer = mainUrl,
@@ -555,7 +556,6 @@ class AsiaShowProvider : MainAPI() {
         url: String
     ): LoadResponse? {
 
-        // ✅ interceptor هنا
         val document = app.get(
             url,
             referer = mainUrl,
@@ -631,7 +631,6 @@ class AsiaShowProvider : MainAPI() {
 
         return try {
 
-            // ✅ interceptor هنا
             val document = app.get(
                 serverUrl,
                 referer = episodeUrl,
@@ -677,7 +676,6 @@ class AsiaShowProvider : MainAPI() {
 
         return try {
 
-            // ✅ interceptor هنا
             val document = app.get(
                 serverUrl,
                 referer = episodeUrl,
@@ -750,7 +748,6 @@ class AsiaShowProvider : MainAPI() {
 
         val document = try {
 
-            // ✅ interceptor هنا
             app.get(
                 episodeUrl,
                 referer = mainUrl,
@@ -853,5 +850,135 @@ class AsiaShowProvider : MainAPI() {
         }
 
         return foundLinks
+    }
+}
+
+// ============================================================
+// CloudflareKiller — في نفس الملف، ما تحتاج حتى ملف آخر
+// ============================================================
+import android.annotation.SuppressLint
+import android.webkit.CookieManager
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import com.lagradost.cloudstream3.MainActivity
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import okhttp3.Interceptor
+import okhttp3.Response
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+
+class CloudflareKiller : Interceptor {
+
+    private val cookies = mutableMapOf<String, String>()
+
+    private val challengeMarkers = listOf(
+        "challenges.cloudflare.com",
+        "/cdn-cgi/challenge-platform/",
+        "jschl_vc",
+        "cf_chl_",
+        "Just a moment",
+        "security verification"
+    )
+
+    @SuppressLint("SetJavaScriptEnabled")
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val url = request.url.toString()
+        val host = request.url.host
+
+        // نرسل الكوكيز المخزنة إذا موجودة
+        val savedCookies =
+            synchronized(cookies) { cookies[host] }
+
+        val requestWithCookies =
+            if (
+                !savedCookies.isNullOrBlank() &&
+                request.header("Cookie").isNullOrBlank()
+            ) {
+                request.newBuilder()
+                    .header("Cookie", savedCookies)
+                    .build()
+            } else {
+                request
+            }
+
+        val response = chain.proceed(requestWithCookies)
+
+        // هل الصفحة رجعة هي صفحة تحدي Cloudflare؟
+        val isChallenge = try {
+            val peek = response.peekBody(512 * 1024).string()
+            challengeMarkers.any { peek.contains(it, ignoreCase = true) }
+        } catch (_: Exception) {
+            false
+        }
+
+        if (!isChallenge) {
+            return response
+        }
+
+        response.close()
+
+        // نحل التحدي بالـ WebView
+        var cookieString = ""
+
+        runBlocking {
+            withContext(Dispatchers.Main) {
+
+                val context = MainActivity.activity
+                    ?: return@withContext
+
+                val latch = CountDownLatch(1)
+
+                val webView = WebView(context)
+
+                val settings = webView.settings
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+
+                val cookieManager = CookieManager.getInstance()
+                cookieManager.setAcceptThirdPartyCookies(webView, true)
+                cookieManager.removeAllCookies(null)
+
+                webView.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView, pageUrl: String) {
+                        view.postDelayed({
+                            val pageCookies =
+                                cookieManager.getCookie(pageUrl)
+
+                            if (!pageCookies.isNullOrBlank()) {
+                                cookieString = pageCookies
+                                latch.countDown()
+                            }
+                        }, 4000)
+                    }
+                }
+
+                webView.loadUrl(url)
+
+                latch.await(40, TimeUnit.SECONDS)
+
+                webView.stopLoading()
+                webView.destroy()
+            }
+        }
+
+        if (cookieString.isNotBlank()) {
+            synchronized(cookies) {
+                cookies[host] = cookieString
+            }
+        }
+
+        val finalCookies =
+            cookieString.ifBlank {
+                synchronized(cookies) { cookies[host] } ?: ""
+            }
+
+        val newRequest = request.newBuilder()
+            .header("Cookie", finalCookies)
+            .build()
+
+        return chain.proceed(newRequest)
     }
 }
