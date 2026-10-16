@@ -404,7 +404,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-51"
+    private val buildTag = "build-45"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -460,38 +460,6 @@ class HayyaShootProvider : MainAPI() {
                     android.widget.Toast.makeText(
                         ctx,
                         "HayyaShoot DIAG copied - paste it in the chat",
-                        android.widget.Toast.LENGTH_LONG
-                    ).show()
-                } catch (_: Throwable) {
-                }
-            }
-        } catch (_: Throwable) {
-        }
-    }
-
-    // TVs have no clipboard access: pop the first 4 diagnostic lines as a Toast
-    // after every playback attempt, so the problem can be read straight off the screen.
-    private fun showDiagToast() {
-        val summary = try {
-            val head = diagText().lines().take(4)
-            val all = traceLines.toList()
-            val t8 = all.lastOrNull { it.contains("T8 sync") }
-            val t9 = all.lastOrNull { it.contains("T9 ") && it.contains("http") }
-            (head + listOfNotNull(t8, t9))
-                .joinToString("\n") { it.take(95) }
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            return
-        }
-        try {
-            val ctx = Class.forName("android.app.ActivityThread")
-                .getMethod("currentApplication")
-                .invoke(null) as? android.content.Context ?: return
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                try {
-                    android.widget.Toast.makeText(
-                        ctx,
-                        summary,
                         android.widget.Toast.LENGTH_LONG
                     ).show()
                 } catch (_: Throwable) {
@@ -797,14 +765,6 @@ class HayyaShootProvider : MainAPI() {
         val ih = inner?.text ?: ""
         val token = Regex(""""apiToken"\s*:\s*"([^"]+)"""").find(ih)?.groupValues?.getOrNull(1)
         trace("P2 inner HTTP ${inner?.code} len=${ih.length} apiToken=${token?.length}")
-        // Debug: the full player CONFIG (cacheBase, subtitle endpoints, keys) — small JSON
-        try {
-            Regex("""window\.CONFIG\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL)
-                .find(ih)?.groupValues?.getOrNull(1)
-                ?.let { trace("P2 CONFIG: ${compact(it).take(1500)}") }
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-        }
         if (token.isNullOrBlank()) {
             traceContexts("P2 html", ih, listOf("token", "CONFIG"), 60, 220, 3)
             return null
@@ -854,8 +814,8 @@ class HayyaShootProvider : MainAPI() {
                     if (js != null) {
                         traceContexts(
                             "P5 subs", js,
-                            listOf("cache.php", "cache-vtt", "wyzie", "key=", "search?", "fetch(", "tmdb", "season=", "parseVTT"),
-                            160, 460, 6
+                            listOf("cache.php", "cacheBase", "SubDownloadLink", ".gz", "wyzie", "sublanguageid", "vtt"),
+                            120, 420, 3
                         )
                     }
                 }
@@ -1368,25 +1328,22 @@ class HayyaShootProvider : MainAPI() {
                 return false
             }
         }
-        // Timing: a file made for another frame rate (25 vs 23.976 fps) is 4.3% shorter/longer
-        // than the video and drifts: stretch it so that it ends where the video ends.
+        // Timing: make the LAST cue end close to the end of the video (~97%: the dialogue
+        // stops a little before the credits). Works both ways: a file that ends after the
+        // video is compressed, a file that ends long before it is stretched.
         var text = srtText.removePrefix("\uFEFF")
         var lastEnd = lastCueEndSeconds(text)
         val dur = lastVideoDuration
         if (dur != null && dur > 120 && lastEnd > 30) {
             val ratio = dur / lastEnd
-            // Only a file that SAYS it was made at 25 fps is stretched. The old rule (any 3-6%
-            // gap) also hit normal subtitles, whose last line comes before the credits, and
-            // made them drift away from the dialogue.
+            // cover = lastEnd / dur. Natural range: 0.90..0.99 (credits after the last line).
+            val cover = lastEnd / dur
+            val fitFactor = dur * 0.97 / lastEnd
             val factor = when {
                 fps != null && fps in 24.9..25.1 && ratio in 1.03..1.06 -> 25.0 / 23.976
-                // Subtitle LONGER than the video by 3-6%: authored against the
-                // 25fps-speedup release (cue times packed tight by 25/23.976), so
-                // on this normal 23.976 video it runs AHEAD of the sound and its
-                // last cues appear before the video ends. Stretch cue times back
-                // by 25/23.976. Normal subtitles stop BEFORE the video end
-                // (credits), so this rule never touches them.
-                ratio in 0.94..0.972 -> 25.0 / 23.976
+                // outside the natural range: rescale, but only if the correction is plausible
+                // (+-15%), otherwise it is probably another cut of the video: leave it alone
+                (cover > 0.99 || cover < 0.90) && fitFactor in 0.85..1.15 -> fitFactor
                 else -> 1.0
             }
             trace(
@@ -2062,10 +2019,7 @@ class HayyaShootProvider : MainAPI() {
 
         trace("end found=$found")
         lastDiagnostic = traceLines.toList().joinToString("\n")
-        if (debugMode) {
-            copyToClipboard(lastDiagnostic ?: "")
-            showDiagToast()
-        }
+        if (debugMode) copyToClipboard(lastDiagnostic ?: "")
         return found
     }
 
@@ -2247,7 +2201,7 @@ private object LocalSubServer {
         synchronized(store) {
             store.remove("$id.$ext")
             store["$id.$ext"] = bytes to charset
-            while (store.size > 100) {
+            while (store.size > 40) {
                 store.remove(store.keys.first())
             }
         }
@@ -2342,4 +2296,4 @@ private object LocalSubServer {
         }
     }
 }
-// ===== END OF FILE (HayyaShootProvider.kt, build-44): if you do not see this line, the paste was cut =====
+// ===== END OF FILE (HayyaShootProvider.kt, build-45): if you do not see this line, the paste was cut =====
