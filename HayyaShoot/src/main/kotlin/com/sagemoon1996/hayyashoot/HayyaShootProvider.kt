@@ -404,7 +404,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-44"
+    private val buildTag = "build-47"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -460,6 +460,33 @@ class HayyaShootProvider : MainAPI() {
                     android.widget.Toast.makeText(
                         ctx,
                         "HayyaShoot DIAG copied - paste it in the chat",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                } catch (_: Throwable) {
+                }
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
+    // TVs have no clipboard access: pop the first 4 diagnostic lines as a Toast
+    // after every playback attempt, so the problem can be read straight off the screen.
+    private fun showDiagToast() {
+        val summary = try {
+            diagText().lines().take(4).joinToString("\n")
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            return
+        }
+        try {
+            val ctx = Class.forName("android.app.ActivityThread")
+                .getMethod("currentApplication")
+                .invoke(null) as? android.content.Context ?: return
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                try {
+                    android.widget.Toast.makeText(
+                        ctx,
+                        summary,
                         android.widget.Toast.LENGTH_LONG
                     ).show()
                 } catch (_: Throwable) {
@@ -765,6 +792,14 @@ class HayyaShootProvider : MainAPI() {
         val ih = inner?.text ?: ""
         val token = Regex(""""apiToken"\s*:\s*"([^"]+)"""").find(ih)?.groupValues?.getOrNull(1)
         trace("P2 inner HTTP ${inner?.code} len=${ih.length} apiToken=${token?.length}")
+        // Debug: the full player CONFIG (cacheBase, subtitle endpoints, keys) — small JSON
+        try {
+            Regex("""window\.CONFIG\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL)
+                .find(ih)?.groupValues?.getOrNull(1)
+                ?.let { trace("P2 CONFIG: ${compact(it).take(1500)}") }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+        }
         if (token.isNullOrBlank()) {
             traceContexts("P2 html", ih, listOf("token", "CONFIG"), 60, 220, 3)
             return null
@@ -814,8 +849,8 @@ class HayyaShootProvider : MainAPI() {
                     if (js != null) {
                         traceContexts(
                             "P5 subs", js,
-                            listOf("cache.php", "cacheBase", "SubDownloadLink", ".gz", "wyzie", "sublanguageid", "vtt"),
-                            120, 420, 3
+                            listOf("cache.php", "cache-vtt", "wyzie", "key=", "search?", "fetch(", "tmdb", "season=", "parseVTT"),
+                            160, 460, 6
                         )
                     }
                 }
@@ -1133,9 +1168,9 @@ class HayyaShootProvider : MainAPI() {
         val all = synchronized(subPool) { subPool.sortedByDescending { it.score } }
         val durNow = lastVideoDuration
         // a subtitle that stops long before the video ends is worse than none
-        val ranked = if (durNow != null && durNow > 120) all.filter { it.lastEnd / durNow >= 0.95 } else all
+        val ranked = if (durNow != null && durNow > 120) all.filter { it.lastEnd / durNow >= 0.80 } else all
         if (all.isNotEmpty() && ranked.isEmpty()) {
-            trace("T9 ${all.size} candidates, all cover less than 95% of the video: none offered")
+            trace("T9 ${all.size} candidates, all cover less than 80% of the video: none offered")
         }
         if (ranked.isEmpty()) {
             trace("T9 no usable subtitle")
@@ -2015,7 +2050,10 @@ class HayyaShootProvider : MainAPI() {
 
         trace("end found=$found")
         lastDiagnostic = traceLines.toList().joinToString("\n")
-        if (debugMode) copyToClipboard(lastDiagnostic ?: "")
+        if (debugMode) {
+            copyToClipboard(lastDiagnostic ?: "")
+            showDiagToast()
+        }
         return found
     }
 
