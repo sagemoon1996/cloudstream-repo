@@ -66,25 +66,16 @@ class AsiaShowProvider : MainAPI() {
         }
     }
 
-    private fun isSameSite(url: String): Boolean {
-        return try {
-            val host = java.net.URI(url).host ?: return false
-            host.equals("asiashow.net", ignoreCase = true) ||
-                host.equals("www.asiashow.net", ignoreCase = true)
-        } catch (_: Exception) {
-            url.startsWith(mainUrl, ignoreCase = true)
-        }
-    }
-
     private fun elementImage(element: Element): String? {
         val image = element.selectFirst(
-            "img[data-src], img[data-lazy-src], img[data-original], img[src]"
+            "img[data-src], img[data-lazy-src], img[data-original], img[src], source[data-srcset]"
         ) ?: return null
 
         val imageUrl = image.attr("data-src")
             .ifBlank { image.attr("data-lazy-src") }
             .ifBlank { image.attr("data-original") }
             .ifBlank { image.attr("src") }
+            .ifBlank { image.attr("data-srcset").substringBefore(",").substringBefore(" ") }
             .trim()
 
         return when {
@@ -125,6 +116,16 @@ class AsiaShowProvider : MainAPI() {
             .ifBlank { element.text().trim() }
     }
 
+    private fun isSameSite(url: String): Boolean {
+        return try {
+            val host = java.net.URI(url).host ?: return false
+            host.equals("asiashow.net", ignoreCase = true) ||
+                host.equals("www.asiashow.net", ignoreCase = true)
+        } catch (_: Exception) {
+            url.startsWith(mainUrl, ignoreCase = true)
+        }
+    }
+
     private fun parseContentCard(link: Element): SearchResponse? {
         val url = absoluteUrl(link)
 
@@ -143,9 +144,9 @@ class AsiaShowProvider : MainAPI() {
             return null
         }
 
-        val card = link.closest(
-            ".etk-card, article, .item, .post, .movie-item, .series-item"
-        ) ?: link.parent() ?: link
+        val card = link.closest(".etk-card, article, .item, .post, .movie-item, .series-item")
+            ?: link.parent()
+            ?: link
 
         val title = cardTitle(link)
             .ifBlank { cardTitle(card) }
@@ -177,8 +178,11 @@ class AsiaShowProvider : MainAPI() {
     }
 
     private fun parseContentCards(document: Document): List<SearchResponse> {
-        return document
-            .select("a[href*='/series/'], a[href*='/movies/']")
+        val links = document.select(
+            "a[href*='/series/'], a[href*='/movies/']"
+        )
+
+        return links
             .mapNotNull { link ->
                 parseContentCard(link)
             }
@@ -205,9 +209,9 @@ class AsiaShowProvider : MainAPI() {
             return null
         }
 
-        val card = link.closest(
-            ".etk-card, article, .item, .post"
-        ) ?: link.parent() ?: link
+        val card = link.closest(".etk-card, article, .item, .post")
+            ?: link.parent()
+            ?: link
 
         val title = cardTitle(link)
             .ifBlank { cardTitle(card) }
@@ -222,8 +226,11 @@ class AsiaShowProvider : MainAPI() {
     }
 
     private fun parseEpisodes(document: Document): List<Episode> {
-        return document
-            .select("a[href*='/episodes/']")
+        val links = document.select(
+            "a[href*='/episodes/']"
+        )
+
+        return links
             .mapNotNull { link ->
                 parseEpisode(link)
             }
@@ -326,93 +333,40 @@ class AsiaShowProvider : MainAPI() {
             )
         }
 
-        return try {
-            val response = app.get(
-                request.data,
-                referer = mainUrl,
-                interceptor = cfKiller
-            )
+        val response = app.get(
+            request.data,
+            referer = mainUrl,
+            interceptor = cfKiller
+        )
 
-            val document = response.document
-            val html = response.text
+        val document = response.document
 
-            val seriesLinks = document.select(
-                "a[href*='/series/']"
-            ).size
-
-            val movieLinks = document.select(
-                "a[href*='/movies/']"
-            ).size
-
-            val episodeLinks = document.select(
-                "a[href*='/episodes/']"
-            ).size
-
-            val etkCards = document.select(
-                ".etk-card-link"
-            ).size
-
-            val normalizedRequestData = try {
-                URLDecoder.decode(request.data, "UTF-8")
-            } catch (_: Exception) {
-                request.data
-            }
-
-            val isLatest =
-                request.name.contains("الحلقات") ||
-                    normalizedRequestData.contains("الحلقات") ||
-                    request.data.contains(
-                        "%D8%A3%D8%AE%D8%B1-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A7%D8%AA",
-                        ignoreCase = true
-                    )
-
-            val items = if (isLatest) {
-                parseLatestEpisodes(document)
-            } else {
-                parseContentCards(document)
-            }
-
-            if (items.isNotEmpty()) {
-                newHomePageResponse(
-                    request.name,
-                    items,
-                    hasNext = false
-                )
-            } else {
-                val diagnostic =
-                    "DIAG HTTP=${response.code} " +
-                    "HTML=${html.length} " +
-                    "Series=$seriesLinks " +
-                    "Movies=$movieLinks " +
-                    "Episodes=$episodeLinks " +
-                    "ETK=$etkCards " +
-                    "Latest=$isLatest"
-
-                newHomePageResponse(
-                    request.name,
-                    listOf(
-                        newMovieSearchResponse(
-                            name = diagnostic,
-                            url = mainUrl,
-                            type = TvType.Movie
-                        )
-                    ),
-                    hasNext = false
-                )
-            }
-        } catch (e: Exception) {
-            newHomePageResponse(
-                request.name,
-                listOf(
-                    newMovieSearchResponse(
-                        name = "DIAG ERROR: ${e.javaClass.simpleName}",
-                        url = mainUrl,
-                        type = TvType.Movie
-                    )
-                ),
-                hasNext = false
-            )
+        val normalizedRequestData = try {
+            URLDecoder.decode(request.data, "UTF-8")
+        } catch (_: Exception) {
+            request.data
         }
+
+        val isLatest =
+            request.name.contains("الحلقات") ||
+                normalizedRequestData.contains("/أخر-الحلقات/") ||
+                normalizedRequestData.contains("/آخر-الحلقات/") ||
+                request.data.contains(
+                    "%D8%A3%D8%AE%D8%B1-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A7%D8%AA",
+                    ignoreCase = true
+                )
+
+        val items = if (isLatest) {
+            parseLatestEpisodes(document)
+        } else {
+            parseContentCards(document)
+        }
+
+        return newHomePageResponse(
+            request.name,
+            items,
+            hasNext = false
+        )
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -750,6 +704,10 @@ class AsiaShowProvider : MainAPI() {
         return foundLinks
     }
 }
+
+// ============================================================
+// CloudflareKiller
+// ============================================================
 
 class CloudflareKiller(
     private val getContext: () -> Context? = {
