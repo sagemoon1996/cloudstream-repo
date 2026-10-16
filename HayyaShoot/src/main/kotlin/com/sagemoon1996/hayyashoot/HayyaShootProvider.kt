@@ -1133,9 +1133,9 @@ class HayyaShootProvider : MainAPI() {
         val all = synchronized(subPool) { subPool.sortedByDescending { it.score } }
         val durNow = lastVideoDuration
         // a subtitle that stops long before the video ends is worse than none
-        val ranked = if (durNow != null && durNow > 120) all.filter { it.lastEnd / durNow >= 0.80 } else all
+        val ranked = if (durNow != null && durNow > 120) all.filter { it.lastEnd / durNow >= 0.95 } else all
         if (all.isNotEmpty() && ranked.isEmpty()) {
-            trace("T9 ${all.size} candidates, all cover less than 80% of the video: none offered")
+            trace("T9 ${all.size} candidates, all cover less than 95% of the video: none offered")
         }
         if (ranked.isEmpty()) {
             trace("T9 no usable subtitle")
@@ -2197,7 +2197,7 @@ private object LocalSubServer {
         synchronized(store) {
             store.remove("$id.$ext")
             store["$id.$ext"] = bytes to charset
-            while (store.size > 40) {
+            while (store.size > 100) {
                 store.remove(store.keys.first())
             }
         }
