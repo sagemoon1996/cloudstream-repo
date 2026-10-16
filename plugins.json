@@ -40,7 +40,7 @@
         "name": "Aradrama"
     },
     {
-        "fileHash": "sha256-5c48721ef885b8e61a998eeab623caba1a59a793b6455b8a4a294c38ed8bbe71",
+        "fileHash": "sha256-fffed7e8e9989599494ed76d4df526e2ad1b566e4266410c0ea848412162471b",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
         "fileSize": 29253,
@@ -53,7 +53,7 @@
             "TvSeries",
             "Movie"
         ],
-        "version": 1,
+        "version": 2,
         "internalName": "AsiaShow",
         "description": "AsiaShow Arabic streaming provider",
         "url": "https://raw.githubusercontent.com/sagemoon1996/cloudstream-repo/builds/AsiaShow.cs3",
