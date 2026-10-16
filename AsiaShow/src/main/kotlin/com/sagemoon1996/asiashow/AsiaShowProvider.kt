@@ -1,6 +1,7 @@
 package com.sagemoon1996.asiashow
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -32,6 +33,8 @@ class AsiaShowProvider : MainAPI() {
         TvType.Movie
     )
 
+    // Use CloudflareKiller with a default context provider; the default tries to
+    // obtain a Context reflectively from MainActivity.activity if present.
     private val cfKiller = CloudflareKiller()
 
     override val mainPage = mainPageOf(
@@ -865,9 +868,23 @@ class AsiaShowProvider : MainAPI() {
 
 // ============================================================
 // CloudflareKiller — نفس الملف، ما تحتاج حتى ملف آخر
+// - Now accepts a Context provider; default provider uses reflection
+//   to attempt to read com.lagradost.cloudstream3.MainActivity.activity
+//   to preserve backwards compatibility.
 // ============================================================
 
-class CloudflareKiller : Interceptor {
+class CloudflareKiller(
+    private val getContext: () -> Context? = {
+        try {
+            val cls = Class.forName("com.lagradost.cloudstream3.MainActivity")
+            val field = cls.getDeclaredField("activity")
+            field.isAccessible = true
+            field.get(null) as? Context
+        } catch (_: Exception) {
+            null
+        }
+    }
+) : Interceptor {
 
     private val cookies = mutableMapOf<String, String>()
 
@@ -921,8 +938,8 @@ class CloudflareKiller : Interceptor {
         runBlocking {
             withContext(Dispatchers.Main) {
 
-                val context = com.lagradost.cloudstream3.MainActivity.activity
-                    ?: return@withContext
+                // Use the provided context provider rather than a hard dependency.
+                val context = getContext() ?: return@withContext
 
                 val latch = CountDownLatch(1)
 
