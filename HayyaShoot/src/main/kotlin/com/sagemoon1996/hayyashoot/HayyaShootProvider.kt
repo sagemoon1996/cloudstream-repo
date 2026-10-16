@@ -404,7 +404,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-49"
+    private val buildTag = "build-50"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -1375,11 +1375,13 @@ class HayyaShootProvider : MainAPI() {
             // made them drift away from the dialogue.
             val factor = when {
                 fps != null && fps in 24.9..25.1 && ratio in 1.03..1.06 -> 25.0 / 23.976
-                // Subtitle LONGER than the video by 3-6%: made for the 25fps (PAL)
-                // master while this video is 23.976fps — its last cues would land
-                // past the end of the video and never be shown. Normal subtitles
-                // stop BEFORE the video (credits), so this rule never touches them.
-                ratio in 0.94..0.972 -> 23.976 / 25.0
+                // Subtitle LONGER than the video by 3-6%: authored against the
+                // 25fps-speedup release (cue times packed tight by 25/23.976), so
+                // on this normal 23.976 video it runs AHEAD of the sound and its
+                // last cues appear before the video ends. Stretch cue times back
+                // by 25/23.976. Normal subtitles stop BEFORE the video end
+                // (credits), so this rule never touches them.
+                ratio in 0.94..0.972 -> 25.0 / 23.976
                 else -> 1.0
             }
             trace(
