@@ -404,7 +404,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-45"
+    private val buildTag = "build-46"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -1333,6 +1333,11 @@ class HayyaShootProvider : MainAPI() {
         // video is compressed, a file that ends long before it is stretched.
         var text = srtText.removePrefix("\uFEFF")
         var lastEnd = lastCueEndSeconds(text)
+        run {
+            val ct = cueTimes(text)
+            fun f(c: Pair<Double, Double>) = "${c.first.toInt()}-${c.second.toInt()}"
+            trace("T8 cues $fileLabel first=${ct.take(2).joinToString { f(it) }} last=${ct.takeLast(3).joinToString { f(it) }} realEnd=${lastEnd.toInt()}s")
+        }
         val dur = lastVideoDuration
         if (dur != null && dur > 120 && lastEnd > 30) {
             val ratio = dur / lastEnd
@@ -1404,16 +1409,30 @@ class HayyaShootProvider : MainAPI() {
         return if (total > 0) total else null
     }
 
-    // End time (seconds) of the last cue of an .srt
+    // (start, end) in seconds of every cue of an .srt, in file order
+    private fun cueTimes(text: String): List<Pair<Double, Double>> {
+        val t = """(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})"""
+        fun sec(g: List<String>, o: Int) =
+            g[o].toInt() * 3600 + g[o + 1].toInt() * 60 + g[o + 2].toInt() +
+                g[o + 3].padEnd(3, '0').toInt() / 1000.0
+        return Regex("$t\\s*-->\\s*$t").findAll(text).map {
+            sec(it.groupValues, 1) to sec(it.groupValues, 5)
+        }.toList()
+    }
+
+    // End time (seconds) of the last REAL cue: trailing cues that come after a gap of more
+    // than 30 s (credits / "subtitles by..." ads) are ignored.
     private fun lastCueEndSeconds(text: String): Double {
-        var best = 0.0
-        Regex("""-->\s*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})""").findAll(text).forEach { m ->
-            val g = m.groupValues
-            val t = g[1].toInt() * 3600 + g[2].toInt() * 60 + g[3].toInt() +
-                g[4].padEnd(3, '0').toInt() / 1000.0
-            if (t > best) best = t
+        val cues = cueTimes(text)
+        if (cues.isEmpty()) return 0.0
+        var cut = cues.size
+        for (i in maxOf(3, cues.size - 5) until cues.size) {
+            if (cues[i].first - cues[i - 1].second > 30.0) {
+                cut = i
+                break
+            }
         }
-        return best
+        return cues.take(cut).maxOf { it.second }
     }
 
     // Multiplies every cue time by f (only on the "00:00:01,000 --> 00:00:03,000" lines)
@@ -2296,4 +2315,4 @@ private object LocalSubServer {
         }
     }
 }
-// ===== END OF FILE (HayyaShootProvider.kt, build-45): if you do not see this line, the paste was cut =====
+// ===== END OF FILE (HayyaShootProvider.kt, build-46): if you do not see this line, the paste was cut =====
