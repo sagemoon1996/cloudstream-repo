@@ -404,7 +404,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-50"
+    private val buildTag = "build-51"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -473,7 +473,12 @@ class HayyaShootProvider : MainAPI() {
     // after every playback attempt, so the problem can be read straight off the screen.
     private fun showDiagToast() {
         val summary = try {
-            diagText().lines().take(4).joinToString("\n")
+            val head = diagText().lines().take(4)
+            val all = traceLines.toList()
+            val t8 = all.lastOrNull { it.contains("T8 sync") }
+            val t9 = all.lastOrNull { it.contains("T9 ") && it.contains("http") }
+            (head + listOfNotNull(t8, t9))
+                .joinToString("\n") { it.take(95) }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             return
