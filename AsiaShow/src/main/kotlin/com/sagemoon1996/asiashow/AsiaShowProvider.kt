@@ -1,12 +1,23 @@
 package com.sagemoon1996.asiashow
 
+import android.annotation.SuppressLint
+import android.webkit.CookieManager
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import okhttp3.Interceptor
+import okhttp3.Response
 import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class AsiaShowProvider : MainAPI() {
 
@@ -21,7 +32,6 @@ class AsiaShowProvider : MainAPI() {
         TvType.Movie
     )
 
-    // ✅ CloudflareKiller معرّف تحت في نفس الملف
     private val cfKiller = CloudflareKiller()
 
     override val mainPage = mainPageOf(
@@ -854,20 +864,8 @@ class AsiaShowProvider : MainAPI() {
 }
 
 // ============================================================
-// CloudflareKiller — في نفس الملف، ما تحتاج حتى ملف آخر
+// CloudflareKiller — نفس الملف، ما تحتاج حتى ملف آخر
 // ============================================================
-import android.annotation.SuppressLint
-import android.webkit.CookieManager
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import com.lagradost.cloudstream3.MainActivity
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
-import okhttp3.Interceptor
-import okhttp3.Response
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 
 class CloudflareKiller : Interceptor {
 
@@ -888,7 +886,6 @@ class CloudflareKiller : Interceptor {
         val url = request.url.toString()
         val host = request.url.host
 
-        // نرسل الكوكيز المخزنة إذا موجودة
         val savedCookies =
             synchronized(cookies) { cookies[host] }
 
@@ -906,7 +903,6 @@ class CloudflareKiller : Interceptor {
 
         val response = chain.proceed(requestWithCookies)
 
-        // هل الصفحة رجعة هي صفحة تحدي Cloudflare؟
         val isChallenge = try {
             val peek = response.peekBody(512 * 1024).string()
             challengeMarkers.any { peek.contains(it, ignoreCase = true) }
@@ -920,13 +916,12 @@ class CloudflareKiller : Interceptor {
 
         response.close()
 
-        // نحل التحدي بالـ WebView
         var cookieString = ""
 
         runBlocking {
             withContext(Dispatchers.Main) {
 
-                val context = MainActivity.activity
+                val context = com.lagradost.cloudstream3.MainActivity.activity
                     ?: return@withContext
 
                 val latch = CountDownLatch(1)
