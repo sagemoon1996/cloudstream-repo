@@ -82,10 +82,10 @@
     },
     {
         "iconUrl": "https://hayyashoot.com/favicon.ico",
-        "fileHash": "sha256-eaa51edd25dabc3d01c000c2041f8b206a6e6633cd2f50105cb6ae11a3f8c204",
+        "fileHash": "sha256-874e48b82c32a68654c72dea864bd9df72988e2da8a164d8a9d43abaf80f5639",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
-        "fileSize": 121771,
+        "fileSize": 122750,
         "status": 1,
         "language": "ar",
         "authors": [
