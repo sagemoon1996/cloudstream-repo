@@ -40,10 +40,10 @@
         "name": "Aradrama"
     },
     {
-        "fileHash": "sha256-e1461e1860658ca03f9e652ef0608e9267700d8f8d7170dc63e06d2035e69e11",
+        "fileHash": "sha256-f38555c625ad79a47c937a35ea7389744946aa8522cce6c70efe9cbf3d4e28ba",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
-        "fileSize": 22960,
+        "fileSize": 26732,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -82,10 +82,10 @@
     },
     {
         "iconUrl": "https://hayyashoot.com/favicon.ico",
-        "fileHash": "sha256-feec4c1fa6f8793611fe6fce802cd5ab94f5057bd79ac450a3d32dfcbcd0e1e1",
+        "fileHash": "sha256-36316c3f365612a425beae4e339e129865e93892569bc937e75f414027b37ecf",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
-        "fileSize": 122357,
+        "fileSize": 122370,
         "status": 1,
         "language": "ar",
         "authors": [
