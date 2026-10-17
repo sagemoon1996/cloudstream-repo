@@ -187,7 +187,7 @@ class AsiaShowProvider : MainAPI() {
             ?.toIntOrNull()
     }
 
-    private fun parseEpisode(link: Element): Episode? {
+    private fun parseEpisode(link: Element, fallback: Int): Episode? {
         val url = absoluteUrl(link)
 
         if (!url.contains("/episodes/", ignoreCase = true)) {
@@ -201,7 +201,7 @@ class AsiaShowProvider : MainAPI() {
         val title = cardTitle(link)
             .ifBlank { cardTitle(card) }
 
-        val number = episodeNumber(title, url) ?: return null
+        val number = episodeNumber(title, url) ?: fallback
 
         return newEpisode(url) {
             name = title.ifBlank { "الحلقة $number" }
@@ -213,8 +213,8 @@ class AsiaShowProvider : MainAPI() {
     private fun parseEpisodes(document: Document): List<Episode> {
         return document
             .select("a[href*='/episodes/']")
-            .mapNotNull { link ->
-                parseEpisode(link)
+            .mapIndexedNotNull { index, link ->
+                parseEpisode(link, index + 1)
             }
             .distinctBy { it.data }
             .sortedBy { it.episode ?: Int.MAX_VALUE }
@@ -319,7 +319,8 @@ class AsiaShowProvider : MainAPI() {
             app.get(
                 request.data,
                 referer = mainUrl,
-                timeout = 20
+                interceptor = cfKiller,
+                timeout = 60
             )
         } catch (e: Exception) {
             return newHomePageResponse(
@@ -354,8 +355,8 @@ class AsiaShowProvider : MainAPI() {
                 request.name,
                 listOf(
                     newMovieSearchResponse(
-                        name = "HTTP ${response.code} len=${response.text.length} " +
-                            "cf=${response.text.contains("Just a moment", true)}",
+                        name = "CF=${response.text.contains("Just a moment", true)} " +
+                            "HTTP${response.code} len=${response.text.length}",
                         url = mainUrl,
                         type = TvType.Movie
                     )
@@ -364,9 +365,21 @@ class AsiaShowProvider : MainAPI() {
             )
         }
 
+        val diagCard = newMovieSearchResponse(
+            name = "DIAG s=${document.select("a[href*='/series/']").size} " +
+                "m=${document.select("a[href*='/movies/']").size} " +
+                "e=${document.select("a[href*='/episodes/']").size} " +
+                "cards=${document.select(".etk-card-link").size} " +
+                "parsed=${items.size} " +
+                "next=${document.select("a[href*='page/'], [class*=load-more], [class*=pagination], [class*=next]").size} " +
+                "len=${response.text.length}",
+            url = mainUrl,
+            type = TvType.Movie
+        )
+
         return newHomePageResponse(
             request.name,
-            items,
+            listOf(diagCard) + items,
             hasNext = false
         )
     }
@@ -508,6 +521,10 @@ class AsiaShowProvider : MainAPI() {
         }
 
         val episodes = parseEpisodes(document)
+        val rawEpisodeLinks = document.select("a[href*='/episodes/']").size
+        val pagerHints = document.select(
+            "a[href*='page/'], [class*=load-more], [class*=pagination], [class*=next]"
+        ).size
 
         return newTvSeriesLoadResponse(
             name = title,
@@ -516,7 +533,8 @@ class AsiaShowProvider : MainAPI() {
             episodes = episodes
         ) {
             posterUrl = poster
-            plot = description
+            plot = "DIAG links=$rawEpisodeLinks parsed=${episodes.size} pager=$pagerHints\n\n" +
+                description.orEmpty()
         }
     }
 
