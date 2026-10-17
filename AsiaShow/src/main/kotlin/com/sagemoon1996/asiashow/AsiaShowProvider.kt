@@ -311,6 +311,20 @@ class AsiaShowProvider : MainAPI() {
             .distinctBy { it.url }
     }
 
+    private fun diagResponse(request: MainPageRequest, text: String): HomePageResponse {
+        return newHomePageResponse(
+            request.name,
+            listOf(
+                newMovieSearchResponse(
+                    name = text,
+                    url = mainUrl,
+                    type = TvType.Movie
+                )
+            ),
+            hasNext = false
+        )
+    }
+
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
@@ -323,84 +337,57 @@ class AsiaShowProvider : MainAPI() {
             )
         }
 
-        val response = try {
-            withTimeoutOrNull(25_000L) {
+        return try {
+            val response = withTimeoutOrNull(20_000L) {
                 app.get(
                     request.data,
                     referer = mainUrl,
                     headers = cfHeaders
                 )
-            } ?: return newHomePageResponse(
-                request.name,
-                listOf(
-                    newMovieSearchResponse(
-                        name = "CF TIMEOUT 25s (WebView?)",
-                        url = mainUrl,
-                        type = TvType.Movie
-                    )
-                ),
-                hasNext = false
-            )
-        } catch (e: Exception) {
-            return newHomePageResponse(
-                request.name,
-                listOf(
-                    newMovieSearchResponse(
-                        name = "ERR ${e.javaClass.simpleName}: ${e.message?.take(60)}",
-                        url = mainUrl,
-                        type = TvType.Movie
-                    )
-                ),
-                hasNext = false
-            )
-        }
+            } ?: return diagResponse(request, "v6 TIMEOUT 20s")
 
-        val document = response.document
+            val document = response.document
 
-        val isLatest = try {
-            URLDecoder.decode(request.data, "UTF-8").contains("الحلقات")
-        } catch (_: Exception) {
-            false
-        }
+            val isLatest = try {
+                URLDecoder.decode(request.data, "UTF-8").contains("الحلقات")
+            } catch (_: Exception) {
+                false
+            }
 
-        val items = if (isLatest) {
-            parseLatestEpisodes(document)
-        } else {
-            parseContentCards(document)
-        }
+            val items = if (isLatest) {
+                parseLatestEpisodes(document)
+            } else {
+                parseContentCards(document)
+            }
 
-        if (items.isEmpty()) {
-            return newHomePageResponse(
-                request.name,
-                listOf(
-                    newMovieSearchResponse(
-                        name = "CF=${response.text.contains("Just a moment", true)} " +
-                            "HTTP${response.code} len=${response.text.length}",
-                        url = mainUrl,
-                        type = TvType.Movie
-                    )
-                ),
-                hasNext = false
-            )
-        }
-
-        val diagCard = newMovieSearchResponse(
-            name = "DIAG s=${document.select("a[href*='/series/']").size} " +
-                "m=${document.select("a[href*='/movies/']").size} " +
+            val info = "v6 CF=${response.text.contains("Just a moment", true)} " +
+                "HTTP${response.code} items=${items.size} " +
+                "ck=${cfClearance.isNotBlank()} ua=${userAgent.isNotBlank()} " +
+                "s=${document.select("a[href*='/series/']").size} " +
                 "e=${document.select("a[href*='/episodes/']").size} " +
-                "cards=${document.select(".etk-card-link").size} " +
-                "parsed=${items.size} " +
-                "next=${document.select("a[href*='page/'], [class*=load-more], [class*=pagination], [class*=next]").size} " +
-                "len=${response.text.length}",
-            url = mainUrl,
-            type = TvType.Movie
-        )
+                "len=${response.text.length}"
 
-        return newHomePageResponse(
-            request.name,
-            listOf(diagCard) + items,
-            hasNext = false
-        )
+            if (items.isEmpty()) {
+                return diagResponse(request, info)
+            }
+
+            newHomePageResponse(
+                request.name,
+                listOf(
+                    newMovieSearchResponse(
+                        name = info,
+                        url = mainUrl,
+                        type = TvType.Movie
+                    )
+                ) + items,
+                hasNext = false
+            )
+        } catch (e: Throwable) {
+            diagResponse(
+                request,
+                "v6 ERR ${e.javaClass.simpleName}: ${e.message?.take(50)}"
+            )
+        }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
