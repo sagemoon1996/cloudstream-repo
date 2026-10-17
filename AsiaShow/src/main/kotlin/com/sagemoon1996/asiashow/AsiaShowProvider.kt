@@ -1,8 +1,8 @@
 package com.sagemoon1996.asiashow
 
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -22,7 +22,15 @@ class AsiaShowProvider : MainAPI() {
         TvType.Movie
     )
 
-    private val cfKiller = CloudflareKiller()
+    // ضع هنا قيمة الكوكي cf_clearance والـ User-Agent من نفس المتصفح (نفس الشبكة)
+    private val cfClearance = ""
+    private val userAgent = ""
+
+    private val cfHeaders: Map<String, String>
+        get() = buildMap {
+            if (cfClearance.isNotBlank()) put("Cookie", "cf_clearance=$cfClearance")
+            if (userAgent.isNotBlank()) put("User-Agent", userAgent)
+        }
 
     override val mainPage = mainPageOf(
         "$mainUrl/%D8%A3%D8%AE%D8%B1-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A7%D8%AA/" to "آخر الحلقات",
@@ -316,11 +324,22 @@ class AsiaShowProvider : MainAPI() {
         }
 
         val response = try {
-            app.get(
-                request.data,
-                referer = mainUrl,
-                interceptor = cfKiller,
-                timeout = 60
+            withTimeoutOrNull(25_000L) {
+                app.get(
+                    request.data,
+                    referer = mainUrl,
+                    headers = cfHeaders
+                )
+            } ?: return newHomePageResponse(
+                request.name,
+                listOf(
+                    newMovieSearchResponse(
+                        name = "CF TIMEOUT 25s (WebView?)",
+                        url = mainUrl,
+                        type = TvType.Movie
+                    )
+                ),
+                hasNext = false
             )
         } catch (e: Exception) {
             return newHomePageResponse(
@@ -401,7 +420,7 @@ class AsiaShowProvider : MainAPI() {
             val response = app.get(
                 url,
                 referer = mainUrl,
-                interceptor = cfKiller
+                headers = cfHeaders
             )
 
             val json = JSONObject(response.text)
@@ -501,7 +520,7 @@ class AsiaShowProvider : MainAPI() {
         val document = app.get(
             url,
             referer = mainUrl,
-            interceptor = cfKiller
+            headers = cfHeaders
         ).document
 
         val title = extractTitle(document) ?: return null
@@ -557,7 +576,7 @@ class AsiaShowProvider : MainAPI() {
             val document = app.get(
                 serverUrl,
                 referer = episodeUrl,
-                interceptor = cfKiller
+                headers = cfHeaders
             ).document
 
             val mediaUrl = document
@@ -594,7 +613,7 @@ class AsiaShowProvider : MainAPI() {
             val document = app.get(
                 serverUrl,
                 referer = episodeUrl,
-                interceptor = cfKiller
+                headers = cfHeaders
             ).document
 
             val options = document
@@ -648,7 +667,7 @@ class AsiaShowProvider : MainAPI() {
             app.get(
                 episodeUrl,
                 referer = mainUrl,
-                interceptor = cfKiller
+                headers = cfHeaders
             ).document
         } catch (_: Exception) {
             return false
