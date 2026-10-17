@@ -260,7 +260,6 @@ class HayyaShootProvider : MainAPI() {
                 )
             )
         }
-
         val q = URLEncoder.encode(trimmed, "UTF-8")
 
         return coroutineScope {
@@ -329,22 +328,6 @@ class HayyaShootProvider : MainAPI() {
         }
     }
 
-    // One season: Arabic, retry, then English. null only when all attempts fail.
-    private suspend fun fetchSeasonData(tvId: Int, seasonNumber: Int): TmdbSeason? {
-        for (attempt in 0 until 3) {
-            val lang = if (attempt < 2) "ar-SA" else "en-US"
-            try {
-                val data = parseJson<TmdbSeason>(tmdbGet("tv/$tvId/season/$seasonNumber?language=$lang"))
-                if (!data.episodes.isNullOrEmpty()) return data
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                logError(e)
-            }
-            delay(400L)
-        }
-        return null
-    }
-
     private suspend fun loadTv(url: String, id: Int): LoadResponse? {
         val tv = parseJson<TmdbTv>(tmdbGet("tv/$id?language=ar-SA"))
         val title = tv.name?.takeIf { it.isNotBlank() } ?: return null
@@ -354,49 +337,41 @@ class HayyaShootProvider : MainAPI() {
             .orEmpty()
             .filter { it.seasonNumber > 0 && (it.episodeCount ?: 1) > 0 }
 
-        // Seasons are fetched 6 at a time (a 27-season show used to fire 27 requests at once and
-        // some failed silently), each one retried; a season is never dropped.
-        val seasonMap = HashMap<Int, TmdbSeason>()
-        coroutineScope {
-            for (chunk in seasons.chunked(6)) {
-                chunk.map { info ->
-                    async { info.seasonNumber to fetchSeasonData(id, info.seasonNumber) }
-                }.awaitAll().forEach { (n, data) -> if (data != null) seasonMap[n] = data }
-            }
-        }
-
-        val episodes = seasons.sortedBy { it.seasonNumber }.flatMap { info ->
-            val seasonNumber = info.seasonNumber
-            fun epData(n: Int) = HayyaMediaData(
-                type = "tv",
-                id = id,
-                season = seasonNumber,
-                episode = n,
-                title = title,
-                altTitle = tv.originalName
-            ).toJson()
-
-            val real = seasonMap[seasonNumber]?.episodes.orEmpty()
-            if (real.isNotEmpty()) {
-                real.map { ep ->
-                    newEpisode(epData(ep.episodeNumber)) {
-                        this.name = ep.name?.takeIf { it.isNotBlank() }
-                            ?: "الحلقة ${ep.episodeNumber}"
-                        this.season = seasonNumber
-                        this.episode = ep.episodeNumber
-                        this.description = ep.overview
-                        this.posterUrl = ep.stillPath?.let { posterBase + it }
+        // All seasons fetched in parallel
+        val seasonData = coroutineScope {
+            seasons.map { season ->
+                async {
+                    try {
+                        season.seasonNumber to parseJson<TmdbSeason>(
+                            tmdbGet("tv/$id/season/${season.seasonNumber}?language=ar-SA")
+                        )
+                    } catch (e: Exception) {
+                        if (e is CancellationException) throw e
+                        logError(e)
+                        null
                     }
                 }
-            } else {
-                // TMDB did not answer for this season: build it from the episode count
-                Log.e("HayyaShoot", "season $seasonNumber of tv/$id: no data, using episode count ${info.episodeCount}")
-                (1..(info.episodeCount ?: 0)).map { n ->
-                    newEpisode(epData(n)) {
-                        this.name = "الحلقة $n"
-                        this.season = seasonNumber
-                        this.episode = n
-                    }
+            }.awaitAll()
+        }.filterNotNull().sortedBy { it.first }
+
+        val episodes = seasonData.flatMap { (seasonNumber, data) ->
+            data.episodes.orEmpty().map { ep ->
+                val epData = HayyaMediaData(
+                    type = "tv",
+                    id = id,
+                    season = seasonNumber,
+                    episode = ep.episodeNumber,
+                    title = title,
+                    altTitle = tv.originalName
+                ).toJson()
+
+                newEpisode(epData) {
+                    this.name = ep.name?.takeIf { it.isNotBlank() }
+                        ?: "الحلقة ${ep.episodeNumber}"
+                    this.season = seasonNumber
+                    this.episode = ep.episodeNumber
+                    this.description = ep.overview
+                    this.posterUrl = ep.stillPath?.let { posterBase + it }
                 }
             }
         }
@@ -428,7 +403,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-53"
+    private val buildTag = "build-61"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -629,7 +604,7 @@ class HayyaShootProvider : MainAPI() {
             { it.code in 200..299 }
         ) ?: return null
         val pageUrl = er.url.ifBlank { embed }
-        val api = Regex("""data-api=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+        val api = Regex("data-api=[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
             .find(er.text)?.groupValues?.getOrNull(1)?.replace("&amp;", "&")
             ?: return null
         val pu = Uri.parse(pageUrl)
@@ -656,7 +631,7 @@ class HayyaShootProvider : MainAPI() {
             },
             { it.code in 200..299 }
         ) ?: return null
-        val src = Regex(""""src"\s*:\s*"([^"]+)"""").find(vr.text)
+        val src = Regex("\"src\"\\s*:\\s*\"([^\"]+)\"").find(vr.text)
             ?.groupValues?.getOrNull(1)?.replace("\\/", "/")
         trace("S0 vs_src HTTP ${vr.code} src=${src?.substringAfter("://")?.take(60)}")
         return src
@@ -690,8 +665,6 @@ class HayyaShootProvider : MainAPI() {
             "LAST CHECK: ${s5?.substringAfter("ms ")?.take(130) ?: "-"}\n" +
             "OTHER SOURCES: ${alt?.substringAfter("ms ")?.take(110) ?: "-"}\n" +
             "SUBTITLES: ${subs?.substringAfter("ms ")?.take(130) ?: "-"}\n" +
-            "CLEAN: ${lines.lastOrNull { it.contains(" T8 clean ") }?.substringAfter("ms ")?.take(140) ?: "-"}\n" +
-            "STREMIO: ${lines.lastOrNull { it.contains(" T10 ") }?.substringAfter("ms ")?.take(120) ?: "-"}\n" +
             "------\n" + lines.joinToString("\n")
     }
 
@@ -769,7 +742,7 @@ class HayyaShootProvider : MainAPI() {
         val oh = outer?.text ?: ""
         trace("P1 outer HTTP ${outer?.code} len=${oh.length}")
 
-        val innerRel = Regex(""""playerUrl"\s*:\s*"([^"]+)"""").find(oh)
+        val innerRel = Regex("\"playerUrl\"\\s*:\\s*\"([^\"]+)\"").find(oh)
             ?.groupValues?.getOrNull(1)
             ?.replace("\\u0026", "&")
             ?.replace("\\/", "/")
@@ -789,12 +762,13 @@ class HayyaShootProvider : MainAPI() {
             { it.code in 200..299 }
         )
         val ih = inner?.text ?: ""
-        val token = Regex(""""apiToken"\s*:\s*"([^"]+)"""").find(ih)?.groupValues?.getOrNull(1)
+        val token = Regex("\"apiToken\"\\s*:\\s*\"([^\"]+)\"").find(ih)?.groupValues?.getOrNull(1)
         trace("P2 inner HTTP ${inner?.code} len=${ih.length} apiToken=${token?.length}")
         if (token.isNullOrBlank()) {
             traceContexts("P2 html", ih, listOf("token", "CONFIG"), 60, 220, 3)
             return null
         }
+
 
         // With another id kind (imdb) the API url is whatever the player page itself says
         var finalApi = apiUrl
@@ -829,7 +803,7 @@ class HayyaShootProvider : MainAPI() {
         if (debugMode && !subsDumped) {
             subsDumped = true
             try {
-                val subSrc = Regex("""src=["']([^"']+subtitles[^"']*\.js[^"']*)["']""", RegexOption.IGNORE_CASE)
+                val subSrc = Regex("src=[\"']([^\"']+subtitles[^\"']*\\.js[^\"']*)[\"']", RegexOption.IGNORE_CASE)
                     .find(ih)?.groupValues?.getOrNull(1)
                 if (subSrc != null) {
                     val abs = java.net.URI(innerUrl).resolve(subSrc).toString()
@@ -1107,7 +1081,6 @@ class HayyaShootProvider : MainAPI() {
         if (dur != null && dur > 120 && last > 0 && last / dur < 0.75) return false
         return true
     }
-
     private fun rowScore(row: JSONObject, fileName: String?): Double {
         val words = { t: String -> Regex("[a-z0-9]{2,}").findAll(t.lowercase()).map { it.value }.toSet() }
         val v = words(fileName.orEmpty())
@@ -1141,6 +1114,12 @@ class HayyaShootProvider : MainAPI() {
         subPool.clear()
         subLang = "ara"
         try {
+            try {
+                fromVidsrcWiki(media, subtitleCallback)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                trace("W0 wiki subs exception ${e::class.java.simpleName}: ${e.message?.take(80)}")
+            }
             try {
                 fromStremio(media, imdb, subtitleCallback)
             } catch (e: Exception) {
@@ -1215,6 +1194,126 @@ class HayyaShootProvider : MainAPI() {
             LocalSubServer.publish("u0" + first.text.length, first.text.toByteArray(Charsets.UTF_8))
                 ?.let { subtitleCallback(SubtitleFile("Arabic (UTF-8)", it)) }
         }
+    }
+
+    // VidSrc.wiki serves the manifest (sources + per-language subtitles) at
+    // /wp-json/fstream/v1/stream?tok=... and the tok sits in the embed page.
+    // Subtitles from the same source as the video: complete and in sync.
+    private suspend fun fromVidsrcWiki(
+        media: HayyaMediaData,
+        subtitleCallback: (SubtitleFile) -> Unit
+    ): Int {
+        var n = 0
+        try {
+            withTimeoutOrNull(15_000L) {
+                val isTv = media.type == "tv" && media.season != null && media.episode != null
+                val embed = if (isTv) {
+                    "https://vidsrc.wiki/embed/tv/${media.id}/${media.season}/${media.episode}/"
+                } else {
+                    "https://vidsrc.wiki/embed/movie/${media.id}/"
+                }
+                val page = withTimeoutOrNull(9_000L) {
+                    try {
+                        app.get(embed, headers = browserHeaders)
+                    } catch (e: Exception) {
+                        if (e is CancellationException) throw e
+                        null
+                    }
+                }
+                val html = page?.text ?: ""
+                trace("W1 embed HTTP ${page?.code} len=${html.length}")
+                if (page == null || page.code !in 200..299) return@withTimeoutOrNull
+                val tok = extractWikiTok(html)
+                trace("W2 tok len=${tok?.length ?: 0}")
+                if (tok.isNullOrBlank()) return@withTimeoutOrNull
+                val api = "https://vidsrc.wiki/wp-json/fstream/v1/stream?tok=" + tok
+                val res = withTimeoutOrNull(9_000L) {
+                    try {
+                        app.get(
+                            api,
+                            headers = mapOf(
+                                "User-Agent" to MOBILE_CHROME_UA,
+                                "Accept" to "application/json, text/plain, */*",
+                                "Referer" to embed
+                            )
+                        )
+                    } catch (e: Exception) {
+                        if (e is CancellationException) throw e
+                        null
+                    }
+                }
+                val body = res?.text ?: ""
+                trace("W3 stream HTTP ${res?.code} len=${body.length} ${snippet(body)}")
+                if (res == null || res.code !in 200..299) return@withTimeoutOrNull
+                val arr = try {
+                    val t = body.trimStart()
+                    when {
+                        t.startsWith("[") -> JSONArray(t)
+                        t.startsWith("{") -> {
+                            val o = JSONObject(t)
+                            listOf("subtitles", "tracks", "captions", "data", "sources")
+                                .firstNotNullOfOrNull { k -> o.optJSONArray(k) }
+                        }
+                        else -> null
+                    }
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    null
+                } ?: return@withTimeoutOrNull
+                val want = if (subLang == "ara") "ara" else "eng"
+                val found = (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
+                    .filter { jstr(it, "label").contains(want, true) }
+                trace("W4 ${found.size} matching of ${arr.length()} (lang=$subLang)")
+                for (item in found.take(2)) {
+                    if (n >= 2) break
+                    val url = jstr(item, "file").ifBlank { jstr(item, "url") }
+                    if (!url.startsWith("http")) continue
+                    val raw = downloadPlain(url, MOBILE_CHROME_UA, "https://vidsrc.wiki/") ?: continue
+                    if (raw.isEmpty()) continue
+                    val text = String(raw, Charsets.UTF_8)
+                    if (!text.contains("WEBVTT") && !text.contains("-->")) continue
+                    if (serveWikiVtt(text, "wiki " + jstr(item, "label"), subtitleCallback)) n++
+                }
+            }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            trace("W0 wiki subs exception ${e::class.java.simpleName}: ${e.message?.take(80)}")
+        }
+        return n
+    }
+
+    private fun extractWikiTok(html: String): String? {
+        Regex("""\Q"tok"\E\s*[:=]\s*\Q"\E([^\Q"\E]+)\Q"\E""").find(html)
+            ?.groupValues?.getOrNull(1)?.let { return it }
+        Regex("""[?&]tok=([^&"'<> ]+)""").find(html)
+            ?.groupValues?.getOrNull(1)?.let { return it }
+        return null
+    }
+
+    private fun serveWikiVtt(
+        text: String,
+        label: String,
+        subtitleCallback: (SubtitleFile) -> Unit
+    ): Boolean {
+        val arabic = text.count { it in '\u0621'..'\u064A' || it in '\u0671'..'\u06D3' }
+        val latin = text.count { it in 'a'..'z' || it in 'A'..'Z' }
+        if (subLang == "ara" && arabic < 100) {
+            trace("W5 skipped $label: not Arabic (letters=$arabic)")
+            return false
+        }
+        if (subLang != "ara" && latin < 200) {
+            trace("W5 skipped $label: not English (letters=$latin)")
+            return false
+        }
+        val cues = Regex("-->").findAll(text).count()
+        if (cues < 5) return false
+        val id = "w" + subLang + text.length + arabic + latin
+        val url = LocalSubServer.publish(id, text.toByteArray(Charsets.UTF_8), "utf-8", ext = "vtt")
+            ?: return false
+        val name = if (subLang == "ara") "Arabic (VidSrc)" else "English (VidSrc)"
+        subtitleCallback(SubtitleFile(name, url))
+        trace("W6 served $label cues=$cues -> $url")
+        return true
     }
 
     // Stremio's OpenSubtitles v3 addon (public, no API key):
@@ -1435,9 +1534,9 @@ class HayyaShootProvider : MainAPI() {
         var arabicLetters = 0
         var persianOnly = 0
         for (ch in srtText) {
-            if (ch in '\u0621'..'\u064A' || ch in '\u0671'..'\u06D3') arabicLetters++
-            if (ch == '\u067E' || ch == '\u0686' || ch == '\u0698' ||
-                ch == '\u06AF' || ch == '\u06A9' || ch == '\u06CC'
+            if (ch in '؁'..'ي' || ch in 'ٱ'..'ۓ') arabicLetters++
+            if (ch == 'پ' || ch == 'چ' || ch == 'ژ' ||
+                ch == 'گ' || ch == 'ک' || ch == 'ی'
             ) persianOnly++
         }
         val persianRatio = if (arabicLetters > 0) persianOnly.toDouble() / arabicLetters else 0.0
@@ -1453,7 +1552,7 @@ class HayyaShootProvider : MainAPI() {
             }
         }
         // Timing check (logged) + the known 25 -> 23.976 fps correction.
-        var text = srtText.removePrefix("\uFEFF")
+        var text = srtText.removePrefix("﻿")
         var lastEnd = lastCueEndSeconds(text)
         run {
             val ct = cueTimes(text)
@@ -1488,6 +1587,13 @@ class HayyaShootProvider : MainAPI() {
         }
         val cueCount = cueTimes(text).size
         trace("T8 clean $fileLabel: cues $cues -> $cueCount, out-of-order=$disorder, overlaps-fixed=$overlaps, ends=${lastEnd.toInt()}s")
+        run {
+            val bucket = 120.0
+            val nb = (maxOf(lastEnd, dur ?: 0.0) / bucket).toInt() + 1
+            val counts = IntArray(nb)
+            cueTimes(text).forEach { counts[(it.first / bucket).toInt().coerceIn(0, nb - 1)]++ }
+            trace("T8 hist $fileLabel (cues per 2 min): ${counts.joinToString(" ")}")
+        }
         if (cueCount < 5) {
             trace("T3 skipped $fileLabel: nothing left after cleaning")
             return false
@@ -1538,6 +1644,30 @@ class HayyaShootProvider : MainAPI() {
         }
         val total = Regex("""#EXTINF:([0-9.]+)""").findAll(media)
             .fold(0.0) { acc, m -> acc + (m.groupValues[1].toDoubleOrNull() ?: 0.0) }
+        try {
+            var cum = 0.0
+            var segs = 0
+            var maxSeg = 0.0
+            val disc = ArrayList<Int>()
+            for (l in media.lines()) {
+                if (l.startsWith("#EXTINF:")) {
+                    val d = l.substringAfter(":").substringBefore(",").toDoubleOrNull() ?: 0.0
+                    cum += d
+                    segs++
+                    if (d > maxSeg) maxSeg = d
+                } else if (l.startsWith("#EXT-X-DISCONTINUITY")) {
+                    disc.add(cum.toInt())
+                }
+            }
+            val variants = master.lines().count { it.startsWith("#EXT-X-STREAM-INF") }
+            val ptype = Regex("""#EXT-X-PLAYLIST-TYPE:(\w+)""").find(media)?.groupValues?.getOrNull(1)
+            trace(
+                "H1 hls variants=$variants segs=$segs maxSeg=${maxSeg.toInt()}s " +
+                    "endlist=${media.contains("#EXT-X-ENDLIST")} type=$ptype " +
+                    "key=${media.contains("#EXT-X-KEY")} discontinuities-at=${disc.take(8)}"
+            )
+        } catch (_: Exception) {
+        }
         return if (total > 0) total else null
     }
 
@@ -1945,223 +2075,6 @@ class HayyaShootProvider : MainAPI() {
             ?: Regex("""file:\s*["']([^"']+)["']""").find(html)?.groupValues?.getOrNull(1)?.takeIf { it.startsWith("http") }
         if (direct != null) {
             val ref = originOf(url)
-            val isHls = direct.contains(".m3u8") || !direct.contains(".mp4")
-            val ok = if (isHls) playlistCheck(direct, ref, MOBILE_CHROME_UA).first else true
-            trace("V3 direct ${direct.substringAfter("://").take(90)} hls=$isHls verified=$ok")
-            if (ok) {
-                emitLink(callback, direct, ref, "Server 1", isHls)
-                return true
-            }
-        }
-
-        if (depth < 2) {
-            val frames = Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
-                .findAll(html)
-                .map { it.groupValues[1] }
-                .toList()
-            for (f in frames.take(3)) {
-                val abs = try {
-                    java.net.URI(url).resolve(f).toString()
-                } catch (e: Exception) {
-                    continue
-                }
-                if (!abs.startsWith("http")) continue
-                if (scrapeEmbed(abs, depth + 1, callback)) return true
-            }
-        }
-        return false
-    }
-
-    private suspend fun resolveStreams(
-        media: HayyaMediaData,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        val meta = HashMap<String, String>()
-        val urls = fetchStreamUrls(streamApiUrl(media), media, meta)
-            ?: return false
-        trace("S3 ${urls.size} stream urls: " + urls.joinToString(" | ") { it.substringAfter("://").take(70) })
-        if (urls.isEmpty()) return false
-
-        val referers = listOf(PLAYER_ORIGIN, "https://vidsrc.sh/", "$mainUrl/")
-        var emitted = 0
-        var firstUrl: String? = null
-        var firstRef = ""
-        val unverified = ArrayList<Pair<String, String>>()
-        // generate.php answers "429 Too Many Requests" when it is called several times
-        // in a row, and all the URLs share one host: ask once per host, reuse the token.
-        val tokens = HashMap<String, String>()
-
-        for ((i, u0) in urls.take(4).withIndex()) {
-            val origin = originOf(u0.replace("__TOKEN__", "x"))
-
-            var token = tokens[origin] ?: ""
-            if (token.isNotBlank()) {
-                trace("S4 reuse the token of $origin (${token.length})")
-            } else {
-                val gen = withTimeoutOrNull(8_000L) {
-                    try {
-                        app.get(origin + "generate.php", headers = playerHeaders())
-                    } catch (e: Exception) {
-                        if (e is CancellationException) throw e
-                        null
-                    }
-                }
-                token = if (gen != null && gen.code in 200..299) parseToken(gen.text) else ""
-                trace(
-                    "S4 generate ${origin}generate.php HTTP ${gen?.code} token=${token.take(20)}(${token.length})" +
-                        if (token.isBlank()) " ${snippet(gen?.text ?: "")}" else ""
-                )
-                if (token.isNotBlank()) tokens[origin] = token
-            }
-
-            val candidates = listOfNotNull(
-                if (token.isNotBlank()) applyToken(u0, token) else null,
-                u0.takeIf { !it.contains("__TOKEN__") }
-            ).distinct()
-
-            var verified = false
-            for (cand in candidates) {
-                for (ref in referers) {
-                    val (good, why) = playlistCheck(cand, ref, MOBILE_CHROME_UA)
-                    trace("S5 #${i + 1} ${if (cand == u0) "plain" else "token"} ref=${Uri.parse(ref).host} -> $why")
-                    if (good) {
-                        emitLink(callback, cand, ref, "VidSrc ${emitted + 1}")
-                        if (emitted == 0) {
-                            firstUrl = cand
-                            firstRef = ref
-                        }
-                        emitted++
-                        verified = true
-                        break
-                    }
-                }
-                if (verified) break
-            }
-            if (!verified && candidates.isNotEmpty()) unverified.add(candidates.first() to referers.first())
-            if (emitted >= 3) break
-        }
-
-        // Nothing could be verified: still let the player try the best guesses, but do not
-        // count them as success, so the other methods still run (error 2004 on the TV)
-        val verifiedCount = emitted
-        if (emitted == 0) {
-            unverified.take(2).forEachIndexed { i, (u, ref) ->
-                emitLink(callback, u, ref, "VidSrc unverified ${i + 1}")
-                emitted++
-            }
-        }
-
-        // Arabic subtitles never decide if the video works: any failure is only traced
-        if (emitted > 0) {
-            val fu = firstUrl
-            lastVideoDuration = if (fu != null) {
-                try {
-                    hlsDuration(fu, firstRef)
-                } catch (e: Exception) {
-                    if (e is CancellationException) throw e
-                    null
-                }
-            } else null
-            trace("T8 video duration=${lastVideoDuration?.toInt()}s")
-            try {
-                withTimeoutOrNull(35_000L) {
-                    addArabicSubtitles(media, meta["imdb"], meta["title"], meta["file"], subtitleCallback)
-                }
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                trace("T0 subtitles exception ${e::class.java.simpleName}: ${e.message?.take(80)}")
-            }
-        }
-        return verifiedCount > 0
-    }
-
-    // Plays a playlist URL given by hand. The playlist is hotlink-protected, so every
-    // likely Referer is tested; each one that really answers "#EXTM3U" becomes a link.
-    // If none answers, all are still offered so the player itself can try them.
-    private suspend fun loadManual(
-        streamUrl: String,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        traceStart = System.currentTimeMillis()
-        traceLines.clear()
-        trace("$buildTag manual host=${Uri.parse(streamUrl).host}")
-
-        val referers = listOf(
-            "https://cloudorchestranova.com/",
-            "https://vidsrc.sh/",
-            originOf(streamUrl),
-            "https://vidsrc.me/",
-            "$mainUrl/"
-        ).distinct()
-
-        suspend fun emit(referer: String, label: String) {
-            callback(
-                newExtractorLink(
-                    source = name,
-                    name = label,
-                    url = streamUrl,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    this.referer = referer
-                    this.quality = Qualities.Unknown.value
-                    this.headers = mapOf(
-                        "User-Agent" to MOBILE_CHROME_UA,
-                        "Origin" to referer.trimEnd('/')
-                    )
-                }
-            )
-        }
-
-        var emitted = 0
-        for (referer in referers) {
-            val (ok, why) = playlistCheck(streamUrl, referer, MOBILE_CHROME_UA)
-            trace("referer ${Uri.parse(referer).host} -> $why")
-            if (ok) {
-                emit(referer, "Manual (${Uri.parse(referer).host})")
-                emitted++
-            }
-        }
-
-        if (emitted == 0) {
-            referers.forEach { referer ->
-                emit(referer, "Manual try ${Uri.parse(referer).host}")
-            }
-            emitted = referers.size
-        }
-
-        lastDiagnostic = traceLines.toList().joinToString("\n")
-        return emitted > 0
-    }
-
-    private fun titleSim(a: String, b: String): Double {
-        val words = { t: String -> Regex("""[\p{L}\p{N}]+""").findAll(t.lowercase()).map { it.value }.toSet() }
-        val x = words(a)
-        val y = words(b)
-        if (x.isEmpty() || y.isEmpty()) return 0.0
-        return x.intersect(y).size.toDouble() / x.union(y).size
-    }
-
-    private suspend fun fetchEnglishTitle(media: HayyaMediaData): String? =
-        try {
-            val kind = if (media.type == "tv") "tv" else "movie"
-            val j = JSONObject(tmdbGet("$kind/${media.id}?language=en-US"))
-            jstr(j, if (kind == "tv") "name" else "title").ifBlank { null }
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            null
-        }
-
-    // VidSrc (and the site's Server 1) do not have every title, e.g. Thai / Asian shows.
-    // Other plugins of the same user do: ask the installed ones, as the app itself would.
-    private suspend fun tryOtherProviders(
-        media: HayyaMediaData,
-        isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        val wanted = listOf("ourdrama", "takkiadrama", "asiashow", "aradrama", "fivetv")
-        val others = APIHolder.allProviders.filter { api ->
             api !== this && wanted.any { api.name.contains(it, ignoreCase = true) }
         }
         trace("X0 other plugins installed: ${others.joinToString { it.name }.ifBlank { "none" }}")
@@ -2389,7 +2302,7 @@ class HayyaShootProvider : MainAPI() {
         @JsonProperty("title") val title: String? = null,
         @JsonProperty("original_title") val originalTitle: String? = null,
         @JsonProperty("overview") val overview: String? = null,
-        @JsonProperty("poster_path") val posterPath: String? = null,
+        @JsonProperty("poster_path") val posterPath: String?
         @JsonProperty("backdrop_path") val backdropPath: String? = null,
         @JsonProperty("release_date") val releaseDate: String? = null,
         @JsonProperty("vote_average") val voteAverage: Double? = null
@@ -2545,4 +2458,4 @@ private object LocalSubServer {
         }
     }
 }
-// ===== END OF FILE (HayyaShootProvider.kt, build-53): if you do not see this line, the paste was cut =====
+// ===== END OF FILE (HayyaShootProvider.kt, build-61): if you do not see this line, the paste was cut =====
