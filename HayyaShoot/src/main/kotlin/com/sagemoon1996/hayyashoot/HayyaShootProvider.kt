@@ -404,7 +404,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-48"
+    private val buildTag = "build-49"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -1033,7 +1033,6 @@ class HayyaShootProvider : MainAPI() {
             "\n".toByteArray(Charsets.UTF_8) +
             text.toByteArray(Charsets.UTF_8)
     }
-
     private fun parseHms(t: String): Double {
         val p = t.split(":")
         if (p.size != 3) return 0.0
@@ -1364,17 +1363,30 @@ class HayyaShootProvider : MainAPI() {
             }
         }
 
+        // Clean file: ordered, valid cues only (a player stops at the first out-of-order cue)
+        val (cleanText, disorder) = sanitizeSrt(text)
+        if (cleanText.isNotBlank()) {
+            text = cleanText
+            lastEnd = lastCueEndSeconds(text)
+        }
+        val cueCount = cueTimes(text).size
+        trace("T8 clean $fileLabel: cues $cues -> $cueCount, out-of-order=$disorder, ends=${lastEnd.toInt()}s")
+        if (cueCount < 5) {
+            trace("T3 skipped $fileLabel: nothing left after cleaning")
+            return false
+        }
+
         // Score: closeness to a full-length subtitle (dialogue stops before the credits, so
         // ~95% is the target) plus the number of cues; without the duration, only the cues.
         val known = dur != null && dur > 120
         val cov = if (known) lastEnd / dur!! else 0.0
         val score = if (known) {
-            (1.0 - kotlin.math.abs(cov - 0.95).coerceAtMost(1.0)) * 100.0 + minOf(cues, 1500) / 30.0
+            (1.0 - kotlin.math.abs(cov - 0.95).coerceAtMost(1.0)) * 100.0 + minOf(cueCount, 1500) / 30.0
         } else {
-            minOf(cues, 1500) / 10.0
+            minOf(cueCount, 1500) / 10.0
         }
-        subPool.add(SubCand(fileLabel, text, cues, lastEnd, score + bonus))
-        trace("T4 candidate $fileLabel cues=$cues ends=${lastEnd.toInt()}s coverage=${"%.2f".format(cov)} score=${score.toInt()}")
+        subPool.add(SubCand(fileLabel, text, cueCount, lastEnd, score + bonus))
+        trace("T4 candidate $fileLabel cues=$cueCount ends=${lastEnd.toInt()}s coverage=${"%.2f".format(cov)} score=${score.toInt()}")
         return true
     }
 
@@ -1410,6 +1422,74 @@ class HayyaShootProvider : MainAPI() {
         val total = Regex("""#EXTINF:([0-9.]+)""").findAll(media)
             .fold(0.0) { acc, m -> acc + (m.groupValues[1].toDoubleOrNull() ?: 0.0) }
         return if (total > 0) total else null
+    }
+
+    // Rebuilds an .srt from its cues: ordered by start time, end > start, no empty cue, no
+    // credits/ad cue (> 12 s) at the end, clean numbering. A player (ExoPlayer) looks cues up
+    // by time and stops finding the following ones when a cue is out of order or malformed.
+    // Returns (clean srt, number of cues that were out of order in the original).
+    private fun sanitizeSrt(text: String): Pair<String, Int> {
+        val tm = Regex("""(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})""")
+        fun ms(m: MatchResult): Long {
+            val g = m.groupValues
+            return (g[1].toLong() * 3600 + g[2].toLong() * 60 + g[3].toLong()) * 1000 +
+                g[4].padEnd(3, '0').toLong()
+        }
+        class Q(val s: Long, val e: Long, val t: String)
+
+        val list = ArrayList<Q>()
+        var curS = -1L
+        var curE = -1L
+        val body = ArrayList<String>()
+        fun flush() {
+            if (curS >= 0) {
+                val t = body.joinToString("\n").trim()
+                if (t.isNotBlank()) list.add(Q(curS, if (curE <= curS) curS + 2000 else curE, t))
+            }
+            curS = -1L
+            curE = -1L
+            body.clear()
+        }
+        val lines = text.replace("\r\n", "\n").replace('\r', '\n').split("\n")
+        for ((i, raw) in lines.withIndex()) {
+            val line = raw.trim()
+            if (line.contains("-->")) {
+                flush()
+                val times = tm.findAll(line).toList()
+                if (times.size >= 2) {
+                    curS = ms(times[0])
+                    curE = ms(times[1])
+                }
+            } else if (line.isEmpty()) {
+                flush()
+            } else if (curS >= 0) {
+                // a bare number just before the next timing line is the cue index
+                val isIndex = line.all { it.isDigit() } &&
+                    lines.getOrNull(i + 1)?.contains("-->") == true
+                if (!isIndex) body.add(line)
+            }
+        }
+        flush()
+
+        var disorder = 0
+        for (i in 1 until list.size) if (list[i].s < list[i - 1].s) disorder++
+        val sorted = list.sortedBy { it.s }.toMutableList()
+        var dropped = 0
+        while (sorted.size > 3 && dropped < 6 && sorted.last().e - sorted.last().s > 12_000L) {
+            sorted.removeAt(sorted.size - 1)
+            dropped++
+        }
+        fun fmt(v: Long) = String.format(
+            java.util.Locale.US, "%02d:%02d:%02d,%03d",
+            v / 3_600_000, (v / 60_000) % 60, (v / 1000) % 60, v % 1000
+        )
+        val sb = StringBuilder()
+        sorted.forEachIndexed { i, q ->
+            sb.append(i + 1).append('\n')
+                .append(fmt(q.s)).append(" --> ").append(fmt(q.e)).append('\n')
+                .append(q.t).append("\n\n")
+        }
+        return sb.toString() to disorder
     }
 
     // (start, end) in seconds of every cue of an .srt, in file order
@@ -2326,4 +2406,4 @@ private object LocalSubServer {
         }
     }
 }
-// ===== END OF FILE (HayyaShootProvider.kt, build-48): if you do not see this line, the paste was cut =====
+// ===== END OF FILE (HayyaShootProvider.kt, build-49): if you do not see this line, the paste was cut =====
