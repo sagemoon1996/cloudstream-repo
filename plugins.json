@@ -40,10 +40,10 @@
         "name": "Aradrama"
     },
     {
-        "fileHash": "sha256-45dbd424736d2790e2d2d5bf7bd3dcbcfa53971dec2ba913bdf6090a510028b4",
+        "fileHash": "sha256-095ce6af820686e93182a1565ce6fc45d83be3d3d4b7bad65e8f1f30fb403125",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
-        "fileSize": 23874,
+        "fileSize": 24955,
         "status": 1,
         "language": "ar",
         "authors": [
