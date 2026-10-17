@@ -315,11 +315,27 @@ class AsiaShowProvider : MainAPI() {
             )
         }
 
-        val document = app.get(
-            request.data,
-            referer = mainUrl,
-            interceptor = cfKiller
-        ).document
+        val response = try {
+            app.get(
+                request.data,
+                referer = mainUrl,
+                timeout = 20
+            )
+        } catch (e: Exception) {
+            return newHomePageResponse(
+                request.name,
+                listOf(
+                    newMovieSearchResponse(
+                        name = "ERR ${e.javaClass.simpleName}: ${e.message?.take(60)}",
+                        url = mainUrl,
+                        type = TvType.Movie
+                    )
+                ),
+                hasNext = false
+            )
+        }
+
+        val document = response.document
 
         val isLatest = try {
             URLDecoder.decode(request.data, "UTF-8").contains("الحلقات")
@@ -331,6 +347,21 @@ class AsiaShowProvider : MainAPI() {
             parseLatestEpisodes(document)
         } else {
             parseContentCards(document)
+        }
+
+        if (items.isEmpty()) {
+            return newHomePageResponse(
+                request.name,
+                listOf(
+                    newMovieSearchResponse(
+                        name = "HTTP ${response.code} len=${response.text.length} " +
+                            "cf=${response.text.contains("Just a moment", true)}",
+                        url = mainUrl,
+                        type = TvType.Movie
+                    )
+                ),
+                hasNext = false
+            )
         }
 
         return newHomePageResponse(
