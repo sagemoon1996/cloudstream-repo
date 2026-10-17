@@ -404,7 +404,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-46"
+    private val buildTag = "build-48"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -1258,25 +1258,32 @@ class HayyaShootProvider : MainAPI() {
                     jstr(row, "IDSubtitleFile").ifBlank { "s$n" },
                     n,
                     subtitleCallback,
-                    jstr(row, "MovieFPS").toDoubleOrNull()
+                    jstr(row, "MovieFPS").toDoubleOrNull(),
+                    // same release name as the video = timed for this exact encode
+                    rowScore(row, fileName) / 3.0
                 )
             ) {
                 n++
             }
         }
 
-        // Other sources, only when OpenSubtitles gave nothing (or only one file)
-        if (n < 2 && subLang == "ara") {
+        // Other sources: when OpenSubtitles gave less than two files, OR when none of its files
+        // covers at least 90% of the video (the files are incomplete / for another cut)
+        val durNow = lastVideoDuration
+        val weak = durNow != null && durNow > 120 &&
+            (synchronized(subPool) { subPool.maxOfOrNull { it.lastEnd / durNow } } ?: 0.0) < 0.90
+        if (weak) trace("T6 best OpenSubtitles file covers less than 90% of the video: trying other sources")
+        if ((n < 2 || weak) && subLang == "ara") {
             try {
-                n = fromPodnapisi(media, title, n, subtitleCallback)
+                n = fromPodnapisi(media, title, if (weak) 0 else n, subtitleCallback)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 trace("T5 podnapisi exception ${e::class.java.simpleName}: ${e.message?.take(80)}")
             }
         }
-        if (n < 2 && isTv && subLang == "ara") {
+        if ((n < 2 || weak) && isTv && subLang == "ara") {
             try {
-                n = fromTvSubtitles(media, title, n, subtitleCallback)
+                n = fromTvSubtitles(media, title, if (weak) 0 else n, subtitleCallback)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 trace("T7 tvsubtitles exception ${e::class.java.simpleName}: ${e.message?.take(80)}")
@@ -1294,7 +1301,8 @@ class HayyaShootProvider : MainAPI() {
         seed: String,
         n: Int,
         subtitleCallback: (SubtitleFile) -> Unit,
-        fps: Double? = null
+        fps: Double? = null,
+        bonus: Double = 0.0
     ): Boolean {
         val srt = try {
             toUtf8Srt(raw, enc)
@@ -1328,9 +1336,7 @@ class HayyaShootProvider : MainAPI() {
                 return false
             }
         }
-        // Timing: make the LAST cue end close to the end of the video (~97%: the dialogue
-        // stops a little before the credits). Works both ways: a file that ends after the
-        // video is compressed, a file that ends long before it is stretched.
+        // Timing check (logged) + the known 25 -> 23.976 fps correction.
         var text = srtText.removePrefix("\uFEFF")
         var lastEnd = lastCueEndSeconds(text)
         run {
@@ -1341,14 +1347,11 @@ class HayyaShootProvider : MainAPI() {
         val dur = lastVideoDuration
         if (dur != null && dur > 120 && lastEnd > 30) {
             val ratio = dur / lastEnd
-            // cover = lastEnd / dur. Natural range: 0.90..0.99 (credits after the last line).
-            val cover = lastEnd / dur
-            val fitFactor = dur * 0.97 / lastEnd
+            // A file is NEVER stretched or squeezed to "fit": real files end 3-10% before the
+            // video (credits) and a guessed factor makes the subtitle drift away from the
+            // dialogue. Only the known 25 fps -> 23.976 fps case is corrected.
             val factor = when {
                 fps != null && fps in 24.9..25.1 && ratio in 1.03..1.06 -> 25.0 / 23.976
-                // outside the natural range: rescale, but only if the correction is plausible
-                // (+-15%), otherwise it is probably another cut of the video: leave it alone
-                (cover > 0.99 || cover < 0.90) && fitFactor in 0.85..1.15 -> fitFactor
                 else -> 1.0
             }
             trace(
@@ -1370,7 +1373,7 @@ class HayyaShootProvider : MainAPI() {
         } else {
             minOf(cues, 1500) / 10.0
         }
-        subPool.add(SubCand(fileLabel, text, cues, lastEnd, score))
+        subPool.add(SubCand(fileLabel, text, cues, lastEnd, score + bonus))
         trace("T4 candidate $fileLabel cues=$cues ends=${lastEnd.toInt()}s coverage=${"%.2f".format(cov)} score=${score.toInt()}")
         return true
     }
@@ -1420,11 +1423,19 @@ class HayyaShootProvider : MainAPI() {
         }.toList()
     }
 
-    // End time (seconds) of the last REAL cue: trailing cues that come after a gap of more
-    // than 30 s (credits / "subtitles by..." ads) are ignored.
+    // End time (seconds) of the last REAL cue. Ignored at the end of the file:
+    //  - cues longer than 12 s (credits / "subtitles by..." ads stretched over the end),
+    //  - cues that come after a gap of more than 30 s.
     private fun lastCueEndSeconds(text: String): Double {
-        val cues = cueTimes(text)
-        if (cues.isEmpty()) return 0.0
+        val all = cueTimes(text)
+        if (all.isEmpty()) return 0.0
+        var n = all.size
+        var dropped = 0
+        while (n > 3 && dropped < 6 && all[n - 1].second - all[n - 1].first > 12.0) {
+            n--
+            dropped++
+        }
+        val cues = all.take(n)
         var cut = cues.size
         for (i in maxOf(3, cues.size - 5) until cues.size) {
             if (cues[i].first - cues[i - 1].second > 30.0) {
@@ -2315,4 +2326,4 @@ private object LocalSubServer {
         }
     }
 }
-// ===== END OF FILE (HayyaShootProvider.kt, build-46): if you do not see this line, the paste was cut =====
+// ===== END OF FILE (HayyaShootProvider.kt, build-48): if you do not see this line, the paste was cut =====
