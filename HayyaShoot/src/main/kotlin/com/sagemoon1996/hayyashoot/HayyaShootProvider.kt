@@ -404,7 +404,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-49"
+    private val buildTag = "build-50"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -1115,6 +1115,12 @@ class HayyaShootProvider : MainAPI() {
         subPool.clear()
         subLang = "ara"
         try {
+            try {
+                fromStremio(media, imdb, subtitleCallback)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                trace("T10 stremio exception ${e::class.java.simpleName}: ${e.message?.take(80)}")
+            }
             collectArabicSubtitles(media, imdb, title, fileName, subtitleCallback)
             if (subPool.isEmpty()) {
                 trace("T6 no usable Arabic subtitle: English instead")
@@ -1165,6 +1171,73 @@ class HayyaShootProvider : MainAPI() {
             LocalSubServer.publish("u0" + first.text.length, first.text.toByteArray(Charsets.UTF_8))
                 ?.let { subtitleCallback(SubtitleFile("Arabic (UTF-8)", it)) }
         }
+    }
+
+    // Stremio's OpenSubtitles v3 addon (public, no API key):
+    //   /subtitles/series/tt0212671:1:4.json  ->  {"subtitles":[{"id","url","lang":"ara"}, ...]}
+    // The files go through the same checks / cleaning as the others. The FIRST valid one is also
+    // offered as "Arabic (direct)": the raw URL, without our local server. If that track plays
+    // to the end on the TV while the others stop, the local server is the problem.
+    private suspend fun fromStremio(
+        media: HayyaMediaData,
+        imdbIn: String?,
+        subtitleCallback: (SubtitleFile) -> Unit
+    ): Int {
+        LocalSubServer.log = { msg -> trace(msg) }
+        val imdb = imdbIn?.takeIf { it.startsWith("tt") } ?: fetchImdbId(media)
+        if (imdb == null) {
+            trace("T10 stremio: no imdb id")
+            return 0
+        }
+        val isTv = media.type == "tv" && media.season != null && media.episode != null
+        val id = if (isTv) "$imdb:${media.season}:${media.episode}" else imdb
+        val url = "https://opensubtitles-v3.strem.io/subtitles/${if (isTv) "series" else "movie"}/$id.json"
+        val res = withTimeoutOrNull(10_000L) {
+            try {
+                app.get(
+                    url,
+                    headers = mapOf("User-Agent" to MOBILE_CHROME_UA, "Accept" to "application/json")
+                )
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                null
+            }
+        }
+        if (res == null) {
+            trace("T10 stremio timeout/exception")
+            return 0
+        }
+        trace("T10 stremio HTTP ${res.code} len=${res.text.length} ${snippet(res.text)}")
+        val arr = try {
+            JSONObject(res.text).optJSONArray("subtitles")
+        } catch (e: Exception) {
+            null
+        } ?: return 0
+        val items = (0 until arr.length())
+            .mapNotNull { arr.optJSONObject(it) }
+            .filter {
+                jstr(it, "lang").lowercase() in setOf("ara", "ar", "arabic") &&
+                    jstr(it, "url").startsWith("http")
+            }
+            .take(4)
+        trace("T10 stremio arabic files=${items.size} of ${arr.length()}")
+
+        var n = 0
+        var directOffered = false
+        for ((i, item) in items.withIndex()) {
+            val link = jstr(item, "url")
+            val raw = downloadPlain(link)
+            if (raw == null || raw.isEmpty()) continue
+            if (serveArabicSrt(raw, "utf-8", "stremio ${jstr(item, "id")}", "m$i", n, subtitleCallback)) {
+                n++
+                if (!directOffered) {
+                    directOffered = true
+                    subtitleCallback(SubtitleFile("Arabic (direct)", link))
+                    trace("T10 direct track offered: ${link.substringAfter("://").take(80)}")
+                }
+            }
+        }
+        return n
     }
 
     private suspend fun collectArabicSubtitles(
@@ -2406,4 +2479,4 @@ private object LocalSubServer {
         }
     }
 }
-// ===== END OF FILE (HayyaShootProvider.kt, build-49): if you do not see this line, the paste was cut =====
+// ===== END OF FILE (HayyaShootProvider.kt, build-50): if you do not see this line, the paste was cut =====
