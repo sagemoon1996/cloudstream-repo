@@ -329,6 +329,22 @@ class HayyaShootProvider : MainAPI() {
         }
     }
 
+    // One season: Arabic, retry, then English. null only when all attempts fail.
+    private suspend fun fetchSeasonData(tvId: Int, seasonNumber: Int): TmdbSeason? {
+        for (attempt in 0 until 3) {
+            val lang = if (attempt < 2) "ar-SA" else "en-US"
+            try {
+                val data = parseJson<TmdbSeason>(tmdbGet("tv/$tvId/season/$seasonNumber?language=$lang"))
+                if (!data.episodes.isNullOrEmpty()) return data
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                logError(e)
+            }
+            delay(400L)
+        }
+        return null
+    }
+
     private suspend fun loadTv(url: String, id: Int): LoadResponse? {
         val tv = parseJson<TmdbTv>(tmdbGet("tv/$id?language=ar-SA"))
         val title = tv.name?.takeIf { it.isNotBlank() } ?: return null
@@ -338,41 +354,49 @@ class HayyaShootProvider : MainAPI() {
             .orEmpty()
             .filter { it.seasonNumber > 0 && (it.episodeCount ?: 1) > 0 }
 
-        // All seasons fetched in parallel
-        val seasonData = coroutineScope {
-            seasons.map { season ->
-                async {
-                    try {
-                        season.seasonNumber to parseJson<TmdbSeason>(
-                            tmdbGet("tv/$id/season/${season.seasonNumber}?language=ar-SA")
-                        )
-                    } catch (e: Exception) {
-                        if (e is CancellationException) throw e
-                        logError(e)
-                        null
+        // Seasons are fetched 6 at a time (a 27-season show used to fire 27 requests at once and
+        // some failed silently), each one retried; a season is never dropped.
+        val seasonMap = HashMap<Int, TmdbSeason>()
+        coroutineScope {
+            for (chunk in seasons.chunked(6)) {
+                chunk.map { info ->
+                    async { info.seasonNumber to fetchSeasonData(id, info.seasonNumber) }
+                }.awaitAll().forEach { (n, data) -> if (data != null) seasonMap[n] = data }
+            }
+        }
+
+        val episodes = seasons.sortedBy { it.seasonNumber }.flatMap { info ->
+            val seasonNumber = info.seasonNumber
+            fun epData(n: Int) = HayyaMediaData(
+                type = "tv",
+                id = id,
+                season = seasonNumber,
+                episode = n,
+                title = title,
+                altTitle = tv.originalName
+            ).toJson()
+
+            val real = seasonMap[seasonNumber]?.episodes.orEmpty()
+            if (real.isNotEmpty()) {
+                real.map { ep ->
+                    newEpisode(epData(ep.episodeNumber)) {
+                        this.name = ep.name?.takeIf { it.isNotBlank() }
+                            ?: "الحلقة ${ep.episodeNumber}"
+                        this.season = seasonNumber
+                        this.episode = ep.episodeNumber
+                        this.description = ep.overview
+                        this.posterUrl = ep.stillPath?.let { posterBase + it }
                     }
                 }
-            }.awaitAll()
-        }.filterNotNull().sortedBy { it.first }
-
-        val episodes = seasonData.flatMap { (seasonNumber, data) ->
-            data.episodes.orEmpty().map { ep ->
-                val epData = HayyaMediaData(
-                    type = "tv",
-                    id = id,
-                    season = seasonNumber,
-                    episode = ep.episodeNumber,
-                    title = title,
-                    altTitle = tv.originalName
-                ).toJson()
-
-                newEpisode(epData) {
-                    this.name = ep.name?.takeIf { it.isNotBlank() }
-                        ?: "الحلقة ${ep.episodeNumber}"
-                    this.season = seasonNumber
-                    this.episode = ep.episodeNumber
-                    this.description = ep.overview
-                    this.posterUrl = ep.stillPath?.let { posterBase + it }
+            } else {
+                // TMDB did not answer for this season: build it from the episode count
+                Log.e("HayyaShoot", "season $seasonNumber of tv/$id: no data, using episode count ${info.episodeCount}")
+                (1..(info.episodeCount ?: 0)).map { n ->
+                    newEpisode(epData(n)) {
+                        this.name = "الحلقة $n"
+                        this.season = seasonNumber
+                        this.episode = n
+                    }
                 }
             }
         }
@@ -404,7 +428,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-50"
+    private val buildTag = "build-53"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -666,6 +690,8 @@ class HayyaShootProvider : MainAPI() {
             "LAST CHECK: ${s5?.substringAfter("ms ")?.take(130) ?: "-"}\n" +
             "OTHER SOURCES: ${alt?.substringAfter("ms ")?.take(110) ?: "-"}\n" +
             "SUBTITLES: ${subs?.substringAfter("ms ")?.take(130) ?: "-"}\n" +
+            "CLEAN: ${lines.lastOrNull { it.contains(" T8 clean ") }?.substringAfter("ms ")?.take(140) ?: "-"}\n" +
+            "STREMIO: ${lines.lastOrNull { it.contains(" T10 ") }?.substringAfter("ms ")?.take(120) ?: "-"}\n" +
             "------\n" + lines.joinToString("\n")
     }
 
@@ -985,7 +1011,6 @@ class HayyaShootProvider : MainAPI() {
                 null
             }
         }
-
     // gunzip if needed, drop the BOM, make sure the text is UTF-8
     private fun toUtf8Srt(raw: ByteArray, declaredEncoding: String): ByteArray {
         var b = raw
@@ -1033,6 +1058,7 @@ class HayyaShootProvider : MainAPI() {
             "\n".toByteArray(Charsets.UTF_8) +
             text.toByteArray(Charsets.UTF_8)
     }
+
     private fun parseHms(t: String): Double {
         val p = t.split(":")
         if (p.size != 3) return 0.0
@@ -1165,6 +1191,24 @@ class HayyaShootProvider : MainAPI() {
             if (i == 0 && dur != null && dur > 120 && c.lastEnd / dur < 0.6) {
                 trace("T9 warning: even the best subtitle covers only $cov of the video")
             }
+        }
+        // Same best file as WebVTT: the player parses it with another decoder than .srt
+        try {
+            val firstVtt = ranked.first()
+            val vtt = "WEBVTT\n\n" + firstVtt.text.lines().joinToString("\n") {
+                if (it.contains("-->")) it.replace(',', '.') else it
+            }
+            val vttCp = tvOnly && cp != null
+            val vttBytes = if (vttCp) vtt.toByteArray(cp!!) else vtt.toByteArray(Charsets.UTF_8)
+            LocalSubServer.publish(
+                "v0" + firstVtt.text.length, vttBytes,
+                if (vttCp) "windows-1256" else "utf-8", "vtt"
+            )?.let {
+                subtitleCallback(SubtitleFile("Arabic (VTT)", it))
+                trace("T9 VTT track offered cues=${firstVtt.cues} -> $it")
+            }
+        } catch (e: Exception) {
+            trace("T9 VTT failed ${e::class.java.simpleName}")
         }
         if (!tvOnly) {
             val first = ranked.first()
@@ -1437,13 +1481,13 @@ class HayyaShootProvider : MainAPI() {
         }
 
         // Clean file: ordered, valid cues only (a player stops at the first out-of-order cue)
-        val (cleanText, disorder) = sanitizeSrt(text)
+        val (cleanText, disorder, overlaps) = sanitizeSrt(text)
         if (cleanText.isNotBlank()) {
             text = cleanText
             lastEnd = lastCueEndSeconds(text)
         }
         val cueCount = cueTimes(text).size
-        trace("T8 clean $fileLabel: cues $cues -> $cueCount, out-of-order=$disorder, ends=${lastEnd.toInt()}s")
+        trace("T8 clean $fileLabel: cues $cues -> $cueCount, out-of-order=$disorder, overlaps-fixed=$overlaps, ends=${lastEnd.toInt()}s")
         if (cueCount < 5) {
             trace("T3 skipped $fileLabel: nothing left after cleaning")
             return false
@@ -1501,7 +1545,7 @@ class HayyaShootProvider : MainAPI() {
     // credits/ad cue (> 12 s) at the end, clean numbering. A player (ExoPlayer) looks cues up
     // by time and stops finding the following ones when a cue is out of order or malformed.
     // Returns (clean srt, number of cues that were out of order in the original).
-    private fun sanitizeSrt(text: String): Pair<String, Int> {
+    private fun sanitizeSrt(text: String): Triple<String, Int, Int> {
         val tm = Regex("""(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})""")
         fun ms(m: MatchResult): Long {
             val g = m.groupValues
@@ -1552,17 +1596,39 @@ class HayyaShootProvider : MainAPI() {
             sorted.removeAt(sorted.size - 1)
             dropped++
         }
+
+        // No two cues may overlap: same start -> one cue with both texts; a cue that ends after
+        // the next one starts is cut just before it (ExoPlayer looks cues up by time and loses
+        // the following ones when they overlap).
+        val merged = ArrayList<Q>()
+        for (q in sorted) {
+            val last = merged.lastOrNull()
+            if (last != null && q.s - last.s < 50L) {
+                merged[merged.size - 1] = Q(last.s, maxOf(last.e, q.e), last.t + "\n" + q.t)
+            } else {
+                merged.add(q)
+            }
+        }
+        var overlaps = 0
+        for (i in 0 until merged.size - 1) {
+            val cur = merged[i]
+            val next = merged[i + 1]
+            if (cur.e >= next.s) {
+                overlaps++
+                merged[i] = Q(cur.s, maxOf(cur.s + 1, minOf(cur.e, next.s - 1)), cur.t)
+            }
+        }
         fun fmt(v: Long) = String.format(
             java.util.Locale.US, "%02d:%02d:%02d,%03d",
             v / 3_600_000, (v / 60_000) % 60, (v / 1000) % 60, v % 1000
         )
         val sb = StringBuilder()
-        sorted.forEachIndexed { i, q ->
+        merged.forEachIndexed { i, q ->
             sb.append(i + 1).append('\n')
                 .append(fmt(q.s)).append(" --> ").append(fmt(q.e)).append('\n')
                 .append(q.t).append("\n\n")
         }
-        return sb.toString() to disorder
+        return Triple(sb.toString(), disorder, overlaps)
     }
 
     // (start, end) in seconds of every cue of an .srt, in file order
@@ -2479,4 +2545,4 @@ private object LocalSubServer {
         }
     }
 }
-// ===== END OF FILE (HayyaShootProvider.kt, build-50): if you do not see this line, the paste was cut =====
+// ===== END OF FILE (HayyaShootProvider.kt, build-53): if you do not see this line, the paste was cut =====
