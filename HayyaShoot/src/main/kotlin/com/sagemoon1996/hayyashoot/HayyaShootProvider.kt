@@ -428,7 +428,7 @@ class HayyaShootProvider : MainAPI() {
     private val debugMode = true
 
     // Shown on the DIAG card: proves which build is installed.
-    private val buildTag = "build-55"
+    private val buildTag = "build-57"
 
     private fun snippet(text: String) =
         text.take(120).replace(Regex("""\s+"""), " ")
@@ -1131,7 +1131,9 @@ class HayyaShootProvider : MainAPI() {
 
     // The TV decodes subtitles as Windows-1256 (confirmed on the TV): only that copy is offered,
     // and only the two most complete files, instead of a long list of variants.
-    private val tvOnly = true
+    // false: CloudStream beta reads UTF-8 (the stable app on the TV decoded Windows-1256 and cut the
+    // subtitles at ~16 min). A Windows-1256 copy is still offered as "Arabic (1256)".
+    private val tvOnly = false
     private val subPool = java.util.Collections.synchronizedList(ArrayList<SubCand>())
 
     private suspend fun addArabicSubtitles(
@@ -1165,6 +1167,33 @@ class HayyaShootProvider : MainAPI() {
         } finally {
             // runs even when the time budget cancels the search: serve what was found
             publishBestSubtitles(subtitleCallback)
+        }
+    }
+
+    // DEBUG track: one cue every 5 s that just shows the time ("TEST 16:05"), covering the whole
+    // video. If it also stops on the TV, the player is the problem (not any subtitle file); if
+    // the shown time differs from the player clock, the player's subtitle clock drifts.
+    private fun publishTestTrack(subtitleCallback: (SubtitleFile) -> Unit) {
+        try {
+            val dur = (lastVideoDuration ?: 1500.0).toInt()
+            fun f(x: Int) = String.format(java.util.Locale.US, "%02d:%02d:%02d,000", x / 3600, (x / 60) % 60, x % 60)
+            val sb = StringBuilder()
+            var i = 1
+            var t = 0
+            while (t < dur) {
+                sb.append(i).append('\n')
+                    .append(f(t)).append(" --> ").append(f(t + 4)).append('\n')
+                    .append("TEST ").append(String.format(java.util.Locale.US, "%d:%02d", t / 60, t % 60))
+                    .append("\n\n")
+                i++
+                t += 5
+            }
+            LocalSubServer.publish("t0$dur", sb.toString().toByteArray(Charsets.UTF_8), "utf-8")?.let {
+                subtitleCallback(SubtitleFile("TEST clock", it))
+                trace("T9 TEST track offered cues=${i - 1} for ${dur}s -> $it")
+            }
+        } catch (e: Exception) {
+            trace("T9 TEST track failed ${e::class.java.simpleName}")
         }
     }
 
@@ -1219,10 +1248,11 @@ class HayyaShootProvider : MainAPI() {
         } catch (e: Exception) {
             trace("T9 VTT failed ${e::class.java.simpleName}")
         }
-        if (!tvOnly) {
+        // Old stable app / TVs that decode subtitles as Windows-1256
+        if (cp != null) {
             val first = ranked.first()
-            LocalSubServer.publish("u0" + first.text.length, first.text.toByteArray(Charsets.UTF_8))
-                ?.let { subtitleCallback(SubtitleFile("Arabic (UTF-8)", it)) }
+            LocalSubServer.publish("c0" + first.text.length, first.text.toByteArray(cp), "windows-1256")
+                ?.let { subtitleCallback(SubtitleFile("Arabic (1256)", it)) }
         }
     }
 
@@ -2704,4 +2734,4 @@ private object LocalSubServer {
         }
     }
 }
-// ===== END OF FILE (HayyaShootProvider.kt, build-55): if you do not see this line, the paste was cut =====
+// ===== END OF FILE (HayyaShootProvider.kt, build-57): if you do not see this line, the paste was cut =====
