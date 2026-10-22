@@ -16,25 +16,26 @@ class FiveTVProvider : MainAPI() {
         TvType.TvSeries
     )
 
-    override val mainPage = listOf(
-        MainPageRequest(
-            "آخر الحلقات",
-            "$mainUrl/latest-episodes/",
+    // MainAPI.mainPage requires List<MainPageData>, not MainPageRequest.
+    override val mainPage: List<MainPageData> = listOf(
+        MainPageData(
+            name = "آخر الحلقات",
+            data = "$mainUrl/latest-episodes/",
             horizontalImages = false
         ),
-        MainPageRequest(
-            "أحدث الإضافات",
-            "$mainUrl/new-rows/",
+        MainPageData(
+            name = "أحدث الإضافات",
+            data = "$mainUrl/new-rows/",
             horizontalImages = false
         ),
-        MainPageRequest(
-            "آخر المسلسلات",
-            "$mainUrl/latest-series/",
+        MainPageData(
+            name = "آخر المسلسلات",
+            data = "$mainUrl/latest-series/",
             horizontalImages = false
         ),
-        MainPageRequest(
-            "آخر الأفلام",
-            "$mainUrl/latest-movies/",
+        MainPageData(
+            name = "آخر الأفلام",
+            data = "$mainUrl/latest-movies/",
             horizontalImages = false
         )
     )
@@ -92,10 +93,12 @@ class FiveTVProvider : MainAPI() {
                 ?.filter { it.isDigit() }
                 ?.toIntOrNull()
 
-            val isMovie = card?.hasClass("ftv-home-poster-card--movie") == true ||
+            val isMovie =
+                card?.hasClass("ftv-home-poster-card--movie") == true ||
                 url.contains("/movie/")
 
-            val isSeries = card?.hasClass("ftv-home-poster-card--series") == true ||
+            val isSeries =
+                card?.hasClass("ftv-home-poster-card--series") == true ||
                 url.contains("/series/")
 
             val item = when {
@@ -154,7 +157,10 @@ class FiveTVProvider : MainAPI() {
                 hasNext = results.isNotEmpty()
             )
         } catch (e: Exception) {
-            trace("HOME-ERR", "${e.javaClass.simpleName}: ${e.message}")
+            trace(
+                "HOME-ERR",
+                "${e.javaClass.simpleName}: ${e.message}"
+            )
 
             newHomePageResponse(
                 request.name,
@@ -320,6 +326,7 @@ class FiveTVProvider : MainAPI() {
 
                     trace("LOAD-3", "Episodes=${episodes.size}")
 
+                    // TvType.TvSeries is required by the project's API signature.
                     newTvSeriesLoadResponse(
                         title,
                         url,
@@ -339,7 +346,10 @@ class FiveTVProvider : MainAPI() {
                 }
             }
         } catch (e: Exception) {
-            trace("LOAD-ERR", "${e.javaClass.simpleName}: ${e.message}")
+            trace(
+                "LOAD-ERR",
+                "${e.javaClass.simpleName}: ${e.message}"
+            )
             null
         }
     }
@@ -403,7 +413,10 @@ class FiveTVProvider : MainAPI() {
                         trace("LINK-5", "Found link: ${link.url}")
                     }
 
-                    trace("LINK-6", "Extractor result=$extractorFound")
+                    trace(
+                        "LINK-6",
+                        "Extractor result=$extractorFound"
+                    )
                 } catch (e: Exception) {
                     trace(
                         "LINK-ERR",
@@ -415,7 +428,10 @@ class FiveTVProvider : MainAPI() {
             trace("LINK-END", "foundLink=$foundLink")
             return foundLink
         } catch (e: Exception) {
-            trace("LINK-FATAL", "${e.javaClass.simpleName}: ${e.message}")
+            trace(
+                "LINK-FATAL",
+                "${e.javaClass.simpleName}: ${e.message}"
+            )
             return foundLink
         }
     }
