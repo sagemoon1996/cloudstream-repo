@@ -1,4 +1,5 @@
-package com.sagemoon1996.fivetv
+
+package com.example
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
@@ -8,376 +9,390 @@ import java.net.URLEncoder
 class FiveTVProvider : MainAPI() {
 
     override var mainUrl = "https://new61.5tv.lol"
-
     override var name = "FiveTV"
-
-    override var lang = "ar"
-
+    override val lang = "ar"
     override val hasMainPage = true
 
     override val supportedTypes = setOf(
-        TvType.TvSeries,
-        TvType.Movie
+        TvType.Movie,
+        TvType.TvSeries
     )
 
-    override val mainPage = mainPageOf(
-        "$mainUrl/" to "الرئيسية",
-        "$mainUrl/latest-episodes/" to "آخر الحلقات",
-        "$mainUrl/new-rows/" to "آخر الإضافات",
-        "$mainUrl/latest-series/" to "جديد الدراما",
-        "$mainUrl/latest-movies/" to "جديد الأفلام",
-        "$mainUrl/category/%d8%a7%d9%84%d8%af%d8%b1%d8%a7%d9%85%d8%a7-%d8%a7%d9%84%d8%aa%d8%a7%d9%8a%d9%84%d8%a7%d9%86%d8%af%d9%8a%d8%a9/" to "الدراما التايلاندية",
-        "$mainUrl/schedule/" to "الجدول الأسبوعي"
+    override val mainPage = listOf(
+        MainPageRequest(
+            "آخر الحلقات",
+            "$mainUrl/latest-episodes/"
+        ),
+        MainPageRequest(
+            "أحدث الإضافات",
+            "$mainUrl/new-rows/"
+        ),
+        MainPageRequest(
+            "آخر المسلسلات",
+            "$mainUrl/latest-series/"
+        ),
+        MainPageRequest(
+            "آخر الأفلام",
+            "$mainUrl/latest-movies/"
+        )
     )
 
-    /*
-     * سيلكتور واحد يحاول يلقط رابط البوستر من عنصر "img" عادي بكل
-     * الأتربيوتات الممكنة اللي تستعملها مواقع الـ lazy-load، وإذا ما
-     * لقاش، يفتش على background-image جوه attribute "style"
-     * (برشا قوالب ووردبريس تحط صورة الكارد كخلفية CSS موش كـ <img>).
-     */
-    private fun extractPosterUrl(element: Element): String? {
+    private val traceLog = StringBuilder()
 
-        element.selectFirst(
-            "img[src], img[data-src], img[data-lazy-src], " +
-                "img[data-original], img[data-srcset], source[srcset]"
-        )?.let { image ->
-
-            val direct = image.attr("src")
-                .ifBlank { image.attr("data-src") }
-                .ifBlank { image.attr("data-lazy-src") }
-                .ifBlank { image.attr("data-original") }
-                .ifBlank {
-                    image.attr("data-srcset")
-                        .ifBlank { image.attr("srcset") }
-                        .split(",")
-                        .firstOrNull()
-                        ?.trim()
-                        ?.split(" ")
-                        ?.firstOrNull()
-                        .orEmpty()
-                }
-
-            if (direct.startsWith("http")) {
-                return direct
-            }
+    private fun trace(stage: String, message: String) {
+        val line = "[FiveTV][$stage] $message"
+        println(line)
+        synchronized(traceLog) {
+            traceLog.append(line).append('\n')
         }
+    }
 
-        val bgRegex = Regex(
-            """background-image\s*:\s*url\((['"]?)([^'")]+)\1\)"""
+    private fun clearTrace() {
+        synchronized(traceLog) {
+            traceLog.clear()
+        }
+    }
+
+    private fun getTrace(): String =
+        synchronized(traceLog) { traceLog.toString() }
+
+    private fun absoluteUrl(url: String): String {
+        val value = url.trim()
+        if (value.isBlank()) return ""
+        if (value.startsWith("//")) return "https:$value"
+        if (value.startsWith("http://") || value.startsWith("https://")) {
+            return value
+        }
+        return "$mainUrl/${value.trimStart('/')}"
+    }
+
+    private fun Element.firstText(selector: String): String? =
+        selectFirst(selector)?.text()?.trim()?.takeIf { it.isNotBlank() }
+
+    private fun Element.firstImageUrl(): String? {
+        val image = selectFirst("img") ?: return null
+        val value = image.attr("src").ifBlank {
+            image.attr("data-src")
+        }.ifBlank {
+            image.attr("data-lazy-src")
+        }
+        return value.takeIf { it.isNotBlank() }?.let { absoluteUrl(it) }
+    }
+
+    private fun Element.cardContainer(): Element {
+        return parents().firstOrNull {
+            it.hasClass("ftv-home-poster-card")
+        } ?: parent() ?: this
+    }
+
+    private fun parseCards(document: org.jsoup.nodes.Document): List<SearchResponse> {
+        val results = mutableListOf<SearchResponse>()
+        val seen = mutableSetOf<String>()
+
+        val titleLinks = document.select(
+            ".ftv-home-poster-card__title[href], " +
+                ".ftv-search-grid .ftv-home-poster-card__title[href]"
         )
 
-        val styledElement = element.selectFirst("[style*=background-image]")
-            ?: element.takeIf {
-                it.attr("style").contains("background-image")
-            }
+        for (titleLink in titleLinks) {
+            val title = titleLink.text().trim()
+            val url = absoluteUrl(titleLink.attr("href"))
 
-        styledElement?.attr("style")?.let { style ->
-            bgRegex.find(style)
-                ?.groupValues
-                ?.getOrNull(2)
-                ?.trim()
-                ?.takeIf { it.startsWith("http") }
-                ?.let { return it }
-        }
+            if (title.isBlank() || url.isBlank() || !seen.add(url)) continue
 
-        return null
-    }
+            val card = titleLink.cardContainer()
+            val poster = card.firstImageUrl()
+                ?: card.selectFirst(".ftv-home-poster-card__image img")
+                    ?.let { image ->
+                        image.attr("src").ifBlank { image.attr("data-src") }
+                    }
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { absoluteUrl(it) }
 
-    /*
-     * فهذا الموقع، نفس المسلسل/الفيلم يقدر يكون مرتبط بـ 2 روابط
-     * <a> منفصلة تأشر لنفس الصفحة (وحدة فيها الصورة بَرك، وأخرى فيها
-     * العنوان بَرك). الكود القديم كان يوقف عند أول رابط يلقاه، وإذا
-     * صادف الرابط اللي بلا صورة (أو صورة بأتربيوت ما يعرفهاش)، البوستر
-     * يولي فارغ. هوني نلمو (group) كل الروابط اللي تأشر لنفس الصفحة،
-     * ونفتشو على البوستر والعنوان عبر المجموعة كاملة (بما فيها الأب
-     * المباشر تاع كل رابط، لأن الصورة تقدر تكون خارج الـ <a> نفسه).
-     */
-    private fun findPoster(elements: List<Element>): String? {
-
-        for (el in elements) {
-
-            extractPosterUrl(el)?.let { return it }
-
-            el.parent()?.let { parent ->
-                extractPosterUrl(parent)?.let { return it }
-            }
-        }
-
-        return null
-    }
-
-    private fun findTitle(elements: List<Element>): String? {
-
-        // أولوية 1: عنوان واضح من عنصر نصي حقيقي (h1-h4, .title, .entry-title)
-        elements.firstNotNullOfOrNull { el ->
-            el.selectFirst("h1, h2, h3, h4, .title, .entry-title")
+            val year = card
+                .selectFirst(".ftv-poster-badge--year")
                 ?.text()
-                ?.trim()
-                ?.takeIf { it.isNotBlank() }
-        }?.let { return it }
+                ?.filter { it.isDigit() }
+                ?.toIntOrNull()
 
-        // أولوية 2: نص الرابط نفسه (لو مافيهوش صورة بَرك)
-        elements.firstNotNullOfOrNull { el ->
-            el.text()
-                .trim()
-                .replace(Regex("\\s+"), " ")
-                .takeIf { it.isNotBlank() }
-        }?.let { return it }
+            val isMovie = card.hasClass("ftv-home-poster-card--movie") ||
+                url.contains("/movie/")
 
-        // أولوية 3 (آخر حل): alt تاع الصورة، حتى لو فيه سنة/تصنيف زايد
-        elements.firstNotNullOfOrNull { el ->
-            el.selectFirst("img[alt]")
-                ?.attr("alt")
-                ?.trim()
-                ?.takeIf { it.isNotBlank() }
-        }?.let { return it }
+            val isSeries = card.hasClass("ftv-home-poster-card--series") ||
+                url.contains("/series/")
 
-        return null
-    }
-
-    private fun makeSearchResponses(
-        document: org.jsoup.nodes.Document
-    ): List<SearchResponse> {
-
-        val links = document.select(
-            "a[href*='/series/'], a[href*='/movie/']"
-        )
-
-        val grouped = links.groupBy {
-            it.attr("href").trim()
-        }
-
-        return grouped.mapNotNull { (href, elements) ->
-
-            if (href.isBlank()) {
-                return@mapNotNull null
-            }
-
-            val title = findTitle(elements)
-                ?: return@mapNotNull null
-
-            val poster = findPoster(elements)
-
-            when {
-                href.contains("/movie/") -> {
-                    newMovieSearchResponse(
-                        title,
-                        href,
-                        TvType.Movie
-                    ) {
-                        posterUrl = poster
-                    }
+            val item = when {
+                isMovie -> newMovieSearchResponse(
+                    title,
+                    url,
+                    TvType.Movie
+                ) {
+                    this.posterUrl = poster
+                    this.year = year
                 }
 
-                href.contains("/series/") -> {
-                    newTvSeriesSearchResponse(
-                        title,
-                        href,
-                        TvType.TvSeries
-                    ) {
-                        posterUrl = poster
-                    }
+                isSeries -> newTvSeriesSearchResponse(
+                    title,
+                    url,
+                    TvType.TvSeries
+                ) {
+                    this.posterUrl = poster
+                    this.year = year
                 }
 
                 else -> null
             }
+
+            if (item != null) results.add(item)
         }
+
+        return results
     }
 
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
+        clearTrace()
 
-        val url = if (page == 1) {
-            request.data
+        val base = request.data.trimEnd('/')
+        val url = if (page <= 1) {
+            "$base/"
         } else {
-            "${request.data.trimEnd('/')}/page/$page/"
+            "$base/page/$page/"
         }
 
-        val document = app.get(url).document
+        return try {
+            trace("HOME-1", "GET $url")
 
-        return newHomePageResponse(
-            request.name,
-            makeSearchResponses(document)
-        )
+            val response = app.get(url)
+            val document = response.document
+
+            trace(
+                "HOME-2",
+                "HTTP=${response.code}, HTML=${response.text.length}"
+            )
+
+            val results = parseCards(document)
+
+            trace("HOME-3", "Cards=${results.size}")
+
+            newHomePageResponse(
+                request.name,
+                results,
+                hasNext = results.isNotEmpty()
+            )
+        } catch (e: Exception) {
+            trace(
+                "HOME-ERR",
+                "${e.javaClass.simpleName}: ${e.message}"
+            )
+
+            newHomePageResponse(
+                request.name,
+                emptyList(),
+                hasNext = false
+            )
+        }
     }
 
-    override suspend fun search(
-        query: String
-    ): List<SearchResponse> {
+    override suspend fun search(query: String): List<SearchResponse> {
+        clearTrace()
 
-        val encodedQuery = URLEncoder.encode(
-            query,
-            "UTF-8"
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val searchUrls = listOf(
+            "$mainUrl/search/?q=$encoded",
+            "$mainUrl/search/?s=$encoded",
+            "$mainUrl/?s=$encoded"
         )
 
-        val urls = listOf(
-            "$mainUrl/search/?q=$encodedQuery",
-            "$mainUrl/search/?s=$encodedQuery",
-            "$mainUrl/?s=$encodedQuery"
-        )
+        for ((index, url) in searchUrls.withIndex()) {
+            try {
+                trace("SEARCH-${index + 1}", "GET $url")
 
-        for (url in urls) {
+                val response = app.get(url)
+                val document = response.document
 
-            val document = app.get(url).document
+                trace(
+                    "SEARCH-${index + 1}-HTTP",
+                    "HTTP=${response.code}, HTML=${response.text.length}"
+                )
 
-            val results = makeSearchResponses(document)
+                val results = parseCards(document)
 
-            if (results.isNotEmpty()) {
-                return results
+                trace(
+                    "SEARCH-${index + 1}-RESULT",
+                    "Cards=${results.size}"
+                )
+
+                if (results.isNotEmpty()) return results
+            } catch (e: Exception) {
+                trace(
+                    "SEARCH-${index + 1}-ERR",
+                    "${e.javaClass.simpleName}: ${e.message}"
+                )
             }
         }
 
+        trace("SEARCH-END", "No results for query=$query")
         return emptyList()
     }
 
-    override suspend fun load(
-        url: String
-    ): LoadResponse? {
+    override suspend fun load(url: String): LoadResponse? {
+        clearTrace()
 
-        val document = app.get(url).document
+        return try {
+            trace("LOAD-1", "GET $url")
 
-        val title = document
-            .selectFirst("h1, h2.entry-title")
-            ?.text()
-            ?.trim()
-            ?.takeIf {
-                it.isNotBlank()
-            }
-            ?: document
-                .selectFirst("meta[property='og:title']")
-                ?.attr("content")
+            val response = app.get(url)
+            val document = response.document
+
+            trace(
+                "LOAD-2",
+                "HTTP=${response.code}, HTML=${response.text.length}"
+            )
+
+            val title = document
+                .selectFirst(".ftv-content-hero__title")
+                ?.text()
                 ?.trim()
-            ?: return null
+                ?.takeIf { it.isNotBlank() }
+                ?: document.selectFirst("meta[property=og:title]")
+                    ?.attr("content")
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                ?: document.title().substringBefore("|").trim()
 
-        val poster = document
-            .selectFirst("meta[property='og:image']")
-            ?.attr("content")
-            ?.takeIf {
-                it.isNotBlank()
-            }
-            ?: document
-                .selectFirst("img[src], img[data-src]")
-                ?.let {
-                    it.attr("src")
-                        .ifBlank {
-                            it.attr("data-src")
-                        }
+            val poster = document
+                .selectFirst(".ftv-content-hero__poster img")
+                ?.let { image ->
+                    image.attr("src")
+                        .ifBlank { image.attr("data-src") }
+                        .takeIf { it.isNotBlank() }
+                        ?.let { absoluteUrl(it) }
                 }
+                ?: document.selectFirst("meta[property=og:image]")
+                    ?.attr("content")
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { absoluteUrl(it) }
 
-        val plot = document
-            .selectFirst(
-                "meta[name='description'], meta[property='og:description']"
+            val description = document
+                .selectFirst(".ftv-content-hero__description")
+                ?.text()
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?: document.selectFirst("meta[name=description]")
+                    ?.attr("content")
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+
+            val year = document
+                .selectFirst(".ftv-content-hero__year a")
+                ?.text()
+                ?.filter { it.isDigit() }
+                ?.toIntOrNull()
+
+            val tags = document
+                .select(
+                    ".ftv-content-chip--category, " +
+                        ".ftv-content-chip--genre, " +
+                        ".ftv-content-chip--quality"
+                )
+                .map { it.text().trim() }
+                .filter { it.isNotBlank() }
+                .distinct()
+
+            trace(
+                "LOAD-3",
+                "Title=$title, Poster=${poster != null}, Year=$year"
             )
-            ?.attr("content")
-            ?.trim()
 
-        val year = document
-            .select("a[href*='/year/']")
-            .firstOrNull()
-            ?.text()
-            ?.trim()
-            ?.toIntOrNull()
-
-        if (url.contains("/movie/")) {
-
-            return newMovieLoadResponse(
-                title,
-                url,
-                TvType.Movie,
-                url
-            ) {
-                posterUrl = poster
-                this.year = year
-                this.plot = plot
-            }
-        }
-
-        val episodes = document
-            .select("a[href*='/episode/']")
-            .mapNotNull { link ->
-
-                val episodeUrl = link
-                    .attr("href")
-                    .trim()
-
-                if (episodeUrl.isBlank()) {
-                    return@mapNotNull null
-                }
-
-                val episodeText = link
-                    .text()
-                    .trim()
-
-                val season =
-                    Regex(
-                        """(?:الموسم|season)\s*(\d+)""",
-                        RegexOption.IGNORE_CASE
-                    )
-                        .find(episodeText)
-                        ?.groupValues
-                        ?.getOrNull(1)
-                        ?.toIntOrNull()
-                        ?: Regex(
-                            """/season-(\d+)/""",
-                            RegexOption.IGNORE_CASE
-                        )
-                            .find(episodeUrl)
-                            ?.groupValues
-                            ?.getOrNull(1)
-                            ?.toIntOrNull()
-                        ?: 1
-
-                val episode =
-                    Regex(
-                        """(?:الحلقة|episode)[^\d]*(\d+)""",
-                        RegexOption.IGNORE_CASE
-                    )
-                        .find(episodeText)
-                        ?.groupValues
-                        ?.getOrNull(1)
-                        ?.toIntOrNull()
-                        ?: Regex(
-                            """-(\d+)/?$"""
-                        )
-                            .find(episodeUrl)
-                            ?.groupValues
-                            ?.getOrNull(1)
-                            ?.toIntOrNull()
-                        ?: return@mapNotNull null
-
-                newEpisode(episodeUrl) {
-
-                    name = episodeText.ifBlank {
-                        "Episode $episode"
+            when {
+                url.contains("/movie/") -> {
+                    newMovieLoadResponse(
+                        title,
+                        url,
+                        TvType.Movie,
+                        url
+                    ) {
+                        this.posterUrl = poster
+                        this.plot = description
+                        this.year = year
+                        this.tags = tags
                     }
+                }
 
-                    this.season = season
-                    this.episode = episode
+                url.contains("/series/") -> {
+                    val episodeElements = document.select(
+                        "a.ftv-series-episode-card[href]"
+                    )
+
+                    trace(
+                        "LOAD-4",
+                        "Episode cards=${episodeElements.size}"
+                    )
+
+                    val episodes = episodeElements.mapNotNull { element ->
+                        val episodeUrl = absoluteUrl(element.attr("href"))
+                        if (episodeUrl.isBlank()) return@mapNotNull null
+
+                        val fullText = element.text().trim()
+                        val episodeNumber = Regex(
+                            """الحلقة\s*(\d+)"""
+                        ).find(fullText)
+                            ?.groupValues?.getOrNull(1)
+                            ?.toIntOrNull()
+                            ?: Regex("""-(\d+)/?$""")
+                                .find(element.attr("href"))
+                                ?.groupValues?.getOrNull(1)
+                                ?.toIntOrNull()
+
+                        val seasonNumber = Regex(
+                            """الموسم\s*(\d+)"""
+                        ).find(fullText)
+                            ?.groupValues?.getOrNull(1)
+                            ?.toIntOrNull()
+                            ?: 1
+
+                        val episodeName = element
+                            .selectFirst("strong")
+                            ?.text()
+                            ?.trim()
+                            ?.takeIf { it.isNotBlank() }
+                            ?: fullText
+
+                        newEpisode(episodeUrl) {
+                            this.name = episodeName
+                            this.season = seasonNumber
+                            this.episode = episodeNumber
+                        }
+                    }.distinctBy { it.data }
+
+                    trace("LOAD-5", "Parsed episodes=${episodes.size}")
+
+                    newTvSeriesLoadResponse(
+                        title,
+                        url,
+                        episodes
+                    ) {
+                        this.posterUrl = poster
+                        this.plot = description
+                        this.year = year
+                        this.tags = tags
+                    }
+                }
+
+                else -> {
+                    trace("LOAD-ERR", "Unsupported URL type: $url")
+                    null
                 }
             }
-            .distinctBy {
-                it.data
-            }
-            .sortedWith(
-                compareBy<Episode> {
-                    it.season ?: 1
-                }.thenBy {
-                    it.episode ?: 0
-                }
+        } catch (e: Exception) {
+            trace(
+                "LOAD-ERR",
+                "${e.javaClass.simpleName}: ${e.message}"
             )
-
-        return newTvSeriesLoadResponse(
-            title,
-            url,
-            TvType.TvSeries,
-            episodes
-        ) {
-            posterUrl = poster
-            this.year = year
-            this.plot = plot
+            null
         }
     }
 
@@ -387,328 +402,89 @@ class FiveTVProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        clearTrace()
 
-        val document = app.get(data).document
+        var foundLink = false
+        val candidates = linkedSetOf<String>()
 
-        var loaded = false
+        try {
+            trace("LINK-1", "GET $data")
 
-        val directSources = document
-            .select(
-                "video[src], video source[src], source[src]"
-            )
-            .mapNotNull { element ->
+            val response = app.get(data)
+            val document = response.document
 
-                element.attr("src")
-                    .trim()
-                    .takeIf {
-                        it.startsWith("http")
-                    }
-            }
-            .distinct()
-
-        for (source in directSources) {
-
-            val type =
-                if (source.contains(".m3u8", true)) {
-                    ExtractorLinkType.M3U8
-                } else {
-                    ExtractorLinkType.VIDEO
-                }
-
-            callback(
-                newExtractorLink(
-                    source = "FiveTV",
-                    name = "FiveTV",
-                    url = source,
-                    type = type
-                ) {
-                    referer = data
-                    quality = Qualities.Unknown.value
-                }
+            trace(
+                "LINK-2",
+                "HTTP=${response.code}, HTML=${response.text.length}"
             )
 
-            loaded = true
-        }
+            document.select("video[src], video source[src], source[src]")
+                .forEach { element ->
+                    val raw = element.attr("src")
+                    if (raw.isNotBlank()) candidates.add(absoluteUrl(raw))
+                }
 
-        val iframeLinks = document
-            .select(
-                "iframe[src], iframe[data-src]"
+            document.select("iframe[src], iframe[data-src]")
+                .forEach { element ->
+                    val raw = element.attr("src")
+                        .ifBlank { element.attr("data-src") }
+                    if (raw.isNotBlank()) candidates.add(absoluteUrl(raw))
+                }
+
+            document.select(
+                "a[href*='.m3u8'], a[href*='.mp4'], " +
+                    "a[href*='embed'], a[href*='player']"
+            ).forEach { element ->
+                val raw = element.attr("href")
+                if (raw.isNotBlank()) candidates.add(absoluteUrl(raw))
+            }
+
+            candidates.remove(data)
+            candidates.remove("")
+
+            trace(
+                "LINK-3",
+                "Candidates=${candidates.size}: ${candidates.joinToString()}"
             )
-            .mapNotNull { iframe ->
 
-                val src = iframe
-                    .attr("src")
-                    .ifBlank {
-                        iframe.attr("data-src")
-                    }
-                    .trim()
-
-                when {
-                    src.startsWith("http") -> src
-                    src.startsWith("//") -> "https:$src"
-                    src.startsWith("/") -> "$mainUrl$src"
-                    else -> null
-                }
-            }
-            .distinct()
-
-        for (link in iframeLinks) {
-
-            if (
-                !link.contains(
-                    "71stream.one",
-                    ignoreCase = true
-                )
-            ) {
-
-                loadExtractor(
-                    link,
-                    data,
-                    subtitleCallback,
-                    callback
-                )
-
-                loaded = true
-                continue
-            }
-
-            val streamDocument = app
-                .get(link)
-                .document
-
-            val appElement = streamDocument
-                .selectFirst("#app")
-
-            val appData = appElement
-                ?.attr("data-page")
-                ?.replace("\\/", "/")
-
-            if (appData != null) {
-
-                val m3u8 = Regex(
-                    """https://cdnvid\.dramalvr\.com/hls/[^"]+\.m3u8"""
-                )
-                    .find(appData)
-                    ?.value
-
-                if (m3u8 != null) {
-
-                    callback(
-                        newExtractorLink(
-                            source = "71Stream",
-                            name = "71Stream HLS",
-                            url = m3u8,
-                            type = ExtractorLinkType.M3U8
-                        ) {
-                            referer = link
-                            quality = Qualities.Unknown.value
-                        }
-                    )
-
-                    loaded = true
-                }
-
-                val mp4 = Regex(
-                    """https://[^"'\\\s<>]+\.mp4(?:\?[^"'\\\s<>]*)?"""
-                )
-                    .find(appData)
-                    ?.value
-
-                if (mp4 != null) {
-
-                    callback(
-                        newExtractorLink(
-                            source = "71Stream",
-                            name = "71Stream MP4",
-                            url = mp4,
-                            type = ExtractorLinkType.VIDEO
-                        ) {
-                            referer = link
-                            quality = Qualities.Unknown.value
-                        }
-                    )
-
-                    loaded = true
-                }
-            }
-
-            val hashId = Regex(
-                """71stream\.one/embed/([A-Za-z0-9_-]+)"""
-            )
-                .find(link)
-                ?.groupValues
-                ?.getOrNull(1)
-
-            if (hashId != null) {
-
-                val downloadUrl =
-                    "https://71stream.one/download/$hashId?quality=Original"
-
+            for (candidate in candidates) {
                 try {
+                    trace("LINK-4", "Try extractor: $candidate")
 
-                    val response = app.get(
-                        downloadUrl,
-                        allowRedirects = true
-                    )
-
-                    val finalUrl = response.url
-
-                    if (
-                        finalUrl.startsWith("http") &&
-                        finalUrl != downloadUrl &&
-                        (
-                            finalUrl.contains(".mp4", true) ||
-                            finalUrl.contains("cloudflarestorage.com", true) ||
-                            finalUrl.contains("r2.cloudflarestorage.com", true)
+                    val extractorFound = loadExtractor(
+                        candidate,
+                        data,
+                        subtitleCallback
+                    ) { extractorLink ->
+                        foundLink = true
+                        callback(extractorLink)
+                        trace(
+                            "LINK-5",
+                            "Extractor callback: ${extractorLink.url}"
                         )
-                    ) {
-
-                        callback(
-                            newExtractorLink(
-                                source = "71Stream",
-                                name = "71Stream MP4",
-                                url = finalUrl,
-                                type = ExtractorLinkType.VIDEO
-                            ) {
-                                referer = link
-                                quality = Qualities.Unknown.value
-                            }
-                        )
-
-                        loaded = true
                     }
 
-                } catch (_: Exception) {
-                }
-            }
-        }
-
-        val pageHtml = document
-            .html()
-            .replace("\\/", "/")
-
-        val hidden71StreamLinks = Regex(
-            """https?://71stream\.one/embed/[A-Za-z0-9_-]+"""
-        )
-            .findAll(pageHtml)
-            .map {
-                it.value
-            }
-            .distinct()
-            .toList()
-
-        for (link in hidden71StreamLinks) {
-
-            if (iframeLinks.contains(link)) {
-                continue
-            }
-
-            val streamDocument = app
-                .get(link)
-                .document
-
-            val appData = streamDocument
-                .selectFirst("#app")
-                ?.attr("data-page")
-                ?.replace("\\/", "/")
-
-            if (appData != null) {
-
-                val m3u8 = Regex(
-                    """https://cdnvid\.dramalvr\.com/hls/[^"]+\.m3u8"""
-                )
-                    .find(appData)
-                    ?.value
-
-                if (m3u8 != null) {
-
-                    callback(
-                        newExtractorLink(
-                            source = "71Stream",
-                            name = "71Stream HLS",
-                            url = m3u8,
-                            type = ExtractorLinkType.M3U8
-                        ) {
-                            referer = link
-                            quality = Qualities.Unknown.value
-                        }
+                    if (extractorFound) {
+                        trace("LINK-6", "Extractor returned true")
+                    } else {
+                        trace("LINK-6", "Extractor returned false")
+                    }
+                } catch (e: Exception) {
+                    trace(
+                        "LINK-ERR",
+                        "${e.javaClass.simpleName}: ${e.message}; URL=$candidate"
                     )
-
-                    loaded = true
-                }
-
-                val mp4 = Regex(
-                    """https://[^"'\\\s<>]+\.mp4(?:\?[^"'\\\s<>]*)?"""
-                )
-                    .find(appData)
-                    ?.value
-
-                if (mp4 != null) {
-
-                    callback(
-                        newExtractorLink(
-                            source = "71Stream",
-                            name = "71Stream MP4",
-                            url = mp4,
-                            type = ExtractorLinkType.VIDEO
-                        ) {
-                            referer = link
-                            quality = Qualities.Unknown.value
-                        }
-                    )
-
-                    loaded = true
                 }
             }
 
-            val hashId = Regex(
-                """71stream\.one/embed/([A-Za-z0-9_-]+)"""
+            trace("LINK-END", "foundLink=$foundLink")
+            return foundLink
+        } catch (e: Exception) {
+            trace(
+                "LINK-FATAL",
+                "${e.javaClass.simpleName}: ${e.message}"
             )
-                .find(link)
-                ?.groupValues
-                ?.getOrNull(1)
-
-            if (hashId != null) {
-
-                try {
-
-                    val response = app.get(
-                        "https://71stream.one/download/$hashId?quality=Original",
-                        allowRedirects = true
-                    )
-
-                    val finalUrl = response.url
-
-                    if (
-                        finalUrl.startsWith("http") &&
-                        finalUrl != link &&
-                        (
-                            finalUrl.contains(".mp4", true) ||
-                            finalUrl.contains("cloudflarestorage.com", true) ||
-                            finalUrl.contains("r2.cloudflarestorage.com", true)
-                        )
-                    ) {
-
-                        callback(
-                            newExtractorLink(
-                                source = "71Stream",
-                                name = "71Stream MP4",
-                                url = finalUrl,
-                                type = ExtractorLinkType.VIDEO
-                            ) {
-                                referer = link
-                                quality = Qualities.Unknown.value
-                            }
-                        )
-
-                        loaded = true
-                    }
-
-                } catch (_: Exception) {
-                }
-            }
+            return foundLink
         }
-
-        return loaded
     }
 }
