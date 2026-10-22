@@ -26,7 +26,8 @@ class FiveTVProvider : MainAPI() {
         "$mainUrl/new-rows/" to "أحدث الإضافات",
         "$mainUrl/latest-series/" to "جديد الدراما",
         "$mainUrl/latest-movies/" to "آخر الأفلام",
-        "$mainUrl/category/%d8%a7%d9%84%d8%af%d8%b1%d8%a7%d9%85%d8%a7-%d8%a7%d9%84%d8%aa%d8%a7%d9%8a%d9%84%d8%a7%d9%86%d8%af%d9%8a%d8%a9/" to "الدراما التايلاندية"
+        // رابط الأنمي غير مثبت: نجرب الرابط العربي ثم /category/anime/ (يتجرب الثاني فقط إذا الأول فارغ)
+        "$mainUrl/category/%d8%a3%d9%86%d9%85%d9%8a/|$mainUrl/category/anime/" to "أنمي"
     )
 
     // ------------------------------------------------------------------ Helpers
@@ -107,6 +108,36 @@ class FiveTVProvider : MainAPI() {
     private fun Element.toCardResult(): SearchResponse? =
         if (hasClass("ftv-tax-card")) toTaxResult() else toSearchResult()
 
+    // "Game of Thrones — الموسم 3 — الحلقة 3" -> "Game of Thrones"
+    private fun cleanSeriesName(raw: String): String =
+        raw.split("—", "–", " - ")
+            .first()
+            .substringBefore("الموسم")
+            .substringBefore("الحلقة")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+    // كلمات مثل "جديدة" (badge) أو أرقام فقط ما هيش اسم مسلسل
+    private fun isNoiseTitle(t: String): Boolean =
+        t.isBlank() || t.matches(Regex("""\d+""")) || (t.contains("جديد") && t.length < 12)
+
+    // احتياط: اسم المسلسل من slug الحلقة (game-of-thrones-3x3 -> Game Of Thrones)
+    private fun seriesNameFromSlug(epUrl: String): String {
+        val slug = epUrl.substringBefore("?").trimEnd('/').substringAfterLast('/')
+        val decoded = try {
+            java.net.URLDecoder.decode(slug, "UTF-8")
+        } catch (e: Exception) {
+            slug
+        }
+        return decoded
+            .replace(Regex("""-\d+x\d+$"""), "")
+            .replace(Regex("""-\d+$"""), "")
+            .split("-")
+            .filter { it.isNotBlank() }
+            .joinToString(" ") { w -> w.replaceFirstChar { it.uppercase() } }
+            .trim()
+    }
+
     // Parser عام (غير مثبت): لأقسام /latest-episodes/ و /new-rows/ إلى أن يتثبت HTML متاعهم.
     // يجمع كل رابط /episode/ أو /series/ أو /movie/ داخل <main> بدون تكرار.
     private fun parseGenericCards(doc: Document): List<SearchResponse> {
@@ -118,20 +149,35 @@ class FiveTVProvider : MainAPI() {
 
             val box: Element = a.closest("article") ?: a.parent() ?: a
 
-            var title = box.selectFirst(
-                ".ftv-home-poster-card__title, .ftv-tax-card__info h2, h2, h3, h4, strong"
-            )?.text()?.takeIf { it.isNotBlank() }
-                ?: a.attr("aria-label").ifBlank { a.text() }
-            title = title.replace(Regex("\\s+"), " ").trim()
-            if (title.isBlank()) continue
+            val title: String
+            if (href.contains("/episode/")) {
+                // اسم المسلسل (alt الصورة، ثم عناوين الكارت، ثم الاسم من الرابط) + رقم الحلقة
+                val candidates = listOfNotNull(
+                    box.selectFirst("img[alt]")?.attr("alt"),
+                    box.selectFirst(
+                        ".ftv-home-poster-card__title, .ftv-tax-card__info h2, h2, h3, h4"
+                    )?.text(),
+                    a.attr("aria-label")
+                )
+                val seriesName = candidates
+                    .map { cleanSeriesName(it) }
+                    .firstOrNull { it.isNotBlank() && !isNoiseTitle(it) }
+                    ?: seriesNameFromSlug(href)
+                if (seriesName.isBlank()) continue
 
-            if (href.contains("/episode/") && !title.contains("الحلقة")) {
                 val (s, e) = parseSeasonEpisode(href, "")
-                title += when {
-                    s != null && e != null -> " - الموسم $s الحلقة $e"
-                    e != null -> " - الحلقة $e"
-                    else -> ""
+                title = when {
+                    s != null && e != null -> "$seriesName - الموسم $s الحلقة $e"
+                    e != null -> "$seriesName - الحلقة $e"
+                    else -> seriesName
                 }
+            } else {
+                val raw = box.selectFirst(
+                    ".ftv-home-poster-card__title, .ftv-tax-card__info h2, h2, h3, h4, strong"
+                )?.text()?.takeIf { it.isNotBlank() }
+                    ?: a.attr("aria-label").ifBlank { a.text() }
+                title = raw.replace(Regex("\\s+"), " ").trim()
+                if (title.isBlank()) continue
             }
 
             val poster = box.imageUrl() ?: a.imageUrl()
@@ -156,22 +202,33 @@ class FiveTVProvider : MainAPI() {
     // ------------------------------------------------------------------ Main page
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page <= 1) request.data else "${request.data.trimEnd('/')}/page/$page/"
-        val doc = app.get(url).document
-
-        val known = doc.select("article.ftv-home-poster-card, article.ftv-tax-card")
-            .mapNotNull { it.toCardResult() }
-
         val isEpisodes = request.data.contains("/latest-episodes/")
-        val items = (
-            if (isEpisodes) parseGenericCards(doc).ifEmpty { known }
-            else known.ifEmpty { parseGenericCards(doc) }
-        ).distinctBy { it.url }
 
-        val hasNext = doc.selectFirst("a.next.page-numbers") != null
-        Log.d(tag, "mainPage '${request.name}' p$page: known=${known.size} total=${items.size} hasNext=$hasNext")
+        // request.data يمكن يحتوي أكثر من رابط مفصولين بـ | (نجرب التالي إذا الأول فارغ)
+        for (base in request.data.split("|")) {
+            val url = if (page <= 1) base else "${base.trimEnd('/')}/page/$page/"
+            val doc = try {
+                app.get(url).document
+            } catch (e: Exception) {
+                Log.d(tag, "mainPage fetch error $url: ${e.message}")
+                continue
+            }
 
-        return newHomePageResponse(request.name, items, hasNext)
+            val known = doc.select("article.ftv-home-poster-card, article.ftv-tax-card")
+                .mapNotNull { it.toCardResult() }
+
+            val items = (
+                if (isEpisodes) parseGenericCards(doc).ifEmpty { known }
+                else known.ifEmpty { parseGenericCards(doc) }
+            ).distinctBy { it.url }
+
+            val hasNext = doc.selectFirst("a.next.page-numbers") != null
+            Log.d(tag, "mainPage '${request.name}' $url: known=${known.size} total=${items.size} hasNext=$hasNext")
+
+            if (items.isNotEmpty()) return newHomePageResponse(request.name, items, hasNext)
+        }
+
+        return newHomePageResponse(request.name, emptyList(), false)
     }
 
     // ------------------------------------------------------------------ Search
@@ -339,7 +396,7 @@ class FiveTVProvider : MainAPI() {
                     load71Stream(link, callback)
                 } else {
                     loadExtractor(link, data, subtitleCallback, callback) ||
-                        genericScan(link, data, callback)
+                        genericScan(link, label, data, callback)
                 }
             } catch (e: Exception) {
                 Log.d(tag, "watch error $link: ${e.message}")
@@ -452,58 +509,72 @@ class FiveTVProvider : MainAPI() {
         return loaded
     }
 
-    // حل أخير لسيرفر ما له extractor: نقرأ صفحة الـ embed ونلقط m3u8/mp4 الظاهرة في النص.
-    // لا ينجح مع الصفحات المشفرة (packed JS)، وقتها يرجع false والـ Logcat يبين السيرفر.
+    // حل أخير لسيرفر ما له extractor: نقرأ صفحة الـ embed (ونفك eval packed إذا موجود) ونلقط روابط m3u8/mp4.
+    // يغطي الأنماط الشائعة: رابط مباشر، file:"..."، hls2:"..."، مع مسارات نسبية.
+    // ما ينجح مع الصفحات المحمية (Cloudflare) أو المشفرة بشكل آخر، وقتها يرجع false والـ Logcat يبين السبب.
     private suspend fun genericScan(
         link: String,
+        label: String,
         referer: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val text = try {
-            app.get(link, referer = referer).text.replace("\\/", "/")
+        val raw = try {
+            app.get(link, referer = referer).text
         } catch (e: Exception) {
             Log.d(tag, "genericScan error $link: ${e.message}")
             return false
         }
 
+        val html = raw.replace("\\/", "/")
+        val packed = html.contains("eval(function(p,a,c,k,e,d)")
+        val unpacked = try {
+            if (packed) getAndUnpack(html).replace("\\/", "/") else ""
+        } catch (e: Exception) {
+            Log.d(tag, "unpack error $link: ${e.message}")
+            ""
+        }
+        val text = html + "\n" + unpacked
+
+        val origin = Regex("""^https?://[^/]+""").find(link)?.value.orEmpty()
         val host = link.substringAfter("://").substringBefore("/")
-        var found = false
+        val found = LinkedHashSet<String>()
 
-        val m3u8s = Regex("""https?://[^\s"'\\<>]+\.m3u8[^\s"'\\<>]*""")
-            .findAll(text).map { it.value }.distinct().toList()
-        for (m in m3u8s) {
+        Regex("""https?://[^\s"'\\<>]+\.(?:m3u8|mp4)[^\s"'\\<>]*""")
+            .findAll(text).forEach { found.add(it.value) }
+
+        Regex("""(?:file|hls\d*|src|source)["']?\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""")
+            .findAll(text).forEach { m ->
+                val u = m.groupValues[1]
+                found.add(
+                    when {
+                        u.startsWith("http") -> u
+                        u.startsWith("//") -> "https:$u"
+                        u.startsWith("/") -> origin + u
+                        else -> return@forEach
+                    }
+                )
+            }
+
+        Log.d(
+            tag,
+            "genericScan $host: len=${raw.length} packed=$packed found=${found.size} " +
+                "cf=${raw.contains("Just a moment", true)}"
+        )
+
+        val name = label.ifBlank { host }
+        for (u in found) {
             callback(
                 newExtractorLink(
-                    source = host,
-                    name = host,
-                    url = m,
-                    type = ExtractorLinkType.M3U8
+                    source = name,
+                    name = name,
+                    url = u,
+                    type = if (u.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
                     this.referer = link
                     quality = Qualities.Unknown.value
                 }
             )
-            found = true
         }
-
-        val mp4s = Regex("""https?://[^\s"'\\<>]+\.mp4[^\s"'\\<>]*""")
-            .findAll(text).map { it.value }.distinct().toList()
-        for (m in mp4s) {
-            callback(
-                newExtractorLink(
-                    source = host,
-                    name = host,
-                    url = m,
-                    type = ExtractorLinkType.VIDEO
-                ) {
-                    this.referer = link
-                    quality = Qualities.Unknown.value
-                }
-            )
-            found = true
-        }
-
-        Log.d(tag, "genericScan $host: m3u8=${m3u8s.size} mp4=${mp4s.size}")
-        return found
+        return found.isNotEmpty()
     }
 }
