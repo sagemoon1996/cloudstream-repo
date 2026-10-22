@@ -61,10 +61,10 @@
     },
     {
         "iconUrl": "https://new61.5tv.lol/wp-content/uploads/2026/09/yjPlfO23INYLyMWr1yr7rhwJhKO.jpg",
-        "fileHash": "sha256-d0b0fccf30f1955c0f75fc82c7d84ecc33ba7b736624fec9e8409e59df06b459",
+        "fileHash": "sha256-5418bd8eade0861edf2e38bb19bd0587ac564d41cbe6437662f854238aeaa549",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/sagemoon1996/cloudstream-repo",
-        "fileSize": 20846,
+        "fileSize": 26201,
         "status": 1,
         "language": "ar",
         "authors": [
