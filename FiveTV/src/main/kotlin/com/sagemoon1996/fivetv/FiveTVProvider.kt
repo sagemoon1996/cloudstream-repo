@@ -127,7 +127,10 @@ class FiveTVProvider : MainAPI() {
                 }
 
                 else -> {
-                    trace("S-UNKNOWN", "type not recognized; url=${hostOf(url)}")
+                    trace(
+                        "S-UNKNOWN",
+                        "type not recognized; url=${hostOf(url)}"
+                    )
                     null
                 }
             }
@@ -243,7 +246,10 @@ class FiveTVProvider : MainAPI() {
         val started = System.currentTimeMillis()
 
         return try {
-            trace("D1", "GET ${request.name}; page=$page; host=${hostOf(url)}")
+            trace(
+                "D1",
+                "GET ${request.name}; page=$page; host=${hostOf(url)}"
+            )
 
             val response = app.get(url)
             val document = response.document
@@ -316,7 +322,10 @@ class FiveTVProvider : MainAPI() {
 
         for ((index, url) in urls.withIndex()) {
             try {
-                trace("SEARCH-${index + 1}", "GET host=${hostOf(url)}")
+                trace(
+                    "SEARCH-${index + 1}",
+                    "GET host=${hostOf(url)}"
+                )
 
                 val response = app.get(url)
                 val results = parseCards(response.document)
@@ -433,7 +442,10 @@ class FiveTVProvider : MainAPI() {
                         "a.ftv-series-episode-card[href]"
                     )
 
-                    trace("LOAD-EP", "episode-elements=${elements.size}")
+                    trace(
+                        "LOAD-EP",
+                        "episode-elements=${elements.size}"
+                    )
 
                     val episodes = elements.mapNotNull { element ->
                         val episodeUrl = absoluteUrl(element.attr("href"))
@@ -443,18 +455,28 @@ class FiveTVProvider : MainAPI() {
 
                         val episodeNumber = Regex(
                             """الحلقة\s*(\d+)"""
-                        ).find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                        ).find(text)
+                            ?.groupValues
+                            ?.getOrNull(1)
+                            ?.toIntOrNull()
                             ?: Regex("""-(\d+)/?$""")
                                 .find(element.attr("href"))
-                                ?.groupValues?.getOrNull(1)?.toIntOrNull()
+                                ?.groupValues
+                                ?.getOrNull(1)
+                                ?.toIntOrNull()
 
                         val seasonNumber = Regex(
                             """الموسم\s*(\d+)"""
-                        ).find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                        ).find(text)
+                            ?.groupValues
+                            ?.getOrNull(1)
+                            ?.toIntOrNull()
                             ?: 1
 
                         val episodeName = element.selectFirst("strong")
-                            ?.text()?.trim()?.takeIf { it.isNotBlank() }
+                            ?.text()
+                            ?.trim()
+                            ?.takeIf { it.isNotBlank() }
                             ?: text
 
                         newEpisode(episodeUrl) {
@@ -464,7 +486,10 @@ class FiveTVProvider : MainAPI() {
                         }
                     }.distinctBy { it.data }
 
-                    trace("LOAD-EP", "parsed-episodes=${episodes.size}")
+                    trace(
+                        "LOAD-EP",
+                        "parsed-episodes=${episodes.size}"
+                    )
 
                     newTvSeriesLoadResponse(
                         title,
@@ -498,7 +523,11 @@ class FiveTVProvider : MainAPI() {
     ): String? {
         return try {
             val started = System.currentTimeMillis()
-            trace("L-71-1", "GET host=${hostOf(embedUrl)}")
+
+            trace(
+                "L-71-1",
+                "GET host=${hostOf(embedUrl)}"
+            )
 
             val response = app.get(embedUrl)
             val appElement = response.document.selectFirst("#app[data-page]")
@@ -521,7 +550,10 @@ class FiveTVProvider : MainAPI() {
                 videoUrl == "null" ||
                 !videoUrl.startsWith("http")
             ) {
-                trace("L-71-ERROR", "props.url missing or invalid")
+                trace(
+                    "L-71-ERROR",
+                    "props.url missing or invalid"
+                )
                 return null
             }
 
@@ -565,7 +597,10 @@ class FiveTVProvider : MainAPI() {
 
             val serverElements = document.select("[data-server-url]")
 
-            trace("L3", "data-server-url elements=${serverElements.size}")
+            trace(
+                "L3",
+                "data-server-url elements=${serverElements.size}"
+            )
 
             for ((index, element) in serverElements.withIndex()) {
                 val raw = element.attr("data-server-url").trim()
@@ -574,7 +609,8 @@ class FiveTVProvider : MainAPI() {
                 trace(
                     "L3-SERVER",
                     "index=$index; label=${element.text().trim().take(60)}; " +
-                        "host=${hostOf(candidate)}; valid=${candidate.startsWith("http")}"
+                        "host=${hostOf(candidate)}; " +
+                        "valid=${candidate.startsWith("http")}"
                 )
 
                 if (candidate.isNotBlank()) candidates.add(candidate)
@@ -585,7 +621,10 @@ class FiveTVProvider : MainAPI() {
                     "video[src], video source[src], source[src]"
             )
 
-            trace("L3-FALLBACK", "iframe/video/source elements=${iframeElements.size}")
+            trace(
+                "L3-FALLBACK",
+                "iframe/video/source elements=${iframeElements.size}"
+            )
 
             for (element in iframeElements) {
                 val raw = element.attr("src")
@@ -613,12 +652,21 @@ class FiveTVProvider : MainAPI() {
                 val candidateStarted = System.currentTimeMillis()
                 val host = hostOf(candidate)
 
-                trace("L5", "try index=$index; host=$host")
+                trace(
+                    "L5",
+                    "try index=$index; host=$host"
+                )
 
                 try {
                     if (
-                        candidate.contains("71stream.one", ignoreCase = true) &&
-                        candidate.contains("/embed/", ignoreCase = true)
+                        candidate.contains(
+                            "71stream.one",
+                            ignoreCase = true
+                        ) &&
+                        candidate.contains(
+                            "/embed/",
+                            ignoreCase = true
+                        )
                     ) {
                         val directUrl = extract71Stream(candidate)
 
@@ -633,17 +681,24 @@ class FiveTVProvider : MainAPI() {
                                     isM3u8 = directUrl.contains(
                                         ".m3u8",
                                         ignoreCase = true
-                                    ),
-                                    headers = mapOf("Referer" to candidate)
+                                    )
                                 )
                             )
 
                             foundLink = true
-                            trace("L6", "71Stream callback invoked")
+
+                            trace(
+                                "L6",
+                                "71Stream callback invoked"
+                            )
+
                             continue
                         }
 
-                        trace("L6", "71Stream direct extraction failed; trying extractor")
+                        trace(
+                            "L6",
+                            "71Stream direct extraction failed; trying extractor"
+                        )
                     }
 
                     val extractorFound = loadExtractor(
@@ -652,10 +707,12 @@ class FiveTVProvider : MainAPI() {
                         subtitleCallback
                     ) { link ->
                         foundLink = true
+
                         trace(
                             "L6-CALLBACK",
                             "name=${link.name}; host=${hostOf(link.url)}"
                         )
+
                         callback(link)
                     }
 
