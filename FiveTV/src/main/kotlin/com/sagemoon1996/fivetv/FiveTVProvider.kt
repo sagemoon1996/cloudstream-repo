@@ -1,8 +1,9 @@
 package com.sagemoon1996.fivetv
 
+import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import org.json.JSONObject
+import org.jsoup.nodes.Element
 import java.net.URLEncoder
 
 class FiveTVProvider : MainAPI() {
@@ -11,408 +12,200 @@ class FiveTVProvider : MainAPI() {
     override var name = "FiveTV"
     override var lang = "ar"
     override val hasMainPage = true
+    override val hasQuickSearch = false
+    override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
 
-    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
+    private val tag = "FiveTV"
 
-    override val mainPage: List<MainPageData> = listOf(
-        MainPageData("آخر الحلقات", "$mainUrl/latest-episodes/"),
-        MainPageData("أحدث الإضافات", "$mainUrl/new-rows/"),
-        MainPageData("آخر المسلسلات", "$mainUrl/latest-series/"),
-        MainPageData("آخر الأفلام", "$mainUrl/latest-movies/")
+    // الأقسام المثبتة (كروت article.ftv-home-poster-card). الأقسام الأخرى (/, /latest-episodes/,
+    // /new-rows/, /schedule/) محذوفة مؤقتا لأن شكل كروتها ما تثبتش.
+    override val mainPage = mainPageOf(
+        "$mainUrl/latest-series/" to "جديد الدراما",
+        "$mainUrl/latest-movies/" to "جديد الأفلام",
+        "$mainUrl/category/%d8%a7%d9%84%d8%af%d8%b1%d8%a7%d9%85%d8%a7-%d8%a7%d9%84%d8%aa%d8%a7%d9%8a%d9%84%d8%a7%d9%86%d8%af%d9%8a%d8%a9/" to "الدراما التايلاندية"
     )
 
-    private val diagEntries = mutableListOf<String>()
+    // ------------------------------------------------------------------ Helpers
 
-    private fun trace(stage: String, message: String) {
-        val entry = "$stage | $message".take(240)
-        synchronized(diagEntries) {
-            diagEntries.add("${System.currentTimeMillis()} | $entry")
-            while (diagEntries.size > 100) diagEntries.removeAt(0)
-        }
-        println("[FiveTV-DIAG] $entry")
-    }
-
-    private fun hostOf(url: String): String =
-        try {
-            url.substringAfter("://").substringBefore("/").substringBefore("?").take(100)
-        } catch (_: Exception) {
-            "unknown-host"
-        }
-
-    private fun absoluteUrl(url: String): String {
-        val value = url.trim()
-        if (value.isBlank()) return ""
-        if (value.startsWith("//")) return "https:$value"
-        if (value.startsWith("http://") || value.startsWith("https://")) return value
-        return "$mainUrl/${value.trimStart('/')}"
-    }
-
-    private fun parseCards(document: org.jsoup.nodes.Document): List<SearchResponse> {
-        val results = mutableListOf<SearchResponse>()
-        val seen = mutableSetOf<String>()
-        val elements = document.select(".ftv-home-poster-card__title[href]")
-
-        trace("S-CARDS", "poster-title-elements=${elements.size}")
-
-        for (link in elements) {
-            val title = link.text().trim()
-            val url = absoluteUrl(link.attr("href"))
-
-            if (title.isBlank() || url.isBlank() || !seen.add(url)) {
-                trace("S-SKIP", "empty title/url or duplicate")
-                continue
+    private fun Element.imageUrl(): String? {
+        val img = selectFirst("img") ?: return null
+        val raw = img.attr("data-src")
+            .ifBlank { img.attr("data-lazy-src") }
+            .ifBlank { img.attr("src") }
+            .ifBlank {
+                img.attr("srcset").split(",").firstOrNull()
+                    ?.trim()?.split(" ")?.firstOrNull().orEmpty()
             }
-
-            val card = link.parents().firstOrNull {
-                it.hasClass("ftv-home-poster-card")
-            } ?: link.parent()
-
-            val image = card?.selectFirst("img")
-            val posterRaw = image?.attr("src")
-                ?.ifBlank { image.attr("data-src") }
-                ?.ifBlank { image.attr("data-lazy-src") }
-
-            val poster = posterRaw?.takeIf { it.isNotBlank() }?.let { absoluteUrl(it) }
-
-            val year = card?.selectFirst(".ftv-poster-badge--year")
-                ?.text()?.filter { it.isDigit() }?.toIntOrNull()
-
-            val isMovie =
-                card?.hasClass("ftv-home-poster-card--movie") == true ||
-                    url.contains("/movie/")
-
-            val isSeries =
-                card?.hasClass("ftv-home-poster-card--series") == true ||
-                    url.contains("/series/")
-
-            val item = when {
-                isMovie -> newMovieSearchResponse(title, url, TvType.Movie) {
-                    posterUrl = poster
-                    this.year = year
-                }
-
-                isSeries -> newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
-                    posterUrl = poster
-                    this.year = year
-                }
-
-                else -> {
-                    trace("S-UNKNOWN", "type not recognized; host=${hostOf(url)}")
-                    null
-                }
-            }
-
-            if (item != null) results.add(item)
-        }
-
-        trace("S-CARDS-END", "parsed=${results.size}")
-        return results
+            .trim()
+        if (raw.isBlank() || raw.startsWith("data:")) return null
+        return fixUrlNull(raw)
     }
 
-    private fun parseEpisodeCards(
-        document: org.jsoup.nodes.Document
-    ): List<SearchResponse> {
-        val results = mutableListOf<SearchResponse>()
-        val seen = mutableSetOf<String>()
+    // ------------------------------------------------------------------ Cards
 
-        val selectors = listOf(
-            ".ftv-episode-completion-item a[href]",
-            ".ftv-home-episode-card a[href]",
-            "a.ftv-series-episode-card[href]",
-            "a[href*='/episode/']"
-        )
+    private fun Element.toSearchResult(): SearchResponse? {
+        val href = fixUrlNull(
+            selectFirst(".ftv-home-poster-card__title[href]")?.attr("href")
+                ?: selectFirst(".ftv-home-poster-card__image[href]")?.attr("href")
+                ?: selectFirst("a[href]")?.attr("href")
+        ) ?: return null
 
-        for (selector in selectors) {
-            trace("D-SELECTOR", "$selector count=${document.select(selector).size}")
-        }
+        // العنوان من .ftv-home-poster-card__title فقط (السنة والتصنيف badges منفصلة)
+        val title = selectFirst(".ftv-home-poster-card__title")?.text()?.trim().orEmpty()
+        if (title.isBlank()) return null
 
-        val elements = document.select(
-            ".ftv-episode-completion-item a[href], " +
-                ".ftv-home-episode-card a[href], " +
-                "a.ftv-series-episode-card[href], " +
-                "a[href*='/episode/']"
-        )
+        val poster = selectFirst(".ftv-home-poster-card__image")?.imageUrl() ?: imageUrl()
+        val year = selectFirst(".ftv-poster-badge--year")?.text()?.trim()?.toIntOrNull()
 
-        trace("D-ELEMENTS", "candidate-links=${elements.size}")
+        val isMovie = hasClass("ftv-home-poster-card--movie")
+        val isSeries = hasClass("ftv-home-poster-card--series") || href.contains("/series/")
 
-        for (link in elements) {
-            val url = absoluteUrl(link.attr("href"))
-
-            val card = link.parents().firstOrNull {
-                it.hasClass("ftv-episode-completion-item") ||
-                    it.hasClass("ftv-home-episode-card") ||
-                    it.hasClass("ftv-series-episode-card")
-            } ?: link.parent()
-
-            val title = sequenceOf(
-                link.selectFirst(
-                    ".ftv-home-episode-card__title, " +
-                        ".ftv-episode-completion-item__title, strong"
-                )?.text(),
-                link.text(),
-                card?.selectFirst("img")?.attr("alt")
-            ).filterNotNull()
-                .map { it.trim() }
-                .firstOrNull { it.isNotBlank() }
-                .orEmpty()
-
-            if (!url.contains("/episode/")) {
-                trace("D-SKIP", "not an episode URL")
-                continue
+        return if (isSeries && !isMovie) {
+            newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
+                this.posterUrl = poster
+                this.year = year
             }
-
-            if (title.isBlank() || !seen.add(url)) continue
-
-            val image = card?.selectFirst("img") ?: link.selectFirst("img")
-            val posterRaw = image?.attr("src")
-                ?.ifBlank { image.attr("data-src") }
-                ?.ifBlank { image.attr("data-lazy-src") }
-
-            val poster = posterRaw?.takeIf { it.isNotBlank() }?.let { absoluteUrl(it) }
-
-            results.add(
-                newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
-                    posterUrl = poster
-                }
-            )
-            trace("D-ITEM", "title=$title")
+        } else {
+            newMovieSearchResponse(title, href, TvType.Movie) {
+                this.posterUrl = poster
+                this.year = year
+            }
         }
-
-        trace("D-END", "parsed=${results.size}")
-        return results
     }
 
-    override suspend fun getMainPage(
-        page: Int,
-        request: MainPageRequest
-    ): HomePageResponse {
-        val base = request.data.trimEnd('/')
-        val url = if (page <= 1) "$base/" else "$base/page/$page/"
-        val started = System.currentTimeMillis()
+    // كروت صفحات التصنيف (مثبت): article.ftv-tax-card، النوع من الرابط لأن ما فيهاش class series/movie
+    private fun Element.toTaxResult(): SearchResponse? {
+        val href = fixUrlNull(selectFirst("a.ftv-tax-card__link[href]")?.attr("href"))
+            ?: return null
 
-        return try {
-            trace("D1", "GET ${request.name}; page=$page; host=${hostOf(url)}")
-
-            val response = app.get(url)
-            val document = response.document
-
-            trace(
-                "D2",
-                "HTTP=${response.code}; HTML=${response.text.length}; " +
-                    "ms=${System.currentTimeMillis() - started}"
-            )
-
-            val results = if (base.endsWith("/latest-episodes")) {
-                parseEpisodeCards(document)
-            } else {
-                parseCards(document)
+        val title = selectFirst(".ftv-tax-card__info h2")?.text()?.trim().orEmpty()
+            .ifBlank {
+                selectFirst("a.ftv-tax-card__link")?.attr("aria-label")?.trim().orEmpty()
             }
+        if (title.isBlank()) return null
 
-            trace("D3", "${request.name}; results=${results.size}")
+        val poster = selectFirst(".ftv-tax-card__media")?.imageUrl()
+        val year = selectFirst(".ftv-tax-card__year")?.text()?.trim()?.toIntOrNull()
 
-            newHomePageResponse(request.name, results, hasNext = results.isNotEmpty())
-        } catch (e: Exception) {
-            trace("D-ERROR", "${request.name}; ${e.javaClass.simpleName}: ${e.message}")
-            newHomePageResponse(request.name, emptyList(), hasNext = false)
+        return if (href.contains("/series/")) {
+            newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
+                this.posterUrl = poster
+                this.year = year
+            }
+        } else {
+            newMovieSearchResponse(title, href, TvType.Movie) {
+                this.posterUrl = poster
+                this.year = year
+            }
         }
     }
+
+    private fun Element.toCardResult(): SearchResponse? =
+        if (hasClass("ftv-tax-card")) toTaxResult() else toSearchResult()
+
+    // ------------------------------------------------------------------ Main page
+
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val url = if (page <= 1) request.data else "${request.data.trimEnd('/')}/page/$page/"
+        val doc = app.get(url).document
+
+        val items = doc.select("article.ftv-home-poster-card, article.ftv-tax-card")
+            .mapNotNull { it.toCardResult() }
+            .distinctBy { it.url }
+
+        val hasNext = doc.selectFirst("a.next.page-numbers") != null
+        Log.d(tag, "mainPage ${request.name} p$page: ${items.size} items, hasNext=$hasNext")
+
+        return newHomePageResponse(request.name, items, hasNext)
+    }
+
+    // ------------------------------------------------------------------ Search
 
     override suspend fun search(query: String): List<SearchResponse> {
-        if (query.trim().equals("FIVETVDIAG", ignoreCase = true)) {
-            val entries = synchronized(diagEntries) { diagEntries.toList() }
-
-            if (entries.isEmpty()) {
-                return listOf(
-                    newMovieSearchResponse(
-                        "DIAG: لا توجد بيانات بعد؛ جرّب قائمة أو حلقة أولًا",
-                        "$mainUrl/diag-empty",
-                        TvType.Movie
-                    )
-                )
-            }
-
-            return entries.takeLast(40).mapIndexed { index, entry ->
-                newMovieSearchResponse(entry, "$mainUrl/diag/$index", TvType.Movie)
-            }
-        }
-
-        val encoded = URLEncoder.encode(query, "UTF-8")
-        val urls = listOf(
-            "$mainUrl/search/?q=$encoded",
-            "$mainUrl/search/?s=$encoded",
-            "$mainUrl/?s=$encoded"
-        )
-
-        for ((index, url) in urls.withIndex()) {
-            try {
-                trace("SEARCH-${index + 1}", "GET host=${hostOf(url)}")
-                val response = app.get(url)
-                val results = parseCards(response.document)
-
-                trace(
-                    "SEARCH-${index + 1}-RESULT",
-                    "HTTP=${response.code}; HTML=${response.text.length}; results=${results.size}"
-                )
-
-                if (results.isNotEmpty()) return results
-            } catch (e: Exception) {
-                trace("SEARCH-ERROR", "${e.javaClass.simpleName}: ${e.message}")
-            }
-        }
-
-        return emptyList()
+        val url = "$mainUrl/search/?q=${URLEncoder.encode(query, "UTF-8")}"
+        val doc = app.get(url).document
+        return doc.select(".ftv-search-grid .ftv-home-poster-card")
+            .mapNotNull { it.toSearchResult() }
+            .distinctBy { it.url }
     }
+
+    // ------------------------------------------------------------------ Load
 
     override suspend fun load(url: String): LoadResponse? {
-        return try {
-            trace("LOAD-1", "GET host=${hostOf(url)}")
-            val response = app.get(url)
-            val document = response.document
+        val doc = app.get(url).document
 
-            val title = document.selectFirst(".ftv-content-hero__title, h1")
-                ?.text()?.trim()?.takeIf { it.isNotBlank() }
-                ?: document.selectFirst("meta[property=og:title]")
-                    ?.attr("content")?.substringBefore("|")?.trim()
-                ?: document.title().substringBefore("|").trim()
+        val title = doc.selectFirst(".ftv-content-hero__title")?.text()?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: doc.selectFirst("main h1, h1")?.text()?.trim()?.takeIf { it.isNotBlank() }
+            ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
+            ?: return null
 
-            val poster = document.selectFirst(".ftv-content-hero__poster img")?.let {
-                it.attr("src")
-                    .ifBlank { it.attr("data-src") }
-                    .takeIf { value -> value.isNotBlank() }
-                    ?.let { value -> absoluteUrl(value) }
-            } ?: document.selectFirst("meta[property=og:image]")
-                ?.attr("content")?.takeIf { it.isNotBlank() }?.let { absoluteUrl(it) }
+        // البوستر من الصورة داخل الصفحة؛ og:image فقط كاحتياط (حجمها يختلف)
+        val poster = doc.selectFirst(".ftv-content-hero__poster")?.imageUrl()
+            ?: fixUrlNull(doc.selectFirst("meta[property=og:image]")?.attr("content"))
 
-            val description = document.selectFirst(".ftv-content-hero__description")
-                ?.text()?.trim()?.takeIf { it.isNotBlank() }
-                ?: document.selectFirst("meta[name=description]")?.attr("content")?.trim()
+        val plot = doc.selectFirst(".ftv-content-hero__description")?.text()?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: doc.selectFirst("meta[name=description], meta[property=og:description]")
+                ?.attr("content")?.trim()
 
-            val year = document.selectFirst(".ftv-content-hero__year a")
-                ?.text()?.filter { it.isDigit() }?.toIntOrNull()
+        val year = doc.selectFirst(".ftv-content-hero__year a")?.text()?.trim()?.toIntOrNull()
 
-            val tags = document.select(
-                ".ftv-content-chip--category, " +
-                    ".ftv-content-chip--genre, " +
-                    ".ftv-content-chip--quality"
-            ).map { it.text().trim() }.filter { it.isNotBlank() }.distinct()
+        if (!url.contains("/series/")) {
+            return newMovieLoadResponse(title, url, TvType.Movie, url) {
+                this.posterUrl = poster
+                this.year = year
+                this.plot = plot
+            }
+        }
 
-            trace("LOAD-2", "title=$title; year=$year")
+        val episodes = doc.select("a.ftv-series-episode-card")
+            .mapNotNull { card ->
+                val epUrl = fixUrlNull(card.attr("href"))?.substringBefore("#")
+                    ?: return@mapNotNull null
+                val epTitle = card.selectFirst("strong")?.text()?.trim().orEmpty()
+                val cardText = card.text().trim()
+                val (season, episode) = parseSeasonEpisode(epUrl, cardText)
 
-            when {
-                url.contains("/episode/") -> {
-                    newTvSeriesLoadResponse(
-                        title,
-                        url,
-                        TvType.TvSeries,
-                        listOf(newEpisode(url) { name = title })
-                    ) {
-                        posterUrl = poster
-                        plot = description
-                        this.year = year
-                        this.tags = tags
+                newEpisode(epUrl) {
+                    this.name = epTitle.ifBlank {
+                        if (episode != null) "الحلقة $episode" else null
                     }
-                }
-
-                url.contains("/movie/") -> {
-                    newMovieLoadResponse(title, url, TvType.Movie, url) {
-                        posterUrl = poster
-                        plot = description
-                        this.year = year
-                        this.tags = tags
-                    }
-                }
-
-                url.contains("/series/") -> {
-                    val elements = document.select("a.ftv-series-episode-card[href]")
-                    trace("LOAD-EP", "episode-elements=${elements.size}")
-
-                    val episodes = elements.mapNotNull { element ->
-                        val episodeUrl = absoluteUrl(element.attr("href"))
-                        if (episodeUrl.isBlank()) return@mapNotNull null
-
-                        val text = element.text().trim()
-
-                        val episodeNumber = Regex("""الحلقة\s*(\d+)""")
-                            .find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()
-                            ?: Regex("""-(\d+)/?$""")
-                                .find(element.attr("href"))
-                                ?.groupValues?.getOrNull(1)?.toIntOrNull()
-
-                        val seasonNumber = Regex("""الموسم\s*(\d+)""")
-                            .find(text)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
-
-                        val episodeName = element.selectFirst("strong")
-                            ?.text()?.trim()?.takeIf { it.isNotBlank() } ?: text
-
-                        newEpisode(episodeUrl) {
-                            name = episodeName
-                            season = seasonNumber
-                            episode = episodeNumber
-                        }
-                    }.distinctBy { it.data }
-
-                    trace("LOAD-EP", "parsed-episodes=${episodes.size}")
-
-                    newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                        posterUrl = poster
-                        plot = description
-                        this.year = year
-                        this.tags = tags
-                    }
-                }
-
-                else -> {
-                    trace("LOAD-ERROR", "unsupported path")
-                    null
+                    this.season = season
+                    this.episode = episode
+                    this.posterUrl = card.imageUrl() ?: poster
                 }
             }
-        } catch (e: Exception) {
-            trace("LOAD-ERROR", "${e.javaClass.simpleName}: ${e.message}")
-            null
+            .distinctBy { it.data }
+            .sortedWith(compareBy<Episode>({ it.season ?: 1 }, { it.episode ?: 0 }))
+
+        Log.d(tag, "load series '$title': ${episodes.size} episodes")
+
+        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+            this.posterUrl = poster
+            this.year = year
+            this.plot = plot
         }
     }
 
-    private suspend fun extract71Stream(embedUrl: String): String? {
-        return try {
-            val started = System.currentTimeMillis()
-            trace("L-71-1", "GET host=${hostOf(embedUrl)}")
+    // مثبت: game-of-thrones-3x3  و  معكرونة-pasta-1
+    private fun parseSeasonEpisode(epUrl: String, text: String): Pair<Int?, Int?> {
+        val slug = epUrl.substringBefore("?").trimEnd('/').substringAfterLast('/')
 
-            val response = app.get(embedUrl)
-            val appElement = response.document.selectFirst("#app[data-page]")
-            val pageData = appElement?.attr("data-page")
-
-            trace(
-                "L-71-2",
-                "HTTP=${response.code}; HTML=${response.text.length}; " +
-                    "data-page=${!pageData.isNullOrBlank()}; " +
-                    "ms=${System.currentTimeMillis() - started}"
-            )
-
-            if (pageData.isNullOrBlank()) return null
-
-            val props = JSONObject(pageData).optJSONObject("props")
-            val videoUrl = props?.optString("url").orEmpty()
-
-            if (
-                videoUrl.isBlank() ||
-                videoUrl == "null" ||
-                !videoUrl.startsWith("http")
-            ) {
-                trace("L-71-ERROR", "props.url missing or invalid")
-                return null
-            }
-
-            trace(
-                "L-71-3",
-                "video host=${hostOf(videoUrl)}; m3u8=${videoUrl.contains(".m3u8", true)}"
-            )
-
-            videoUrl
-        } catch (e: Exception) {
-            trace("L-71-ERROR", "${e.javaClass.simpleName}: ${e.message}")
-            null
+        Regex("""(\d+)x(\d+)$""").find(slug)?.let {
+            return it.groupValues[1].toIntOrNull() to it.groupValues[2].toIntOrNull()
         }
+
+        val season = Regex("""(?:الموسم|season)\s*(\d+)""", RegexOption.IGNORE_CASE)
+            .find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val episode = Regex("""(?:الحلقة|episode)[^\d]*(\d+)""", RegexOption.IGNORE_CASE)
+            .find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?: Regex("""-(\d+)$""").find(slug)?.groupValues?.getOrNull(1)?.toIntOrNull()
+
+        return season to episode
     }
+
+    // ------------------------------------------------------------------ Links
 
     override suspend fun loadLinks(
         data: String,
@@ -420,132 +213,142 @@ class FiveTVProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        var foundLink = false
-        val candidates = linkedSetOf<String>()
-        val started = System.currentTimeMillis()
+        val doc = app.get(data).document
 
-        try {
-            trace("L1", "episode host=${hostOf(data)}")
-            val response = app.get(data)
-            val document = response.document
-
-            trace(
-                "L2",
-                "HTTP=${response.code}; HTML=${response.text.length}; " +
-                    "ms=${System.currentTimeMillis() - started}"
-            )
-
-            val serverElements = document.select("[data-server-url]")
-            trace("L3", "data-server-url elements=${serverElements.size}")
-
-            for ((index, element) in serverElements.withIndex()) {
-                val raw = element.attr("data-server-url").trim()
-                val candidate = absoluteUrl(raw)
-
-                trace(
-                    "L3-SERVER",
-                    "index=$index; label=${element.text().trim().take(60)}; " +
-                        "host=${hostOf(candidate)}; valid=${candidate.startsWith("http")}"
-                )
-
-                if (candidate.isNotBlank()) candidates.add(candidate)
+        // مثبت: .ftv-media-servers [data-server-id] مع data-server-url
+        val serverLinks = doc.select(".ftv-media-servers [data-server-id]")
+            .mapNotNull { el ->
+                el.attr("data-server-url").trim().takeIf { it.startsWith("http") }
+                    ?.let { it to el.text().trim() }
             }
+            .distinctBy { it.first }
+            .toMutableList()
 
-            val iframeElements = document.select(
-                "iframe[src], iframe[data-src], " +
-                    "video[src], video source[src], source[src]"
-            )
+        Log.d(tag, "loadLinks: ${serverLinks.size} servers in $data")
 
-            trace("L3-FALLBACK", "iframe/video/source elements=${iframeElements.size}")
-
-            for (element in iframeElements) {
-                val raw = element.attr("src")
-                    .ifBlank { element.attr("data-src") }
-                    .trim()
-                val candidate = absoluteUrl(raw)
-                if (candidate.isNotBlank()) candidates.add(candidate)
-            }
-
-            document.select(
-                "a[href*='.m3u8'], a[href*='.mp4'], " +
-                    "a[href*='embed'], a[href*='player']"
-            ).forEach {
-                val candidate = absoluteUrl(it.attr("href"))
-                if (candidate.isNotBlank()) candidates.add(candidate)
-            }
-
-            candidates.remove(data)
-            candidates.remove("")
-            trace("L4", "unique candidates=${candidates.size}")
-
-            for ((index, candidate) in candidates.withIndex()) {
-                val candidateStarted = System.currentTimeMillis()
-                val host = hostOf(candidate)
-
-                trace("L5", "try index=$index; host=$host")
-
-                try {
-                    if (
-                        candidate.contains("71stream.one", ignoreCase = true) &&
-                        candidate.contains("/embed/", ignoreCase = true)
-                    ) {
-                        val directUrl = extract71Stream(candidate)
-
-                        if (!directUrl.isNullOrBlank()) {
-                            callback(
-                                ExtractorLink(
-                                    "FiveTV",
-                                    "71Stream",
-                                    directUrl,
-                                    candidate,
-                                    Qualities.Unknown.value,
-                                    directUrl.contains(".m3u8", ignoreCase = true),
-                                    mapOf("Referer" to candidate)
-                                )
-                            )
-
-                            foundLink = true
-                            trace("L6", "71Stream callback invoked")
-                            continue
-                        }
-
-                        trace("L6", "71Stream direct extraction failed; trying extractor")
-                    }
-
-                    val extractorFound = loadExtractor(
-                        candidate,
-                        data,
-                        subtitleCallback
-                    ) { link ->
-                        foundLink = true
-                        trace("L6-CALLBACK", "name=${link.name}; host=${hostOf(link.url)}")
-                        callback(link)
-                    }
-
-                    trace(
-                        "L7",
-                        "host=$host; extractorResult=$extractorFound; " +
-                            "elapsedMs=${System.currentTimeMillis() - candidateStarted}"
-                    )
-                } catch (e: Exception) {
-                    trace(
-                        "L-ERROR",
-                        "host=$host; ${e.javaClass.simpleName}: ${e.message}; " +
-                            "elapsedMs=${System.currentTimeMillis() - candidateStarted}"
-                    )
+        // احتياط فقط إذا القائمة فارغة: iframe + روابط 71Stream داخل الـ HTML (السلوك القديم)
+        if (serverLinks.isEmpty()) {
+            val fallback = LinkedHashSet<String>()
+            doc.select("iframe[src], iframe[data-src]").forEach { iframe ->
+                val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }.trim()
+                when {
+                    src.startsWith("http") -> fallback.add(src)
+                    src.startsWith("//") -> fallback.add("https:$src")
+                    src.startsWith("/") -> fallback.add("$mainUrl$src")
                 }
             }
-
-            trace(
-                "L-END",
-                "foundLink=$foundLink; candidates=${candidates.size}; " +
-                    "totalMs=${System.currentTimeMillis() - started}"
-            )
-
-            return foundLink
-        } catch (e: Exception) {
-            trace("L-FATAL", "${e.javaClass.simpleName}: ${e.message}; foundLink=$foundLink")
-            return foundLink
+            Regex("""https?://71stream\.one/embed/[A-Za-z0-9_-]+""")
+                .findAll(doc.html().replace("\\/", "/"))
+                .forEach { fallback.add(it.value) }
+            fallback.forEach { serverLinks.add(it to "fallback") }
+            Log.d(tag, "loadLinks fallback: ${fallback.size} links")
         }
+
+        var loaded = false
+
+        for ((link, label) in serverLinks) {
+            val ok = try {
+                if (link.contains("71stream.one", ignoreCase = true)) {
+                    load71Stream(link, callback)
+                } else {
+                    loadExtractor(link, data, subtitleCallback, callback)
+                }
+            } catch (e: Exception) {
+                Log.d(tag, "error for $link: ${e.message}")
+                false
+            }
+            Log.d(tag, "server '$label' $link -> $ok")
+            if (ok) loaded = true
+        }
+
+        return loaded
+    }
+
+    // منطق 71Stream القديم (يخدم): data-page ثم m3u8/mp4 ثم /download/{id}?quality=Original
+    private suspend fun load71Stream(link: String, callback: (ExtractorLink) -> Unit): Boolean {
+        var loaded = false
+
+        val appData = try {
+            app.get(link).document
+                .selectFirst("#app")
+                ?.attr("data-page")
+                ?.replace("\\/", "/")
+        } catch (e: Exception) {
+            Log.d(tag, "71Stream embed error: ${e.message}")
+            null
+        }
+
+        if (appData != null) {
+            val m3u8 = Regex("""https://cdnvid\.dramalvr\.com/hls/[^"]+\.m3u8""")
+                .find(appData)?.value
+
+            if (m3u8 != null) {
+                callback(
+                    newExtractorLink(
+                        source = "71Stream",
+                        name = "71Stream HLS",
+                        url = m3u8,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        referer = link
+                        quality = Qualities.Unknown.value
+                    }
+                )
+                loaded = true
+            }
+
+            val mp4 = Regex("""https://[^"'\\\s<>]+\.mp4(?:\?[^"'\\\s<>]*)?""")
+                .find(appData)?.value
+
+            if (mp4 != null) {
+                callback(
+                    newExtractorLink(
+                        source = "71Stream",
+                        name = "71Stream MP4",
+                        url = mp4,
+                        type = ExtractorLinkType.VIDEO
+                    ) {
+                        referer = link
+                        quality = Qualities.Unknown.value
+                    }
+                )
+                loaded = true
+            }
+        }
+
+        val hashId = Regex("""71stream\.one/embed/([A-Za-z0-9_-]+)""")
+            .find(link)?.groupValues?.getOrNull(1)
+
+        if (hashId != null) {
+            val downloadUrl = "https://71stream.one/download/$hashId?quality=Original"
+            try {
+                val finalUrl = app.get(downloadUrl, allowRedirects = true).url
+                if (
+                    finalUrl.startsWith("http") &&
+                    finalUrl != downloadUrl &&
+                    (
+                        finalUrl.contains(".mp4", true) ||
+                        finalUrl.contains("cloudflarestorage.com", true)
+                    )
+                ) {
+                    callback(
+                        newExtractorLink(
+                            source = "71Stream",
+                            name = "71Stream MP4",
+                            url = finalUrl,
+                            type = ExtractorLinkType.VIDEO
+                        ) {
+                            referer = link
+                            quality = Qualities.Unknown.value
+                        }
+                    )
+                    loaded = true
+                }
+            } catch (e: Exception) {
+                Log.d(tag, "71Stream download error: ${e.message}")
+            }
+        }
+
+        return loaded
     }
 }
