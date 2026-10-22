@@ -8,7 +8,7 @@ class FiveTVProvider : MainAPI() {
 
     override var mainUrl = "https://new61.5tv.lol"
     override var name = "FiveTV"
-    override val lang = "ar"
+    override var lang = "ar"
     override val hasMainPage = true
 
     override val supportedTypes = setOf(
@@ -16,7 +16,6 @@ class FiveTVProvider : MainAPI() {
         TvType.TvSeries
     )
 
-    // MainAPI.mainPage requires List<MainPageData>, not MainPageRequest.
     override val mainPage: List<MainPageData> = listOf(
         MainPageData(
             name = "آخر الحلقات",
@@ -326,7 +325,6 @@ class FiveTVProvider : MainAPI() {
 
                     trace("LOAD-3", "Episodes=${episodes.size}")
 
-                    // TvType.TvSeries is required by the project's API signature.
                     newTvSeriesLoadResponse(
                         title,
                         url,
