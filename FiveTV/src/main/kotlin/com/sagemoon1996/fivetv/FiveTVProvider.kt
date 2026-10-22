@@ -1,9 +1,7 @@
-
 package com.sagemoon1996.fivetv
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import org.jsoup.nodes.Element
 import java.net.URLEncoder
 
 class FiveTVProvider : MainAPI() {
@@ -21,53 +19,35 @@ class FiveTVProvider : MainAPI() {
     override val mainPage = listOf(
         MainPageRequest(
             "آخر الحلقات",
-            "$mainUrl/latest-episodes/"
+            "$mainUrl/latest-episodes/",
+            horizontalImages = false
         ),
         MainPageRequest(
             "أحدث الإضافات",
-            "$mainUrl/new-rows/"
+            "$mainUrl/new-rows/",
+            horizontalImages = false
         ),
         MainPageRequest(
             "آخر المسلسلات",
-            "$mainUrl/latest-series/"
+            "$mainUrl/latest-series/",
+            horizontalImages = false
         ),
         MainPageRequest(
             "آخر الأفلام",
-            "$mainUrl/latest-movies/"
+            "$mainUrl/latest-movies/",
+            horizontalImages = false
         )
     )
 
-    private val traceLog = StringBuilder()
-
     private fun trace(stage: String, message: String) {
-        val line = "[FiveTV][$stage] $message"
-        println(line)
-
-        synchronized(traceLog) {
-            traceLog.append(line).append('\n')
-        }
-    }
-
-    private fun clearTrace() {
-        synchronized(traceLog) {
-            traceLog.clear()
-        }
-    }
-
-    private fun getTrace(): String {
-        return synchronized(traceLog) {
-            traceLog.toString()
-        }
+        println("[FiveTV][$stage] $message")
     }
 
     private fun absoluteUrl(url: String): String {
         val value = url.trim()
 
         if (value.isBlank()) return ""
-
-        if (value.startsWith("//")) {
-            return "https:$value"
-        }
+        if (value.startsWith("//")) return "https:$value"
 
         if (
             value.startsWith("http://") ||
@@ -79,75 +59,52 @@ class FiveTVProvider : MainAPI() {
         return "$mainUrl/${value.trimStart('/')}"
     }
 
-    private fun Element.cardContainer(): Element {
-        return parents().firstOrNull {
-            it.hasClass("ftv-home-poster-card")
-        } ?: parent() ?: this
-    }
-
-    private fun Element.firstImageUrl(): String? {
-        val image = selectFirst("img") ?: return null
-
-        val value = image.attr("src")
-            .ifBlank { image.attr("data-src") }
-            .ifBlank { image.attr("data-lazy-src") }
-
-        return value
-            .takeIf { it.isNotBlank() }
-            ?.let { absoluteUrl(it) }
-    }
-
     private fun parseCards(
         document: org.jsoup.nodes.Document
     ): List<SearchResponse> {
         val results = mutableListOf<SearchResponse>()
         val seen = mutableSetOf<String>()
 
-        val titleLinks = document.select(
-            ".ftv-home-poster-card__title[href]"
-        )
+        for (link in document.select(".ftv-home-poster-card__title[href]")) {
+            val title = link.text().trim()
+            val url = absoluteUrl(link.attr("href"))
 
-        for (titleLink in titleLinks) {
-            val title = titleLink.text().trim()
-            val url = absoluteUrl(titleLink.attr("href"))
+            if (title.isBlank() || url.isBlank() || !seen.add(url)) {
+                continue
+            }
 
-            if (title.isBlank() || url.isBlank()) continue
-            if (!seen.add(url)) continue
+            val card = link.parents().firstOrNull {
+                it.hasClass("ftv-home-poster-card")
+            } ?: link.parent()
 
-            val card = titleLink.cardContainer()
+            val image = card?.selectFirst("img")
+            val posterRaw = image?.attr("src")
+                ?.ifBlank { image.attr("data-src") }
+                ?.ifBlank { image.attr("data-lazy-src") }
 
-            val poster = card.firstImageUrl()
-                ?: card.selectFirst(
-                    ".ftv-home-poster-card__image img"
-                )?.let { image ->
-                    image.attr("src")
-                        .ifBlank { image.attr("data-src") }
-                        .ifBlank { image.attr("data-lazy-src") }
-                        .takeIf { it.isNotBlank() }
-                        ?.let { absoluteUrl(it) }
-                }
+            val poster = posterRaw
+                ?.takeIf { it.isNotBlank() }
+                ?.let { absoluteUrl(it) }
 
             val year = card
-                .selectFirst(".ftv-poster-badge--year")
+                ?.selectFirst(".ftv-poster-badge--year")
                 ?.text()
                 ?.filter { it.isDigit() }
                 ?.toIntOrNull()
 
-            val isMovie =
-                card.hasClass("ftv-home-poster-card--movie") ||
+            val isMovie = card?.hasClass("ftv-home-poster-card--movie") == true ||
                 url.contains("/movie/")
 
-            val isSeries =
-                card.hasClass("ftv-home-poster-card--series") ||
+            val isSeries = card?.hasClass("ftv-home-poster-card--series") == true ||
                 url.contains("/series/")
 
-            val item: SearchResponse? = when {
+            val item = when {
                 isMovie -> newMovieSearchResponse(
                     title,
                     url,
                     TvType.Movie
                 ) {
-                    this.posterUrl = poster
+                    posterUrl = poster
                     this.year = year
                 }
 
@@ -156,16 +113,14 @@ class FiveTVProvider : MainAPI() {
                     url,
                     TvType.TvSeries
                 ) {
-                    this.posterUrl = poster
+                    posterUrl = poster
                     this.year = year
                 }
 
                 else -> null
             }
 
-            if (item != null) {
-                results.add(item)
-            }
+            if (item != null) results.add(item)
         }
 
         return results
@@ -175,10 +130,7 @@ class FiveTVProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        clearTrace()
-
         val base = request.data.trimEnd('/')
-
         val url = if (page <= 1) {
             "$base/"
         } else {
@@ -189,16 +141,12 @@ class FiveTVProvider : MainAPI() {
             trace("HOME-1", "GET $url")
 
             val response = app.get(url)
-            val document = response.document
+            val results = parseCards(response.document)
 
             trace(
                 "HOME-2",
-                "HTTP=${response.code}, HTML=${response.text.length}"
+                "HTTP=${response.code}, HTML=${response.text.length}, cards=${results.size}"
             )
-
-            val results = parseCards(document)
-
-            trace("HOME-3", "Cards=${results.size}")
 
             newHomePageResponse(
                 request.name,
@@ -206,10 +154,7 @@ class FiveTVProvider : MainAPI() {
                 hasNext = results.isNotEmpty()
             )
         } catch (e: Exception) {
-            trace(
-                "HOME-ERR",
-                "${e.javaClass.simpleName}: ${e.message}"
-            )
+            trace("HOME-ERR", "${e.javaClass.simpleName}: ${e.message}")
 
             newHomePageResponse(
                 request.name,
@@ -219,94 +164,66 @@ class FiveTVProvider : MainAPI() {
         }
     }
 
-    override suspend fun search(
-        query: String
-    ): List<SearchResponse> {
-        clearTrace()
-
+    override suspend fun search(query: String): List<SearchResponse> {
         val encoded = URLEncoder.encode(query, "UTF-8")
 
-        val searchUrls = listOf(
+        val urls = listOf(
             "$mainUrl/search/?q=$encoded",
             "$mainUrl/search/?s=$encoded",
             "$mainUrl/?s=$encoded"
         )
 
-        for ((index, url) in searchUrls.withIndex()) {
+        for ((index, url) in urls.withIndex()) {
             try {
                 trace("SEARCH-${index + 1}", "GET $url")
 
                 val response = app.get(url)
-                val document = response.document
+                val results = parseCards(response.document)
 
                 trace(
-                    "SEARCH-${index + 1}-HTTP",
-                    "HTTP=${response.code}, HTML=${response.text.length}"
+                    "SEARCH-${index + 1}",
+                    "HTTP=${response.code}, HTML=${response.text.length}, results=${results.size}"
                 )
 
-                val results = parseCards(document)
-
-                trace(
-                    "SEARCH-${index + 1}-RESULT",
-                    "Cards=${results.size}"
-                )
-
-                if (results.isNotEmpty()) {
-                    return results
-                }
+                if (results.isNotEmpty()) return results
             } catch (e: Exception) {
                 trace(
-                    "SEARCH-${index + 1}-ERR",
+                    "SEARCH-ERR",
                     "${e.javaClass.simpleName}: ${e.message}"
                 )
             }
         }
 
-        trace("SEARCH-END", "No results for query=$query")
         return emptyList()
     }
 
-    override suspend fun load(
-        url: String
-    ): LoadResponse? {
-        clearTrace()
-
+    override suspend fun load(url: String): LoadResponse? {
         return try {
             trace("LOAD-1", "GET $url")
 
             val response = app.get(url)
             val document = response.document
 
-            trace(
-                "LOAD-2",
-                "HTTP=${response.code}, HTML=${response.text.length}"
-            )
-
             val title = document
                 .selectFirst(".ftv-content-hero__title")
                 ?.text()
                 ?.trim()
                 ?.takeIf { it.isNotBlank() }
-                ?: document
-                    .selectFirst("meta[property=og:title]")
+                ?: document.selectFirst("meta[property=og:title]")
                     ?.attr("content")
+                    ?.substringBefore("|")
                     ?.trim()
-                    ?.takeIf { it.isNotBlank() }
-                ?: document.title()
-                    .substringBefore("|")
-                    .trim()
+                ?: document.title().substringBefore("|").trim()
 
             val poster = document
                 .selectFirst(".ftv-content-hero__poster img")
-                ?.let { image ->
-                    image.attr("src")
-                        .ifBlank { image.attr("data-src") }
-                        .ifBlank { image.attr("data-lazy-src") }
-                        .takeIf { it.isNotBlank() }
-                        ?.let { absoluteUrl(it) }
+                ?.let {
+                    it.attr("src")
+                        .ifBlank { it.attr("data-src") }
+                        .takeIf { value -> value.isNotBlank() }
+                        ?.let { value -> absoluteUrl(value) }
                 }
-                ?: document
-                    .selectFirst("meta[property=og:image]")
+                ?: document.selectFirst("meta[property=og:image]")
                     ?.attr("content")
                     ?.takeIf { it.isNotBlank() }
                     ?.let { absoluteUrl(it) }
@@ -316,11 +233,9 @@ class FiveTVProvider : MainAPI() {
                 ?.text()
                 ?.trim()
                 ?.takeIf { it.isNotBlank() }
-                ?: document
-                    .selectFirst("meta[name=description]")
+                ?: document.selectFirst("meta[name=description]")
                     ?.attr("content")
                     ?.trim()
-                    ?.takeIf { it.isNotBlank() }
 
             val year = document
                 .selectFirst(".ftv-content-hero__year a")
@@ -339,8 +254,8 @@ class FiveTVProvider : MainAPI() {
             }.distinct()
 
             trace(
-                "LOAD-3",
-                "Title=$title, Poster=${poster != null}, Year=$year"
+                "LOAD-2",
+                "HTTP=${response.code}, title=$title, year=$year"
             )
 
             when {
@@ -351,8 +266,8 @@ class FiveTVProvider : MainAPI() {
                         TvType.Movie,
                         url
                     ) {
-                        this.posterUrl = poster
-                        this.plot = description
+                        posterUrl = poster
+                        plot = description
                         this.year = year
                         this.tags = tags
                     }
@@ -363,25 +278,15 @@ class FiveTVProvider : MainAPI() {
                         "a.ftv-series-episode-card[href]"
                     )
 
-                    trace(
-                        "LOAD-4",
-                        "Episode cards=${episodeElements.size}"
-                    )
-
                     val episodes = episodeElements.mapNotNull { element ->
-                        val episodeUrl = absoluteUrl(
-                            element.attr("href")
-                        )
+                        val episodeUrl = absoluteUrl(element.attr("href"))
+                        if (episodeUrl.isBlank()) return@mapNotNull null
 
-                        if (episodeUrl.isBlank()) {
-                            return@mapNotNull null
-                        }
-
-                        val fullText = element.text().trim()
+                        val text = element.text().trim()
 
                         val episodeNumber = Regex(
                             """الحلقة\s*(\d+)"""
-                        ).find(fullText)
+                        ).find(text)
                             ?.groupValues
                             ?.getOrNull(1)
                             ?.toIntOrNull()
@@ -393,7 +298,7 @@ class FiveTVProvider : MainAPI() {
 
                         val seasonNumber = Regex(
                             """الموسم\s*(\d+)"""
-                        ).find(fullText)
+                        ).find(text)
                             ?.groupValues
                             ?.getOrNull(1)
                             ?.toIntOrNull()
@@ -404,49 +309,37 @@ class FiveTVProvider : MainAPI() {
                             ?.text()
                             ?.trim()
                             ?.takeIf { it.isNotBlank() }
-                            ?: fullText
+                            ?: text
 
                         newEpisode(episodeUrl) {
-                            this.name = episodeName
-                            this.season = seasonNumber
-                            this.episode = episodeNumber
+                            name = episodeName
+                            season = seasonNumber
+                            episode = episodeNumber
                         }
-                    }.distinctBy {
-                        it.data
-                    }
+                    }.distinctBy { it.data }
 
-                    trace(
-                        "LOAD-5",
-                        "Parsed episodes=${episodes.size}"
-                    )
+                    trace("LOAD-3", "Episodes=${episodes.size}")
 
-                    // الإصلاح: تمرير TvType.TvSeries قبل episodes.
                     newTvSeriesLoadResponse(
                         title,
                         url,
                         TvType.TvSeries,
                         episodes
                     ) {
-                        this.posterUrl = poster
-                        this.plot = description
+                        posterUrl = poster
+                        plot = description
                         this.year = year
                         this.tags = tags
                     }
                 }
 
                 else -> {
-                    trace(
-                        "LOAD-ERR",
-                        "Unsupported URL type: $url"
-                    )
+                    trace("LOAD-ERR", "Unsupported URL: $url")
                     null
                 }
             }
         } catch (e: Exception) {
-            trace(
-                "LOAD-ERR",
-                "${e.javaClass.simpleName}: ${e.message}"
-            )
+            trace("LOAD-ERR", "${e.javaClass.simpleName}: ${e.message}")
             null
         }
     }
@@ -457,8 +350,6 @@ class FiveTVProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        clearTrace()
-
         var foundLink = false
         val candidates = linkedSetOf<String>()
 
@@ -475,76 +366,48 @@ class FiveTVProvider : MainAPI() {
 
             document.select(
                 "video[src], video source[src], source[src]"
-            ).forEach { element ->
-                val raw = element.attr("src")
+            ).forEach {
+                val value = it.attr("src")
+                if (value.isNotBlank()) candidates.add(absoluteUrl(value))
+            }
 
-                if (raw.isNotBlank()) {
-                    candidates.add(absoluteUrl(raw))
-                }
+            document.select("iframe[src], iframe[data-src]").forEach {
+                val value = it.attr("src").ifBlank { it.attr("data-src") }
+                if (value.isNotBlank()) candidates.add(absoluteUrl(value))
             }
 
             document.select(
-                "iframe[src], iframe[data-src]"
-            ).forEach { element ->
-                val raw = element.attr("src")
-                    .ifBlank { element.attr("data-src") }
-
-                if (raw.isNotBlank()) {
-                    candidates.add(absoluteUrl(raw))
-                }
-            }
-
-            document.select(
-                "a[href*='.m3u8'], " +
-                    "a[href*='.mp4'], " +
-                    "a[href*='embed'], " +
-                    "a[href*='player']"
-            ).forEach { element ->
-                val raw = element.attr("href")
-
-                if (raw.isNotBlank()) {
-                    candidates.add(absoluteUrl(raw))
-                }
+                "a[href*='.m3u8'], a[href*='.mp4'], " +
+                    "a[href*='embed'], a[href*='player']"
+            ).forEach {
+                val value = it.attr("href")
+                if (value.isNotBlank()) candidates.add(absoluteUrl(value))
             }
 
             candidates.remove(data)
             candidates.remove("")
 
-            trace(
-                "LINK-3",
-                "Candidates=${candidates.size}: " +
-                    candidates.joinToString()
-            )
+            trace("LINK-3", "Candidates=${candidates.size}")
 
             for (candidate in candidates) {
                 try {
-                    trace(
-                        "LINK-4",
-                        "Try extractor: $candidate"
-                    )
+                    trace("LINK-4", "Trying $candidate")
 
                     val extractorFound = loadExtractor(
                         candidate,
                         data,
                         subtitleCallback
-                    ) { extractorLink ->
+                    ) { link ->
                         foundLink = true
-                        callback(extractorLink)
-
-                        trace(
-                            "LINK-5",
-                            "Extractor callback: ${extractorLink.url}"
-                        )
+                        callback(link)
+                        trace("LINK-5", "Found link: ${link.url}")
                     }
 
-                    trace(
-                        "LINK-6",
-                        "Extractor returned $extractorFound"
-                    )
+                    trace("LINK-6", "Extractor result=$extractorFound")
                 } catch (e: Exception) {
                     trace(
                         "LINK-ERR",
-                        "${e.javaClass.simpleName}: ${e.message}; URL=$candidate"
+                        "${e.javaClass.simpleName}: ${e.message}"
                     )
                 }
             }
@@ -552,10 +415,7 @@ class FiveTVProvider : MainAPI() {
             trace("LINK-END", "foundLink=$foundLink")
             return foundLink
         } catch (e: Exception) {
-            trace(
-                "LINK-FATAL",
-                "${e.javaClass.simpleName}: ${e.message}"
-            )
+            trace("LINK-FATAL", "${e.javaClass.simpleName}: ${e.message}")
             return foundLink
         }
     }
