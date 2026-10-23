@@ -1,6 +1,7 @@
 {
-  "name": "sagemoon1996 CloudStream Repository",
+  "name": "SM-ARB",
   "description": "CloudStream plugins by sagemoon1996",
+  "iconUrl": "https://raw.githubusercontent.com/sagemoon1996/cloudstream-repo/main/icon.png",
   "manifestVersion": 1,
   "pluginLists": [
     "https://raw.githubusercontent.com/sagemoon1996/cloudstream-repo/builds/plugins.json"
