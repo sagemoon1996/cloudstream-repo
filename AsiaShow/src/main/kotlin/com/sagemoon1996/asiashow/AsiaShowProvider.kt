@@ -3,6 +3,10 @@ package com.sagemoon1996.asiashow
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.Jsoup
@@ -30,6 +34,7 @@ class AsiaShowProvider : MainAPI() {
         "vx:series|$mainUrl/series/" to "المسلسلات",
         "vx:movies|$mainUrl/movies/" to "الأفلام",
         "vx:shows|$mainUrl/genre/shows/" to "البرامج",
+        "$mainUrl/country/kr/" to "الكورية",
         "$mainUrl/country/cn/" to "الصينية",
         "$mainUrl/country/jp/" to "اليابانية",
         "$mainUrl/country/th/" to "التايلاندية"
@@ -270,6 +275,27 @@ class AsiaShowProvider : MainAPI() {
 
     // ───────────────────────── search ─────────────────────────
 
+    private val posterCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    private suspend fun fetchPoster(url: String): String? {
+        posterCache[url]?.let { return it }
+        return try {
+            val document = withTimeoutOrNull(8_000L) {
+                app.get(url, referer = mainUrl).document
+            }
+            val poster = document?.selectFirst("meta[property=og:image]")?.attr("content")?.trim()
+                ?.takeIf { it.startsWith("http") }
+                ?: document?.selectFirst("img[src*='image.tmdb.org/t/p/w500']")?.attr("src")?.trim()
+                    ?.takeIf { it.startsWith("http") }
+            if (poster != null) posterCache[url] = poster
+            poster
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     override suspend fun search(query: String): List<SearchResponse> {
         val q = query.trim()
         if (q.length < 3) return emptyList()
@@ -282,7 +308,7 @@ class AsiaShowProvider : MainAPI() {
             val response = app.get(url, referer = mainUrl)
             val data = JSONObject(response.text).optJSONArray("data") ?: return emptyList()
 
-            buildList {
+            val results = buildList {
                 for (i in 0 until data.length()) {
                     val item = data.optJSONObject(i) ?: continue
                     val title = Jsoup.parse(item.optString("title")).text().trim()
@@ -311,6 +337,15 @@ class AsiaShowProvider : MainAPI() {
                     }
                 }
             }.distinctBy { it.url }
+
+            coroutineScope {
+                results.take(15)
+                    .filter { it.posterUrl.isNullOrBlank() }
+                    .map { result -> async { result.posterUrl = fetchPoster(result.url) } }
+                    .awaitAll()
+            }
+
+            results
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
@@ -323,7 +358,7 @@ class AsiaShowProvider : MainAPI() {
     private class EpisodeCandidate(
         val url: String,
         val slug: String,
-        val card: Element,
+        var card: Element,
         val index: Int
     )
 
@@ -356,15 +391,22 @@ class AsiaShowProvider : MainAPI() {
         }
 
         val seriesSlug = slugOf(url, "series")
-        val seen = HashSet<String>()
-        val candidates = mutableListOf<EpisodeCandidate>()
+        val byUrl = LinkedHashMap<String, EpisodeCandidate>()
 
         document.select("a[href*='/episodes/']").forEachIndexed { index, link ->
             val epUrl = normalizeUrl(hrefOf(link))
-            if (epUrl.isBlank() || !seen.add(epUrl)) return@forEachIndexed
+            if (epUrl.isBlank()) return@forEachIndexed
             val card = link.closest(".ts-preview") ?: link
-            candidates.add(EpisodeCandidate(epUrl, slugOf(epUrl, "episodes"), card, index))
+
+            val existing = byUrl[epUrl]
+            if (existing == null) {
+                byUrl[epUrl] = EpisodeCandidate(epUrl, slugOf(epUrl, "episodes"), card, index)
+            } else if (imageOf(existing.card) == null && imageOf(card) != null) {
+                // نفس الحلقة ظهرت مرتين (مثلًا زر في أعلى الصفحة): نخلّي البطاقة اللي فيها صورة
+                existing.card = card
+            }
         }
+        val candidates = byUrl.values.toList()
 
         val related = candidates.filter { seriesSlug.isNotBlank() && it.slug.startsWith(seriesSlug) }
         val chosen = related.ifEmpty { candidates }
@@ -382,7 +424,7 @@ class AsiaShowProvider : MainAPI() {
                 this.name = cardTitle.ifBlank { "الحلقة $episodeNumber" }
                 this.season = seasonNumber
                 this.episode = episodeNumber
-                this.posterUrl = imageOf(c.card)
+                this.posterUrl = imageOf(c.card) ?: poster
             }
         }.sortedWith(
             compareBy<Episode>({ it.season ?: 1 }, { it.episode ?: Int.MAX_VALUE })
