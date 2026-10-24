@@ -18,16 +18,22 @@ class FiveTVProvider : MainAPI() {
 
     private val tag = "FiveTV"
 
-    // مثبت بالـ HTML: /latest-series/ و /latest-movies/ و /category/... (الترقيم /page/N/).
-    // غير مثبت بعد: /latest-episodes/ و /new-rows/ -> يستعملان parser عام (parseGenericCards)
-    // وسطور Logcat "mainPage ..." تبين كم عنصر تلقط.
+    // تشخيص: يظهر في قائمة المصادر كل سيرفر فشل استخراجه باسم "✗ ..." (الرابط لا يشتغل، للمعاينة فقط).
+    // بدّلها false بعد ما نكمّل السيرفرات.
+    private val debugShowFailed = true
+
+    // صفحات مثبتة بالـ HTML: /latest-series/ و /latest-movies/ (الترقيم /page/N/).
+    // /latest-episodes/ غير مثبت (parser عام).
+    // الأقسام HOMEROW:: تُقرا من الصفحة الرئيسية "/" بالبحث عن عنوان القسم (غير مثبت، طريقة تقريبية)؛
+    // سطر Logcat "homeRow" يبين هل لقى القسم وكم عنصر.
     override val mainPage = mainPageOf(
         "$mainUrl/latest-episodes/" to "آخر الحلقات",
-        "$mainUrl/new-rows/" to "أحدث الإضافات",
         "$mainUrl/latest-series/" to "جديد الدراما",
-        "$mainUrl/latest-movies/" to "آخر الأفلام",
-        // رابط الأنمي غير مثبت: نجرب الرابط العربي ثم /category/anime/ (يتجرب الثاني فقط إذا الأول فارغ)
-        "$mainUrl/category/%d8%a3%d9%86%d9%85%d9%8a/|$mainUrl/category/anime/" to "أنمي"
+        "$mainUrl/latest-movies/" to "جديد الأفلام",
+        "HOMEROW::قريبا" to "تعرض قريبا",
+        "HOMEROW::البرامج" to "جديد البرامج الآسيوية",
+        "HOMEROW::انمي" to "جديد الأنمي",
+        "HOMEROW::الدراما الآسيوية" to "دراما آسيوية"
     )
 
     // ------------------------------------------------------------------ Helpers
@@ -140,10 +146,10 @@ class FiveTVProvider : MainAPI() {
 
     // Parser عام (غير مثبت): لأقسام /latest-episodes/ و /new-rows/ إلى أن يتثبت HTML متاعهم.
     // يجمع كل رابط /episode/ أو /series/ أو /movie/ داخل <main> بدون تكرار.
-    private fun parseGenericCards(doc: Document): List<SearchResponse> {
+    private fun parseGenericCards(root: Element): List<SearchResponse> {
         val result = LinkedHashMap<String, SearchResponse>()
 
-        for (a in doc.select("main a[href*=/episode/], main a[href*=/series/], main a[href*=/movie/]")) {
+        for (a in root.select("a[href*=/episode/], a[href*=/series/], a[href*=/movie/]")) {
             val href = fixUrlNull(a.attr("href"))?.substringBefore("#") ?: continue
             if (result.containsKey(href)) continue
 
@@ -201,7 +207,70 @@ class FiveTVProvider : MainAPI() {
 
     // ------------------------------------------------------------------ Main page
 
+    private fun normAr(t: String): String =
+        t.replace(Regex("[أإآ]"), "ا").replace("ة", "ه").replace("ى", "ي")
+            .replace(Regex("[^\\p{L}\\p{N}]"), "")
+
+    private var homeCache: Pair<Long, Document>? = null
+
+    private suspend fun homeDoc(): Document {
+        val c = homeCache
+        if (c != null && System.currentTimeMillis() - c.first < 60_000) return c.second
+        val d = app.get("$mainUrl/").document
+        homeCache = System.currentTimeMillis() to d
+        return d
+    }
+
+    // نبحث في الصفحة الرئيسية عن عنوان يحتوي الكلمة المفتاحية، ثم نصعد لأقرب حاوية فيها >= 3 روابط محتوى.
+    private suspend fun homeRow(keyword: String, label: String): List<SearchResponse> {
+        val doc = try {
+            homeDoc()
+        } catch (e: Exception) {
+            Log.d(tag, "homeRow '$label' fetch error: ${e.message}")
+            return emptyList()
+        }
+        val root = doc.selectFirst("main") ?: doc
+        val key = normAr(keyword)
+
+        fun matches(el: Element): Boolean {
+            val t = el.text().trim()
+            return t.isNotBlank() && t.length < 60 && normAr(t).contains(key)
+        }
+
+        // أولا العناوين الحقيقية، ثم عناصر class فيها title/heading (بدون عناوين الكروت)
+        val heading = root.select("h1, h2, h3, h4, h5").firstOrNull { matches(it) }
+            ?: root.select("[class*=title]:not([class*=card]), [class*=heading]:not([class*=card])")
+                .firstOrNull { matches(it) }
+
+        if (heading == null) {
+            Log.d(tag, "homeRow '$label': heading with '$keyword' NOT found")
+            return emptyList()
+        }
+
+        var container: Element = heading
+        var depth = 0
+        while (
+            depth < 6 &&
+            container.select("a[href*=/series/], a[href*=/episode/], a[href*=/movie/]").size < 3
+        ) {
+            container = container.parent() ?: break
+            depth++
+        }
+
+        val known = container.select("article.ftv-home-poster-card, article.ftv-tax-card")
+            .mapNotNull { it.toCardResult() }
+        val items = known.ifEmpty { parseGenericCards(container) }.distinctBy { it.url }
+
+        Log.d(tag, "homeRow '$label': heading='${heading.text().trim()}' depth=$depth known=${known.size} total=${items.size}")
+        return items
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        if (request.data.startsWith("HOMEROW::")) {
+            val items = homeRow(request.data.removePrefix("HOMEROW::"), request.name)
+            return newHomePageResponse(request.name, items, false)
+        }
+
         val isEpisodes = request.data.contains("/latest-episodes/")
 
         // request.data يمكن يحتوي أكثر من رابط مفصولين بـ | (نجرب التالي إذا الأول فارغ)
@@ -218,8 +287,8 @@ class FiveTVProvider : MainAPI() {
                 .mapNotNull { it.toCardResult() }
 
             val items = (
-                if (isEpisodes) parseGenericCards(doc).ifEmpty { known }
-                else known.ifEmpty { parseGenericCards(doc) }
+                if (isEpisodes) parseGenericCards(doc.selectFirst("main") ?: doc).ifEmpty { known }
+                else known.ifEmpty { parseGenericCards(doc.selectFirst("main") ?: doc) }
             ).distinctBy { it.url }
 
             val hasNext = doc.selectFirst("a.next.page-numbers") != null
@@ -353,6 +422,7 @@ class FiveTVProvider : MainAPI() {
         // 1) سيرفرات المشاهدة (مثبت): .ftv-media-servers [data-server-id] + data-server-url
         val watch = LinkedHashMap<String, String>()
         for (el in doc.select(".ftv-media-servers [data-server-id]")) {
+            Log.d(tag, "server attrs: " + el.attributes().joinToString(" ") { "${it.key}=${it.value.take(60)}" })
             val u = el.attr("data-server-url").trim()
             if (u.startsWith("http") && !watch.containsKey(u)) watch[u] = el.text().trim()
         }
@@ -392,17 +462,45 @@ class FiveTVProvider : MainAPI() {
         for ((link, label) in watch) {
             var ok = false
             try {
-                ok = if (link.contains("71stream.one", ignoreCase = true)) {
-                    load71Stream(link, callback)
+                if (link.contains("71stream.one", ignoreCase = true)) {
+                    ok = load71Stream(link, callback)
                 } else {
-                    loadExtractor(link, data, subtitleCallback, callback) ||
-                        genericScan(link, label, data, callback)
+                    // VidMoly: الدومين يتحول من .net إلى .biz (مثبت من المتصفح) فنجرب البدائل
+                    val variants = if (link.contains("vidmoly", ignoreCase = true)) {
+                        listOf(
+                            link,
+                            link.replace("vidmoly.net", "vidmoly.biz"),
+                            link.replace("vidmoly.net", "vidmoly.to")
+                        ).distinct()
+                    } else {
+                        listOf(link)
+                    }
+                    for (v in variants) {
+                        ok = loadExtractor(v, data, subtitleCallback, callback) ||
+                            genericScan(v, label, data, callback)
+                        Log.d(tag, "  try $v -> $ok")
+                        if (ok) break
+                    }
                 }
             } catch (e: Exception) {
                 Log.d(tag, "watch error $link: ${e.message}")
             }
             Log.d(tag, "watch '$label' $link -> $ok")
-            if (ok) loaded = true
+            if (ok) {
+                loaded = true
+            } else if (debugShowFailed) {
+                callback(
+                    newExtractorLink(
+                        source = "FiveTV ✗",
+                        name = "✗ ${label.ifBlank { link.substringAfter("://").substringBefore("/") }} (فشل الاستخراج)",
+                        url = link,
+                        type = ExtractorLinkType.VIDEO
+                    ) {
+                        referer = data
+                        quality = Qualities.Unknown.value
+                    }
+                )
+            }
         }
 
         // روابط التحميل: loadExtractor فقط (71Stream مغطى بصفحة الـ embed)
@@ -440,17 +538,7 @@ class FiveTVProvider : MainAPI() {
                 .find(appData)?.value
 
             if (m3u8 != null) {
-                callback(
-                    newExtractorLink(
-                        source = "71Stream",
-                        name = "71Stream HLS",
-                        url = m3u8,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        referer = link
-                        quality = Qualities.Unknown.value
-                    }
-                )
+                emitHls("71Stream", "71Stream HLS", m3u8, link, callback)
                 loaded = true
             }
 
@@ -509,6 +597,39 @@ class FiveTVProvider : MainAPI() {
         return loaded
     }
 
+    // HLS: نقرا الـ master playlist لنطلع كل جودة حقيقية (الجودة المكتوبة في الموقع ما هيش موثوقة)،
+    // وإذا فشل نرجع رابط واحد بجودة غير محددة.
+    private suspend fun emitHls(
+        source: String,
+        name: String,
+        url: String,
+        referer: String,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val links = try {
+            M3u8Helper.generateM3u8(source = name, streamUrl = url, referer = referer)
+        } catch (e: Exception) {
+            Log.d(tag, "generateM3u8 error: ${e.message}")
+            emptyList()
+        }
+        Log.d(tag, "emitHls $source: ${links.size} qualities")
+        if (links.isNotEmpty()) {
+            for (l in links) callback(l)
+            return
+        }
+        callback(
+            newExtractorLink(
+                source = source,
+                name = name,
+                url = url,
+                type = ExtractorLinkType.M3U8
+            ) {
+                this.referer = referer
+                quality = Qualities.Unknown.value
+            }
+        )
+    }
+
     // حل أخير لسيرفر ما له extractor: نقرأ صفحة الـ embed (ونفك eval packed إذا موجود) ونلقط روابط m3u8/mp4.
     // يغطي الأنماط الشائعة: رابط مباشر، file:"..."، hls2:"..."، مع مسارات نسبية.
     // ما ينجح مع الصفحات المحمية (Cloudflare) أو المشفرة بشكل آخر، وقتها يرجع false والـ Logcat يبين السبب.
@@ -563,17 +684,21 @@ class FiveTVProvider : MainAPI() {
 
         val name = label.ifBlank { host }
         for (u in found) {
-            callback(
-                newExtractorLink(
-                    source = name,
-                    name = name,
-                    url = u,
-                    type = if (u.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                ) {
-                    this.referer = link
-                    quality = Qualities.Unknown.value
-                }
-            )
+            if (u.contains(".m3u8", true)) {
+                emitHls(name, name, u, link, callback)
+            } else {
+                callback(
+                    newExtractorLink(
+                        source = name,
+                        name = name,
+                        url = u,
+                        type = ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = link
+                        quality = Qualities.Unknown.value
+                    }
+                )
+            }
         }
         return found.isNotEmpty()
     }
