@@ -68,15 +68,25 @@ class AsiaShowProvider : MainAPI() {
             response.text.contains("Just a moment", ignoreCase = true)
     }
 
-    /** طلب عادي، وإذا الموقع رجّع حماية Cloudflare نعاود بالـ interceptor */
+    // إذا حل Cloudflare بالـ WebView ما نجحش مرة (أو علق)، ما نعاودوش لبقية الجلسة
+    @Volatile
+    private var cfDisabled = false
+
+    /** طلب بمهلة 15 ثانية؛ إذا رجّع حماية Cloudflare نجرّب الـ interceptor مرة وحدة بمهلة 20 ثانية */
     private suspend fun fetch(
         url: String,
         referer: String? = mainUrl,
         headers: Map<String, String> = emptyMap()
     ): NiceResponse {
-        var response = app.get(url, referer = referer, headers = headers)
-        if (looksBlocked(response)) {
-            response = app.get(url, referer = referer, headers = headers, interceptor = cfKiller)
+        var response = withTimeoutOrNull(15_000L) {
+            app.get(url, referer = referer, headers = headers)
+        } ?: throw java.io.IOException("timeout: $url")
+
+        if (looksBlocked(response) && !cfDisabled) {
+            val solved = withTimeoutOrNull(20_000L) {
+                app.get(url, referer = referer, headers = headers, interceptor = cfKiller)
+            }
+            if (solved == null) cfDisabled = true else response = solved
         }
         return response
     }
@@ -312,11 +322,16 @@ class AsiaShowProvider : MainAPI() {
     }
 
     private suspend fun fetchHtmlList(url: String): List<SearchResponse> {
-        val response = fetchRetry(url) ?: return emptyList()
+        val response = fetchRetry(url, attempts = 1) ?: return emptyList()
         return parseCards(response.text)
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        return withTimeoutOrNull(60_000L) { loadMainPage(page, request) }
+            ?: newHomePageResponse(request.name, emptyList(), false)
+    }
+
+    private suspend fun loadMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val data = request.data
 
         if (data.startsWith("vx:")) {
