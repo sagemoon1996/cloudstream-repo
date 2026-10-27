@@ -1,7 +1,9 @@
 package com.sagemoon1996.asiashow
 
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.nicehttp.NiceResponse
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -14,6 +16,8 @@ import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 class AsiaShowProvider : MainAPI() {
 
@@ -49,6 +53,52 @@ class AsiaShowProvider : MainAPI() {
     )
     private val seasonRegex = Regex("""(?:الموسم|موسم|season)[-\s]*(\d+)""", RegexOption.IGNORE_CASE)
     private val episodeRegex = Regex("""(?:الحلقة|حلقة|episode|ep)[-\s]*(\d+)""", RegexOption.IGNORE_CASE)
+    private val backgroundRegex = Regex("""url\(\s*['"]?([^'")\s]+)['"]?\s*\)""")
+
+    private val ajaxHeaders = mapOf("X-Requested-With" to "XMLHttpRequest", "Accept" to "*/*")
+
+    private val posterCache = ConcurrentHashMap<String, String>()
+    private val cfKiller by lazy { CloudflareKiller() }
+
+    // ───────────────────────── network ─────────────────────────
+
+    private fun looksBlocked(response: NiceResponse): Boolean {
+        return response.code == 403 ||
+            response.code == 503 ||
+            response.text.contains("Just a moment", ignoreCase = true)
+    }
+
+    /** طلب عادي، وإذا الموقع رجّع حماية Cloudflare نعاود بالـ interceptor */
+    private suspend fun fetch(
+        url: String,
+        referer: String? = mainUrl,
+        headers: Map<String, String> = emptyMap()
+    ): NiceResponse {
+        var response = app.get(url, referer = referer, headers = headers)
+        if (looksBlocked(response)) {
+            response = app.get(url, referer = referer, headers = headers, interceptor = cfKiller)
+        }
+        return response
+    }
+
+    /** محاولتان، ونرجّع null إذا فشلتا */
+    private suspend fun fetchRetry(
+        url: String,
+        referer: String? = mainUrl,
+        headers: Map<String, String> = emptyMap(),
+        attempts: Int = 2
+    ): NiceResponse? {
+        repeat(attempts) {
+            try {
+                val response = fetch(url, referer, headers)
+                if (response.code in 200..299) return response
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
+        }
+        return null
+    }
 
     // ───────────────────────── helpers ─────────────────────────
 
@@ -66,17 +116,30 @@ class AsiaShowProvider : MainAPI() {
         }
     }
 
-    private fun imageOf(element: Element?): String? {
-        val img = element?.selectFirst("img.etk-card-img") ?: element?.selectFirst("img") ?: return null
-        val src = img.attr("data-src")
-            .ifBlank { img.attr("data-lazy-src") }
-            .ifBlank { img.attr("src") }
-            .trim()
+    private fun normalizeImage(src: String): String? {
         return when {
             src.startsWith("http") -> src
             src.startsWith("//") -> "https:$src"
+            src.startsWith("/") -> "$mainUrl$src"
             else -> null
         }
+    }
+
+    private fun imageOf(element: Element?): String? {
+        if (element == null) return null
+
+        val img = element.selectFirst("img.etk-card-img") ?: element.selectFirst("img")
+        if (img != null) {
+            val src = img.attr("data-src")
+                .ifBlank { img.attr("data-lazy-src") }
+                .ifBlank { img.attr("src") }
+                .ifBlank { img.attr("srcset").trim().substringBefore(" ") }
+                .trim()
+            normalizeImage(src)?.let { return it }
+        }
+
+        val style = element.selectFirst("[style*=background-image]")?.attr("style").orEmpty()
+        return backgroundRegex.find(style)?.groupValues?.get(1)?.let { normalizeImage(it) }
     }
 
     private fun normalizeUrl(url: String): String {
@@ -226,29 +289,31 @@ class AsiaShowProvider : MainAPI() {
     }
 
     private suspend fun fetchAjaxList(key: String, page: Int, sectionUrl: String): List<SearchResponse> {
-        val url = ajaxUrl(key, page) ?: return emptyList()
-        return try {
-            val response = app.get(
-                url,
-                referer = sectionUrl,
-                headers = mapOf("X-Requested-With" to "XMLHttpRequest", "Accept" to "*/*")
-            )
-            if (response.code !in 200..299) emptyList() else parseCards(response.text)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            emptyList()
+        val base = ajaxUrl(key, page) ?: return emptyList()
+
+        // المحاولة الثانية تزيد __offset و__exclude (موجودين في طلبات الموقع الأصلية)
+        val variants = listOf(base, "$base&__offset=${(page - 1) * 40}&__exclude=")
+
+        for (variant in variants) {
+            val response = try {
+                fetch(variant, sectionUrl, ajaxHeaders)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
+
+            if (response != null && response.code in 200..299) {
+                val items = parseCards(response.text)
+                if (items.isNotEmpty()) return items
+            }
         }
+        return emptyList()
     }
 
     private suspend fun fetchHtmlList(url: String): List<SearchResponse> {
-        return try {
-            parseCards(app.get(url, referer = mainUrl).text)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            emptyList()
-        }
+        val response = fetchRetry(url) ?: return emptyList()
+        return parseCards(response.text)
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -275,14 +340,10 @@ class AsiaShowProvider : MainAPI() {
 
     // ───────────────────────── search ─────────────────────────
 
-    private val posterCache = java.util.concurrent.ConcurrentHashMap<String, String>()
-
     private suspend fun fetchPoster(url: String): String? {
         posterCache[url]?.let { return it }
         return try {
-            val document = withTimeoutOrNull(8_000L) {
-                app.get(url, referer = mainUrl).document
-            }
+            val document = withTimeoutOrNull(8_000L) { fetchRetry(url, attempts = 1)?.document }
             val poster = document?.selectFirst("meta[property=og:image]")?.attr("content")?.trim()
                 ?.takeIf { it.startsWith("http") }
                 ?: document?.selectFirst("img[src*='image.tmdb.org/t/p/w500']")?.attr("src")?.trim()
@@ -305,7 +366,7 @@ class AsiaShowProvider : MainAPI() {
             "&post_types=${URLEncoder.encode(searchPostTypes, "UTF-8")}"
 
         return try {
-            val response = app.get(url, referer = mainUrl)
+            val response = fetchRetry(url, mainUrl, ajaxHeaders) ?: return emptyList()
             val data = JSONObject(response.text).optJSONArray("data") ?: return emptyList()
 
             val results = buildList {
@@ -338,6 +399,7 @@ class AsiaShowProvider : MainAPI() {
                 }
             }.distinctBy { it.url }
 
+            // البحث ما يرجّعش بوسترات: نجيبها من صفحة كل نتيجة (أول 15) بالتوازي
             coroutineScope {
                 results.take(15)
                     .filter { it.posterUrl.isNullOrBlank() }
@@ -368,7 +430,7 @@ class AsiaShowProvider : MainAPI() {
             return load(seriesUrl)
         }
 
-        val document = app.get(url, referer = mainUrl).document
+        val document = (fetchRetry(url) ?: return null).document
 
         val title = document.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
             ?.replace(Regex("""\s*[–—-]\s*(?:اسيا|آسيا)\s*شو.*$"""), "")
@@ -472,19 +534,52 @@ class AsiaShowProvider : MainAPI() {
             mime.contains("mpegurl", true)
     }
 
-    private suspend fun emit(
+    /** HLS: نحاول نفرّق الجودات من الـmaster، وإذا فشل نرجّع الرابط كما هو */
+    private suspend fun emitMedia(
         source: String,
         mediaUrl: String,
         referer: String,
         mime: String,
         callback: (ExtractorLink) -> Unit
     ) {
+        if (isHls(mediaUrl, mime)) {
+            val variants = try {
+                M3u8Helper.generateM3u8(
+                    source = source,
+                    streamUrl = mediaUrl,
+                    referer = referer
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                emptyList()
+            }
+
+            if (variants.isNotEmpty()) {
+                variants.forEach { callback(it) }
+                return
+            }
+
+            callback(
+                newExtractorLink(
+                    source = source,
+                    name = source,
+                    url = mediaUrl,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = referer
+                    this.quality = Qualities.Unknown.value
+                }
+            )
+            return
+        }
+
         callback(
             newExtractorLink(
                 source = source,
                 name = source,
                 url = mediaUrl,
-                type = if (isHls(mediaUrl, mime)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                type = ExtractorLinkType.VIDEO
             ) {
                 this.referer = referer
                 this.quality = Qualities.Unknown.value
@@ -497,15 +592,15 @@ class AsiaShowProvider : MainAPI() {
         pageReferer: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(embedUrl, referer = pageReferer).document
-        val raw = document.selectFirst("#app")?.attr("data-page")?.takeIf { it.isNotBlank() }
+        val response = fetchRetry(embedUrl, pageReferer) ?: return false
+        val raw = response.document.selectFirst("#app")?.attr("data-page")?.takeIf { it.isNotBlank() }
             ?: return false
 
         val props = JSONObject(raw).optJSONObject("props") ?: return false
         val mediaUrl = findString(props, "url", true) ?: return false
         val mime = findString(props, "mime", false).orEmpty()
 
-        emit("71stream", mediaUrl, "https://71stream.one/", mime, callback)
+        emitMedia("71stream", mediaUrl, "https://71stream.one/", mime, callback)
         return true
     }
 
@@ -514,7 +609,7 @@ class AsiaShowProvider : MainAPI() {
         pageReferer: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val response = app.get(embedUrl, referer = pageReferer)
+        val response = fetchRetry(embedUrl, pageReferer) ?: return false
         val document = response.document
 
         val mediaUrl = (document.selectFirst("video#playbob-video[data-link]")
@@ -523,7 +618,7 @@ class AsiaShowProvider : MainAPI() {
             ?.takeIf { it.startsWith("http") }
             ?: return false
 
-        emit("Ult4vid", mediaUrl, originOf(response.url), "", callback)
+        emitMedia("Ult4vid", mediaUrl, originOf(response.url), "", callback)
         return true
     }
 
@@ -532,7 +627,7 @@ class AsiaShowProvider : MainAPI() {
         pageReferer: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val response = app.get(embedUrl, referer = pageReferer)
+        val response = fetchRetry(embedUrl, pageReferer) ?: return false
         var html = response.text
 
         if (html.contains("eval(function(p,a,c,k,e")) {
@@ -545,7 +640,8 @@ class AsiaShowProvider : MainAPI() {
 
         val finalUrl = response.url
         val origin = originOf(finalUrl)
-        val label = hostOf(finalUrl).removePrefix("www.").substringBeforeLast('.').ifBlank { "Server" }
+        val label = hostOf(finalUrl).removePrefix("www.").substringBeforeLast('.')
+            .ifBlank { "Server" }
             .replaceFirstChar { it.uppercase() }
 
         val absolute = Regex(
@@ -555,10 +651,14 @@ class AsiaShowProvider : MainAPI() {
         val relative = Regex("""["'](/[^"'\s<>]+\.m3u8[^"'\s<>]*)["']""")
             .findAll(html).map { origin.trimEnd('/') + it.groupValues[1] }.toList()
 
-        val all = (absolute + relative).distinct()
+        var all = (absolute + relative).distinct()
         if (all.isEmpty()) return false
 
-        all.forEach { emit(label, it, origin, "", callback) }
+        // إذا لقينا master نكتفي بيه ونتجاهل playlists الفرعية (index-...)
+        val masters = all.filter { it.contains("master", true) }
+        if (masters.isNotEmpty()) all = masters
+
+        all.forEach { emitMedia(label, it, origin, "", callback) }
         return true
     }
 
@@ -568,9 +668,9 @@ class AsiaShowProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        var got = false
+        val got = AtomicBoolean(false)
         val tracking: (ExtractorLink) -> Unit = { link ->
-            got = true
+            got.set(true)
             callback(link)
         }
 
@@ -586,8 +686,24 @@ class AsiaShowProvider : MainAPI() {
         } catch (_: Exception) {
         }
 
-        if (got) return true
+        if (got.get()) return true
         return scrapeGeneric(serverUrl, pageReferer, callback)
+    }
+
+    private suspend fun extractServer(
+        serverUrl: String,
+        pageUrl: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val host = hostOf(serverUrl)
+        return when {
+            host.contains("71stream") -> load71stream(serverUrl, pageUrl, callback)
+            host.contains("ult4vid") || host.contains("ultra4vid") ->
+                loadUlt4vid(serverUrl, pageUrl, callback)
+
+            else -> loadOther(serverUrl, pageUrl, subtitleCallback, callback)
+        }
     }
 
     override suspend fun loadLinks(
@@ -599,13 +715,7 @@ class AsiaShowProvider : MainAPI() {
         val pageUrl = data.trim()
         if (!pageUrl.startsWith("http")) return false
 
-        val document = try {
-            app.get(pageUrl, referer = mainUrl).document
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            return false
-        }
+        val document = (fetchRetry(pageUrl) ?: return false).document
 
         val servers = document
             .select("[data-etk-server-btn][data-etk-src]")
@@ -614,29 +724,29 @@ class AsiaShowProvider : MainAPI() {
 
         if (servers.isEmpty()) return false
 
-        var found = false
+        val found = AtomicBoolean(false)
         val tracking: (ExtractorLink) -> Unit = { link ->
-            found = true
+            found.set(true)
             callback(link)
         }
 
-        for (server in servers) {
-            val host = hostOf(server)
-            try {
-                when {
-                    host.contains("71stream") -> load71stream(server, pageUrl, tracking)
-                    host.contains("ult4vid") || host.contains("ultra4vid") ->
-                        loadUlt4vid(server, pageUrl, tracking)
-
-                    else -> loadOther(server, pageUrl, subtitleCallback, tracking)
+        // كل السيرفرات بالتوازي، وكل واحد له مهلة 30 ثانية؛ الفاشل ما يعطّلش الباقي
+        coroutineScope {
+            servers.map { server ->
+                async {
+                    try {
+                        withTimeoutOrNull(30_000L) {
+                            extractServer(server, pageUrl, subtitleCallback, tracking)
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        null
+                    }
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                // سيرفر فاشل: نكمل للسيرفر اللي بعده
-            }
+            }.awaitAll()
         }
 
-        return found
+        return found.get()
     }
 }
