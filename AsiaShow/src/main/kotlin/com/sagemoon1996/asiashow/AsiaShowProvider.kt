@@ -8,6 +8,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
@@ -72,14 +74,22 @@ class AsiaShowProvider : MainAPI() {
     @Volatile
     private var cfDisabled = false
 
+    private val gate = Semaphore(3)
+
+    // كاش للصفحة الرئيسية: 10 دقائق، ونرجّعو حتى لو منتهي إذا الطلب الجديد فشل
+    private val pageCache = ConcurrentHashMap<String, Pair<Long, HomePageResponse>>()
+
     /** طلب بمهلة 15 ثانية؛ إذا رجّع حماية Cloudflare نجرّب الـ interceptor مرة وحدة بمهلة 20 ثانية */
     private suspend fun fetch(
         url: String,
         referer: String? = mainUrl,
         headers: Map<String, String> = emptyMap()
     ): NiceResponse {
-        var response = withTimeoutOrNull(15_000L) {
-            app.get(url, referer = referer, headers = headers)
+        // 3 طلبات فقط في نفس الوقت للموقع: الصفحة الرئيسية تطلب 8 أقسام مرة وحدة وتقدر تتعطّل بسببها
+        var response = gate.withPermit {
+            withTimeoutOrNull(20_000L) {
+                app.get(url, referer = referer, headers = headers)
+            }
         } ?: throw java.io.IOException("timeout: $url")
 
         if (looksBlocked(response) && !cfDisabled) {
@@ -322,13 +332,23 @@ class AsiaShowProvider : MainAPI() {
     }
 
     private suspend fun fetchHtmlList(url: String): List<SearchResponse> {
-        val response = fetchRetry(url, attempts = 1) ?: return emptyList()
+        val response = fetchRetry(url, attempts = 2) ?: return emptyList()
         return parseCards(response.text)
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        return withTimeoutOrNull(60_000L) { loadMainPage(page, request) }
-            ?: newHomePageResponse(request.name, emptyList(), false)
+        val key = "${request.data}#$page"
+        val now = System.currentTimeMillis()
+        val cached = pageCache[key]
+        if (cached != null && now - cached.first < 10 * 60_000L) return cached.second
+
+        val fresh = withTimeoutOrNull(100_000L) { loadMainPage(page, request) }
+        if (fresh != null && fresh.items.any { it.list.isNotEmpty() }) {
+            pageCache[key] = now to fresh
+            return fresh
+        }
+
+        return cached?.second ?: fresh ?: newHomePageResponse(request.name, emptyList(), false)
     }
 
     private suspend fun loadMainPage(page: Int, request: MainPageRequest): HomePageResponse {
