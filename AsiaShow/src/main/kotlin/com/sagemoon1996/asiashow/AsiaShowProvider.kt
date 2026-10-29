@@ -8,7 +8,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
@@ -64,41 +66,109 @@ class AsiaShowProvider : MainAPI() {
 
     // ───────────────────────── network ─────────────────────────
 
+    /** صفحة تحدّي Cloudflare: "Just a moment" أو "Performing security verification" */
     private fun looksBlocked(response: NiceResponse): Boolean {
-        return response.code == 403 ||
-            response.code == 503 ||
-            response.text.contains("Just a moment", ignoreCase = true)
+        if (response.code == 403 || response.code == 503) return true
+        val text = response.text
+        return text.contains("Just a moment", ignoreCase = true) ||
+            text.contains("Performing security verification", ignoreCase = true) ||
+            text.contains("Attention Required", ignoreCase = true)
     }
 
-    // إذا حل Cloudflare بالـ WebView ما نجحش مرة (أو علق)، ما نعاودوش لبقية الجلسة
+    // حالة Cloudflare: نحلّو بالـ WebView مرة وحدة (تحت قفل)، والباقي يستعمل الكوكي المحفوظة
     @Volatile
-    private var cfDisabled = false
+    private var cfSolved = false
+
+    @Volatile
+    private var cfCooldownUntil = 0L
+
+    private val cfMutex = Mutex()
+
+    // اختياري (احتياط للتلفزة إذا الـ WebView ما خدمش): كوكي cf_clearance والـ User-Agent من نفس المتصفح ونفس الشبكة
+    private val manualCookie = ""
+    private val manualUserAgent = ""
 
     private val gate = Semaphore(3)
 
     // كاش للصفحة الرئيسية: 10 دقائق، ونرجّعو حتى لو منتهي إذا الطلب الجديد فشل
     private val pageCache = ConcurrentHashMap<String, Pair<Long, HomePageResponse>>()
 
-    /** طلب بمهلة 15 ثانية؛ إذا رجّع حماية Cloudflare نجرّب الـ interceptor مرة وحدة بمهلة 20 ثانية */
+    private fun withManual(headers: Map<String, String>): Map<String, String> {
+        if (manualCookie.isBlank() && manualUserAgent.isBlank()) return headers
+        return headers.toMutableMap().apply {
+            if (manualCookie.isNotBlank()) put("Cookie", "cf_clearance=$manualCookie")
+            if (manualUserAgent.isNotBlank()) put("User-Agent", manualUserAgent)
+        }
+    }
+
+    /**
+     * 1) إذا Cloudflare اتحلّ: نستعمل الـ interceptor (يزيد الكوكي المحفوظة).
+     * 2) طلب عادي؛ إذا رجع تحدّي، نحلّو بالـ WebView مرة وحدة بمهلة 60 ثانية والباقي ينتظر.
+     * 3) إذا فشل الحل، ما نعاودوش لمدة دقيقتين باش ما نعلّقوش التطبيق.
+     */
     private suspend fun fetch(
         url: String,
         referer: String? = mainUrl,
         headers: Map<String, String> = emptyMap()
     ): NiceResponse {
-        // 3 طلبات فقط في نفس الوقت للموقع: الصفحة الرئيسية تطلب 8 أقسام مرة وحدة وتقدر تتعطّل بسببها
-        var response = gate.withPermit {
-            withTimeoutOrNull(20_000L) {
+        // سيرفرات الفيديو (71stream وغيرها): طلب عادي، بدون Cloudflare ولا قفل
+        if (!hostOf(url).endsWith("asiashow.net")) {
+            return withTimeoutOrNull(20_000L) {
                 app.get(url, referer = referer, headers = headers)
+            } ?: throw java.io.IOException("timeout: $url")
+        }
+
+        val h = withManual(headers)
+
+        if (cfSolved) {
+            val viaKiller = gate.withPermit {
+                withTimeoutOrNull(25_000L) {
+                    app.get(url, referer = referer, headers = h, interceptor = cfKiller)
+                }
+            }
+            if (viaKiller != null && !looksBlocked(viaKiller)) return viaKiller
+            cfSolved = false // الكوكي انتهت
+        }
+
+        // 3 طلبات فقط في نفس الوقت للموقع
+        val plain = gate.withPermit {
+            withTimeoutOrNull(20_000L) {
+                app.get(url, referer = referer, headers = h)
             }
         } ?: throw java.io.IOException("timeout: $url")
 
-        if (looksBlocked(response) && !cfDisabled) {
-            val solved = withTimeoutOrNull(20_000L) {
-                app.get(url, referer = referer, headers = headers, interceptor = cfKiller)
-            }
-            if (solved == null) cfDisabled = true else response = solved
+        if (!looksBlocked(plain)) return plain
+
+        if (System.currentTimeMillis() < cfCooldownUntil) {
+            throw java.io.IOException("cloudflare blocked (cooldown)")
         }
-        return response
+
+        var firstResult: NiceResponse? = null
+        cfMutex.withLock {
+            if (!cfSolved) {
+                val solved = withTimeoutOrNull(60_000L) {
+                    app.get(url, referer = referer, headers = h, interceptor = cfKiller)
+                }
+                if (solved != null && !looksBlocked(solved)) {
+                    cfSolved = true
+                    firstResult = solved
+                } else {
+                    cfCooldownUntil = System.currentTimeMillis() + 120_000L
+                }
+            }
+        }
+
+        firstResult?.let { return it }
+        if (!cfSolved) throw java.io.IOException("cloudflare blocked")
+
+        val retry = gate.withPermit {
+            withTimeoutOrNull(25_000L) {
+                app.get(url, referer = referer, headers = h, interceptor = cfKiller)
+            }
+        } ?: throw java.io.IOException("timeout: $url")
+
+        if (looksBlocked(retry)) throw java.io.IOException("cloudflare blocked")
+        return retry
     }
 
     /** محاولتان، ونرجّع null إذا فشلتا */
