@@ -62,7 +62,8 @@ class AsiaShowProvider : MainAPI() {
     private val ajaxHeaders = mapOf("X-Requested-With" to "XMLHttpRequest", "Accept" to "*/*")
 
     private val posterCache = ConcurrentHashMap<String, String>()
-    private val cfKiller by lazy { CloudflareKiller() }
+    @Volatile
+    private var cfKiller = CloudflareKiller()
 
     // ───────────────────────── network ─────────────────────────
 
@@ -127,7 +128,10 @@ class AsiaShowProvider : MainAPI() {
                 }
             }
             if (viaKiller != null && !looksBlocked(viaKiller)) return viaKiller
-            cfSolved = false // الكوكي انتهت
+            // الكوكي المحفوظة انتهت: CloudflareKiller ما يجدّدهاش وحدو، فنبدّلو بنسخة جديدة باش يعاود الحل
+            cfSolved = false
+            cfKiller = CloudflareKiller()
+            cfCooldownUntil = 0L
         }
 
         // 3 طلبات فقط في نفس الوقت للموقع
@@ -146,6 +150,7 @@ class AsiaShowProvider : MainAPI() {
         var firstResult: NiceResponse? = null
         cfMutex.withLock {
             if (!cfSolved) {
+                cfKiller = CloudflareKiller()
                 val solved = withTimeoutOrNull(60_000L) {
                     app.get(url, referer = referer, headers = h, interceptor = cfKiller)
                 }
@@ -153,7 +158,7 @@ class AsiaShowProvider : MainAPI() {
                     cfSolved = true
                     firstResult = solved
                 } else {
-                    cfCooldownUntil = System.currentTimeMillis() + 120_000L
+                    cfCooldownUntil = System.currentTimeMillis() + 45_000L
                 }
             }
         }
@@ -188,6 +193,24 @@ class AsiaShowProvider : MainAPI() {
             }
         }
         return null
+    }
+
+    /** للصفحات اللي لازمين لها نتيجة (تفاصيل/روابط): إذا فشلت نرمي خطأ فيه السبب باش يظهر في التطبيق */
+    private suspend fun fetchPage(url: String): NiceResponse {
+        var reason = "unknown"
+        for (attempt in 1..2) {
+            try {
+                val response = fetch(url)
+                if (response.code in 200..299) return response
+                reason = "HTTP ${response.code}"
+                if (response.code == 404) break
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                reason = e.message ?: e.javaClass.simpleName
+            }
+        }
+        throw ErrorLoadingException("AsiaShow: $reason\n$url")
     }
 
     // ───────────────────────── helpers ─────────────────────────
@@ -259,8 +282,8 @@ class AsiaShowProvider : MainAPI() {
 
     private fun seriesSlugFromEpisodeSlug(episodeSlug: String): String {
         return episodeSlug
-            .replace(Regex("""-(?:الحلقة|حلقة)-?\d+$"""), "")
-            .replace(Regex("""-(?:الموسم|موسم)-?\d+$"""), "")
+            .replace(Regex("""-(?:الحلقة|حلقة|episode|ep)-?\d+.*$""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""-(?:الموسم|موسم|season)-?\d+.*$""", RegexOption.IGNORE_CASE), "")
     }
 
     private fun seriesUrlFromEpisodeUrl(episodeUrl: String): String? {
@@ -269,6 +292,26 @@ class AsiaShowProvider : MainAPI() {
         val seriesSlug = seriesSlugFromEpisodeSlug(episodeSlug)
         if (seriesSlug.isBlank() || seriesSlug == episodeSlug) return null
         return "$mainUrl/series/" + URLEncoder.encode(seriesSlug, "UTF-8").replace("+", "%20") + "/"
+    }
+
+    /** نجيب رابط المسلسل الحقيقي من صفحة الحلقة، وإذا فشل نستعمل الاستنتاج من الـslug */
+    private suspend fun resolveSeriesUrl(episodeUrl: String): String? {
+        val derived = seriesUrlFromEpisodeUrl(episodeUrl)
+        val episodeSlug = slugOf(episodeUrl, "episodes")
+        val document = fetchRetry(episodeUrl)?.document ?: return derived
+
+        val candidates = document.select("a[href*='/series/']").mapNotNull { link ->
+            val href = hrefOf(link)
+            val slug = slugOf(href, "series")
+            if (slug.isBlank()) null else normalizeUrl(href) to slug
+        }
+
+        return candidates
+            .filter { episodeSlug.startsWith(it.second) }
+            .maxByOrNull { it.second.length }
+            ?.first
+            ?: derived
+            ?: candidates.firstOrNull()?.first
     }
 
     private fun hostOf(url: String): String {
@@ -340,10 +383,19 @@ class AsiaShowProvider : MainAPI() {
             }
 
             rawUrl.contains("/episodes/", true) -> {
-                val seriesUrl = seriesUrlFromEpisodeUrl(rawUrl) ?: return null
+                val episodeSlug = slugOf(rawUrl, "episodes")
+                val derivedSlug = seriesSlugFromEpisodeSlug(episodeSlug)
+
+                // نخلّيو رابط الحلقة، وload() يجيب المسلسل الحقيقي من صفحتها (الـslug المستنتج ممكن يكون غالط)
+                val targetUrl = normalizeUrl(rawUrl)
+
                 val title = rawTitle.replace(episodeTitleSuffix, "").trim()
+                    .ifBlank { derivedSlug.replace('-', ' ').trim() }
+                    .ifBlank { rawTitle }
+                    .ifBlank { episodeSlug.replace('-', ' ').trim() }
                 if (title.isBlank()) return null
-                newTvSeriesSearchResponse(title, seriesUrl, TvType.TvSeries) {
+
+                newTvSeriesSearchResponse(title, targetUrl, TvType.TvSeries) {
                     this.posterUrl = poster
                 }
             }
@@ -529,19 +581,32 @@ class AsiaShowProvider : MainAPI() {
         val index: Int
     )
 
+    /** إذا فشل التحميل: نعرض السبب في صفحة العمل نفسها (ما نقدروش نقراو الـlogcat من التلفزة) */
+    private suspend fun failureResponse(url: String, reason: String?): LoadResponse {
+        val text = reason?.lineSequence()?.firstOrNull()?.trim().orEmpty().ifBlank { "unknown" }
+        return newMovieLoadResponse("⚠ تعذّر التحميل: $text", url, TvType.Movie, url) {
+            this.plot = "AsiaShow\n$text\n$url"
+        }
+    }
+
     override suspend fun load(url: String): LoadResponse? {
         if (url.contains("/episodes/", true)) {
-            val seriesUrl = seriesUrlFromEpisodeUrl(url) ?: return null
+            val seriesUrl = resolveSeriesUrl(url)
+                ?: return failureResponse(url, "series not found for episode")
             return load(seriesUrl)
         }
 
-        val document = (fetchRetry(url) ?: return null).document
+        val document = try {
+            fetchPage(url).document
+        } catch (e: ErrorLoadingException) {
+            return failureResponse(url, e.message)
+        }
 
         val title = document.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
             ?.replace(Regex("""\s*[–—-]\s*(?:اسيا|آسيا)\s*شو.*$"""), "")
             ?.takeIf { it.isNotBlank() }
             ?: document.selectFirst("h1")?.text()?.trim()?.takeIf { it.isNotBlank() }
-            ?: return null
+            ?: return failureResponse(url, "no title in page")
 
         val poster = document.selectFirst("meta[property=og:image]")?.attr("content")?.trim()
             ?.takeIf { it.startsWith("http") }
